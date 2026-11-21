@@ -67,6 +67,57 @@ type SandboxConfig struct {
 	MemoryCapMB  int
 	CPULimit     float64
 	DropCaps     []string
+
+	// ReadOnlyRoots are host-declared toolchain directories (#722) that
+	// commands may read and execute but never write. Each is a clean
+	// absolute path in its canonical spelling. The host runtime refuses it.
+	ReadOnlyRoots []string
+	// DeveloperDirectory opts in to the macOS developer tools (#722): "" is
+	// off; otherwise a canonical directory declared like ReadOnlyRoots, and
+	// commands also get the fixed settings EffectiveEnv lists. The host
+	// runtime refuses it.
+	DeveloperDirectory string
+	// Env sets host-chosen variables from a closed table (#722): GOMODCACHE
+	// (a clean absolute path in a declared root), GOPROXY=off,
+	// GOTOOLCHAIN=local and GOFLAGS=-buildvcs=false. Any other name or value,
+	// or a repeated name, is refused. The host runtime refuses it.
+	Env []SandboxEnv
+	// TempEnv names variables pointed into each command's private temp
+	// (#722), from a closed table: GOCACHE is <private temp>/gocache. The
+	// host runtime refuses it.
+	TempEnv []string
+}
+
+// SandboxEnv is one SandboxConfig.Env variable.
+type SandboxEnv struct{ Name, Value string }
+
+// Clone returns a deep copy of c: no slice of the result shares its backing
+// array with c, so a caller's later mutation never reaches the copy.
+func (c SandboxConfig) Clone() SandboxConfig {
+	c.DropCaps = slices.Clone(c.DropCaps)
+	c.ReadOnlyRoots = slices.Clone(c.ReadOnlyRoots)
+	c.Env = slices.Clone(c.Env)
+	c.TempEnv = slices.Clone(c.TempEnv)
+	return c
+}
+
+// EffectiveEnv returns, sorted as NAME=value, every variable the backend
+// adds: Env, each TempEnv name under privateTemp, and the fixed git and
+// python settings when DeveloperDirectory is set. Display passes
+// "<private temp>"; a backend passes the command's real directory.
+func (c SandboxConfig) EffectiveEnv(privateTemp string) []string {
+	var env []string
+	for _, e := range c.Env {
+		env = append(env, e.Name+"="+e.Value)
+	}
+	for _, name := range c.TempEnv {
+		env = append(env, name+"="+privateTemp+"/"+sandboxTempEnv[name])
+	}
+	if c.DeveloperDirectory != "" {
+		env = append(env, developerDirectoryEnv...)
+	}
+	slices.Sort(env)
+	return env
 }
 
 func (c SandboxConfig) isHost() bool {
@@ -136,13 +187,13 @@ const approvalStateChanged = "approval state changed; retry"
 
 // newNetworkVariant returns the variant for a backend bound to the
 // normalized cfg: nil unless cfg is a non-host runtime that allows network.
-// The denied copy owns its DropCaps.
+// The denied copy owns its slices.
 func newNetworkVariant(cfg SandboxConfig) *networkVariant {
 	if cfg.isHost() || !cfg.AllowNetwork {
 		return nil
 	}
+	cfg = cfg.Clone()
 	cfg.AllowNetwork = false
-	cfg.DropCaps = slices.Clone(cfg.DropCaps)
 	return &networkVariant{cfg: cfg, build: newExecBackend, suspended: agent.ApprovalsSuspended}
 }
 
@@ -210,11 +261,22 @@ func (s sandboxApproval) validateWorkspace(root string) error {
 // the same labeled, NUL-separated style as commandFingerprint. It accepts
 // only a normalized config (caps sorted and de-duplicated, runtime and
 // capability names control-character-free).
+//
+// The #722 fields are written only when set, so every earlier key is
+// unchanged. Each is a labeled section (a list as label, count, items) placed
+// before drop_caps: the caps are the unframed tail, and anything after them
+// could be forged by capability names.
 func sandboxFingerprint(cfg SandboxConfig) string {
 	h := sha256.New()
 	write := func(s string) {
 		_, _ = h.Write([]byte(s))
 		_, _ = h.Write([]byte{0})
+	}
+	list := func(label string, n int) {
+		if n > 0 {
+			write(label)
+			write(strconv.Itoa(n))
+		}
 	}
 	write("runtime")
 	write(string(cfg.Runtime))
@@ -224,6 +286,23 @@ func sandboxFingerprint(cfg SandboxConfig) string {
 	write(strconv.Itoa(cfg.MemoryCapMB))
 	write("cpu_limit")
 	write(strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64))
+	list("read_only_roots", len(cfg.ReadOnlyRoots))
+	for _, root := range cfg.ReadOnlyRoots {
+		write(root)
+	}
+	if cfg.DeveloperDirectory != "" {
+		write("developer_directory")
+		write(cfg.DeveloperDirectory)
+	}
+	list("env", len(cfg.Env))
+	for _, e := range cfg.Env {
+		write(e.Name)
+		write(e.Value)
+	}
+	list("temp_env", len(cfg.TempEnv))
+	for _, name := range cfg.TempEnv {
+		write(name)
+	}
 	write("drop_caps")
 	for _, name := range cfg.DropCaps {
 		write(name)
@@ -280,11 +359,7 @@ func renderSandboxLine(cfg SandboxConfig) string {
 		cpu = strconv.FormatFloat(cfg.CPULimit, 'g', -1, 64)
 	}
 	if len(cfg.DropCaps) > 0 {
-		quoted := make([]string, len(cfg.DropCaps))
-		for i, name := range cfg.DropCaps {
-			quoted[i] = strconv.QuoteToGraphic(name)
-		}
-		caps = "[" + strings.Join(quoted, ",") + "]"
+		caps = quoteList(cfg.DropCaps)
 	}
 	line := fmt.Sprintf(
 		"runtime=%s network=%s memory_cap=%s cpu_limit=%s drop_caps=%s",
@@ -309,7 +384,29 @@ func renderSandboxLine(cfg SandboxConfig) string {
 	case SandboxRuntimeBwrap:
 		line += " git_metadata=ro(existing)"
 	}
+	// Declared toolchain (#722): each field renders only when set, so earlier
+	// previews are unchanged. Env shows every variable the command gets, with
+	// its value.
+	if len(cfg.ReadOnlyRoots) > 0 {
+		line += " read_only_roots=" + quoteList(cfg.ReadOnlyRoots)
+	}
+	if cfg.DeveloperDirectory != "" {
+		line += " developer_directory=" + strconv.QuoteToGraphic(cfg.DeveloperDirectory)
+	}
+	if env := cfg.EffectiveEnv("<private temp>"); len(env) > 0 {
+		line += " env=" + quoteList(env)
+	}
 	return line
+}
+
+// quoteList renders items as a bracketed, comma-separated list of quoted
+// strings, so no item can forge a delimiter.
+func quoteList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = strconv.QuoteToGraphic(s)
+	}
+	return "[" + strings.Join(quoted, ",") + "]"
 }
 
 // newExecBackend is the sole runtime-selection switch (#440). It normalizes
@@ -346,10 +443,12 @@ func newExecBackend(cfg SandboxConfig) (resolvedExecBackend, error) {
 
 // normalizeSandboxConfig validates and canonicalizes a caller-supplied
 // config: it bounds-checks memory and CPU, rejects unsafe runtime and
-// capability names, canonicalizes the empty runtime to host, deep-copies,
-// sorts, and de-duplicates DropCaps, and rejects host plus any requested
-// constraint. The returned config owns its DropCaps backing array; the same
-// frozen value backs backend construction, approval identity, and previews.
+// capability names, checks the #722 fields (validateToolchainFields),
+// canonicalizes the empty runtime to host, deep-copies every slice, sorts
+// DropCaps and ReadOnlyRoots and removes their repeats, sorts Env by name and
+// TempEnv, and rejects host plus any requested constraint. The returned config
+// owns its slices; the same frozen value backs backend construction, approval
+// identity, and previews.
 func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 	if c.Runtime == "" {
 		c.Runtime = SandboxRuntimeHost
@@ -366,16 +465,24 @@ func normalizeSandboxConfig(c SandboxConfig) (SandboxConfig, error) {
 	if c.CPULimit == 0 {
 		c.CPULimit = 0
 	}
-	caps := append([]string(nil), c.DropCaps...)
-	for _, name := range caps {
+	for _, name := range c.DropCaps {
 		if strings.TrimSpace(name) == "" || containsControl(name) {
 			return SandboxConfig{}, fmt.Errorf("tools: sandbox DropCaps entries must be non-blank and contain no control characters")
 		}
 	}
-	slices.Sort(caps)
-	c.DropCaps = slices.Compact(caps)
+	if err := validateToolchainFields(c); err != nil {
+		return SandboxConfig{}, err
+	}
+	c = c.Clone()
+	slices.Sort(c.DropCaps)
+	c.DropCaps = slices.Compact(c.DropCaps)
+	slices.Sort(c.ReadOnlyRoots)
+	c.ReadOnlyRoots = slices.Compact(c.ReadOnlyRoots)
+	slices.SortFunc(c.Env, func(a, b SandboxEnv) int { return strings.Compare(a.Name, b.Name) })
+	slices.Sort(c.TempEnv)
 	if c.Runtime == SandboxRuntimeHost &&
-		(c.AllowNetwork || c.MemoryCapMB != 0 || c.CPULimit != 0 || len(c.DropCaps) != 0) {
+		(c.AllowNetwork || c.MemoryCapMB != 0 || c.CPULimit != 0 || len(c.DropCaps) != 0 ||
+			len(c.ReadOnlyRoots) != 0 || c.DeveloperDirectory != "" || len(c.Env) != 0 || len(c.TempEnv) != 0) {
 		return SandboxConfig{}, fmt.Errorf("tools: sandbox host runtime accepts no constraints")
 	}
 	return c, nil

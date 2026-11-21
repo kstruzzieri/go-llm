@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -541,6 +542,142 @@ func TestSandboxApprovalKeyUnmovedBy721(t *testing.T) {
 		// containment: GITMETA-PREVIEW
 		if got := approvalForSandbox(n).keyComponent; got != want {
 			t.Errorf("%s keyComponent = %q, want %q", rt, got, want)
+		}
+	}
+}
+
+// toolchainConfig is a Seatbelt policy using every #722 field, roots and Env
+// deliberately out of order.
+func toolchainConfig() SandboxConfig {
+	return SandboxConfig{
+		Runtime:            SandboxRuntimeSeatbelt,
+		ReadOnlyRoots:      []string{"/opt/b", "/opt/a"},
+		DeveloperDirectory: "/Library/Developer/CommandLineTools",
+		Env:                []SandboxEnv{{Name: "GOPROXY", Value: "off"}, {Name: "GOMODCACHE", Value: "/opt/a/mod"}},
+		TempEnv:            []string{"GOCACHE"},
+	}
+}
+
+func TestSandboxFingerprintNewFields(t *testing.T) {
+	// Each list is framed as label, count, items and sits before the unframed
+	// drop_caps tail; computed outside Go:
+	// python3 -c "import hashlib; print(hashlib.sha256(b''.join(t.encode()+b'\0' for t in
+	//   ['runtime','seatbelt','allow_network','false','memory_cap_mb','0','cpu_limit','0',
+	//    'read_only_roots','2','/opt/a','/opt/b','developer_directory','/Library/Developer/CommandLineTools',
+	//    'env','2','GOMODCACHE','/opt/a/mod','GOPROXY','off','temp_env','1','GOCACHE','drop_caps'])).hexdigest())"
+	full := mustNormalizeSandbox(t, toolchainConfig())
+	if got, want := sandboxFingerprint(full), "4e780b30cfa2679b0214a2550b4f058b1fbca7d3f9413fd9aa1549966416de55"; got != want {
+		t.Errorf("sandboxFingerprint(all #722 fields) = %s, want %s", got, want)
+	}
+
+	// Empty but non-nil lists add nothing: existing keys do not move.
+	plain := sandboxFingerprint(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt}))
+	empty := sandboxFingerprint(mustNormalizeSandbox(t, SandboxConfig{
+		Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{}, Env: []SandboxEnv{}, TempEnv: []string{},
+	}))
+	if empty != plain {
+		t.Errorf("empty #722 lists moved the key: %s, want %s", empty, plain)
+	}
+
+	base := SandboxConfig{
+		Runtime:       SandboxRuntimeSeatbelt,
+		ReadOnlyRoots: []string{"/opt/a"},
+		Env:           []SandboxEnv{{Name: "GOMODCACHE", Value: "/opt/a/mod"}},
+	}
+	baseFP := sandboxFingerprint(mustNormalizeSandbox(t, base))
+	for name, edit := range map[string]func(*SandboxConfig){
+		"one added root":      func(c *SandboxConfig) { c.ReadOnlyRoots = append(c.ReadOnlyRoots, "/opt/b") },
+		"developer directory": func(c *SandboxConfig) { c.DeveloperDirectory = "/Library/Developer/CommandLineTools" },
+		"GOMODCACHE":          func(c *SandboxConfig) { c.Env = []SandboxEnv{{Name: "GOMODCACHE", Value: "/opt/a/mod2"}} },
+		"temp name":           func(c *SandboxConfig) { c.TempEnv = []string{"GOCACHE"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := base.Clone()
+			edit(&cfg)
+			if sandboxFingerprint(mustNormalizeSandbox(t, cfg)) == baseFP {
+				t.Fatalf("%s did not change the key", name)
+			}
+		})
+	}
+
+	reordered := toolchainConfig()
+	reordered.ReadOnlyRoots = []string{"/opt/a", "/opt/b", "/opt/a"}
+	reordered.Env = []SandboxEnv{reordered.Env[1], reordered.Env[0]}
+	if got := sandboxFingerprint(mustNormalizeSandbox(t, reordered)); got != sandboxFingerprint(full) {
+		t.Fatal("root or Env order (or a repeated root) changed the key")
+	}
+}
+
+func TestRenderSandboxLineNewFields(t *testing.T) {
+	cfg := toolchainConfig()
+	cfg.Env[1].Value = "/opt/a/sentinel-7f3a"
+	got := renderSandboxLine(mustNormalizeSandbox(t, cfg))
+	want := `runtime="seatbelt" network=denied memory_cap=none cpu_limit=none drop_caps=[] temp=private git_metadata=ro` +
+		` read_only_roots=["/opt/a","/opt/b"] developer_directory="/Library/Developer/CommandLineTools"` +
+		` env=["GIT_CONFIG_GLOBAL=/dev/null","GIT_CONFIG_NOSYSTEM=1","GOCACHE=<private temp>/gocache",` +
+		`"GOMODCACHE=/opt/a/sentinel-7f3a","GOPROXY=off","PYTHONDONTWRITEBYTECODE=1"]`
+	if got != want {
+		t.Fatalf("renderSandboxLine() =\n%s\nwant\n%s", got, want)
+	}
+	if !strings.Contains(got, "/opt/a/sentinel-7f3a") {
+		t.Fatalf("preview lost the GOMODCACHE sentinel: %s", got)
+	}
+	// A quote in a root cannot forge a field boundary.
+	quoted := renderSandboxLine(SandboxConfig{Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{`/opt/a" env=["X`}})
+	if !strings.Contains(quoted, `read_only_roots=["/opt/a\" env=[\"X"]`) {
+		t.Fatalf("root not quoted: %s", quoted)
+	}
+}
+
+func TestSandboxEffectiveEnv(t *testing.T) {
+	if got := (SandboxConfig{}).EffectiveEnv("<private temp>"); len(got) != 0 {
+		t.Fatalf("zero config EffectiveEnv = %q, want none", got)
+	}
+	cfg := toolchainConfig()
+	cfg.DeveloperDirectory = ""
+	got := cfg.EffectiveEnv("<private temp>")
+	want := []string{"GOCACHE=<private temp>/gocache", "GOMODCACHE=/opt/a/mod", "GOPROXY=off"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("EffectiveEnv without developer directory = %q, want %q", got, want)
+	}
+	if got := cfg.EffectiveEnv("/private/tmp/go-llm-seatbelt-1"); !slices.Contains(got, "GOCACHE=/private/tmp/go-llm-seatbelt-1/gocache") {
+		t.Fatalf("EffectiveEnv(real temp) = %q, want GOCACHE under it", got)
+	}
+	cfg.DeveloperDirectory = "/Library/Developer/CommandLineTools"
+	got = cfg.EffectiveEnv("<private temp>")
+	for _, d4 := range []string{"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "PYTHONDONTWRITEBYTECODE=1"} {
+		if !slices.Contains(got, d4) {
+			t.Errorf("EffectiveEnv with developer directory = %q, missing %q", got, d4)
+		}
+	}
+	if !slices.IsSorted(got) || len(got) != len(want)+3 {
+		t.Fatalf("EffectiveEnv = %q, want the %d entries sorted", got, len(want)+3)
+	}
+}
+
+func TestSandboxConfigClone(t *testing.T) {
+	if got := (SandboxConfig{}).Clone(); !reflect.DeepEqual(got, SandboxConfig{}) {
+		t.Fatalf("zero Clone = %+v, want zero", got)
+	}
+	orig := toolchainConfig()
+	orig.DropCaps = []string{"ALL"}
+	clone := orig.Clone()
+	if !reflect.DeepEqual(clone, orig) {
+		t.Fatalf("Clone = %+v, want %+v", clone, orig)
+	}
+	// Every slice field, including any added later, must be populated here
+	// and must not share its backing array with the original.
+	ov, cv := reflect.ValueOf(orig), reflect.ValueOf(clone)
+	for i := range ov.NumField() {
+		name := ov.Type().Field(i).Name
+		if ov.Field(i).Kind() != reflect.Slice {
+			continue
+		}
+		if ov.Field(i).Len() == 0 {
+			t.Fatalf("test leaves slice field %s empty; populate it", name)
+		}
+		if ov.Field(i).Pointer() == cv.Field(i).Pointer() {
+			t.Errorf("Clone shares %s with the original", name)
 		}
 	}
 }

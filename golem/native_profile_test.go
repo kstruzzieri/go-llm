@@ -880,3 +880,36 @@ func TestSeatbeltSessionBindsCanonicalRootSpelling(t *testing.T) {
 		t.Fatalf("Root = %q, want %q", got, canonical)
 	}
 }
+
+// TestRuntimeSandboxInputMutation: New keeps its own copy of the caller's
+// policy, so mutating Options.Sandbox's slices afterwards reaches neither the
+// frozen policy nor EffectivePermissions.
+func TestRuntimeSandboxInputMutation(t *testing.T) {
+	stubValidateSandbox(t)
+	policy := agenttools.SandboxConfig{
+		Runtime:            agenttools.SandboxRuntimeSeatbelt,
+		DropCaps:           []string{"ALL"},
+		ReadOnlyRoots:      []string{"/opt/toolchain"},
+		DeveloperDirectory: "/Library/Developer/CommandLineTools",
+		Env:                []agenttools.SandboxEnv{{Name: "GOMODCACHE", Value: "/opt/toolchain/mod"}},
+		TempEnv:            []string{"GOCACHE"},
+	}
+	want := policy.Clone()
+	rt, err := newNative(t, t.TempDir(), policy, &countingCaller{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	before := rt.EffectivePermissions()
+
+	policy.DropCaps[0] = "NONE"
+	policy.ReadOnlyRoots[0] = "/Users/victim"
+	policy.Env[0].Value = "/Users/victim/mod"
+	policy.TempEnv[0] = "HOME"
+
+	if !reflect.DeepEqual(rt.sandbox, want) {
+		t.Fatalf("frozen policy followed the caller's mutation: %+v, want %+v", rt.sandbox, want)
+	}
+	if after := rt.EffectivePermissions(); !reflect.DeepEqual(after, before) {
+		t.Fatalf("EffectivePermissions changed after the caller mutated its policy:\n%+v\nwant\n%+v", after, before)
+	}
+}

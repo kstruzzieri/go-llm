@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 )
@@ -160,9 +159,7 @@ func (v *VerifyCommand) narrowFor(ctx context.Context) (verifyExecutor, bool, er
 // Sandbox returns a copy of the normalized policy this command runs under.
 // Mutating the result never reaches the command.
 func (v *VerifyCommand) Sandbox() SandboxConfig {
-	s := v.sandbox
-	s.DropCaps = slices.Clone(s.DropCaps)
-	return s
+	return v.sandbox.Clone()
 }
 
 // Root is the canonical workspace root the command is bound to and checks.
