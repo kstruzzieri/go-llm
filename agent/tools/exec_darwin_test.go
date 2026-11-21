@@ -3441,6 +3441,8 @@ func TestSeatbeltConstructionRefusals(t *testing.T) {
 			}
 			r.cfg.Runtime = SandboxRuntimeSeatbelt
 			err := ValidateSandbox(r.cfg, r.ws)
+			// containment: PATH-TOOLCHAIN-ROOT-ADMISSION
+			// containment: PATH-DEVDIR-LINK-OWNERSHIP
 			if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), r.reason) {
 				t.Fatalf("ValidateSandbox = %v, want ErrSandboxPolicy with reason %q", err, r.reason)
 			}
@@ -3749,6 +3751,7 @@ func TestSeatbeltToolchainRootWriteDenied(t *testing.T) {
 		t.Fatalf("control: touch in the workspace failed: exit=%d stderr=%q", res.ExitCode, res.Stderr)
 	}
 	probe := filepath.Join(root, "probe")
+	// containment: PATH-TOOLCHAIN-ROOT-WRITE
 	if res := realSeatbeltRun(t, cfg, ws, []string{"/usr/bin/touch", probe}); res.ExitCode == 0 {
 		t.Fatal("touch under a declared root succeeded")
 	}

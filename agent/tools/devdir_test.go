@@ -82,6 +82,7 @@ func TestCheckDeveloperLinks(t *testing.T) {
 	for _, r := range refused {
 		t.Run(r.name, func(t *testing.T) {
 			err := checkDeveloperLinks(fakeLinkHost(r.over, r.failing))
+			// containment: PATH-DEVDIR-LINK-OWNERSHIP
 			// The path is matched quoted, so a parent is not found inside
 			// its link's own spelling.
 			if err == nil || !strings.Contains(err.Error(), r.reason) || !strings.Contains(err.Error(), fmt.Sprintf("%q", r.path)) {

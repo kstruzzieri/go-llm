@@ -246,6 +246,7 @@ func TestAdmitRoots(t *testing.T) {
 				ge = r.getenv
 			}
 			err := admitRoots([]string{r.root}, home, tempBase, ge)
+			// containment: PATH-TOOLCHAIN-ROOT-ADMISSION
 			if err == nil || !strings.Contains(err.Error(), r.reason) {
 				t.Fatalf("admitRoots(%q) = %v, want reason %q", r.root, err, r.reason)
 			}

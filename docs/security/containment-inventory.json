@@ -595,6 +595,96 @@
       "artifacts": []
     },
     {
+      "id": "PATH-TOOLCHAIN-ROOT-WRITE",
+      "source": "issue-722",
+      "requirement": "Under the Seatbelt backend a declared toolchain root (SandboxConfig.ReadOnlyRoots, DeveloperDirectory) is readable and executable but a command cannot create a file under it; the same command writes inside the workspace. Outside this row: a declared root is a path, not an identity, and is not SIP-protected, so a process outside Golem running as the user can still change its contents.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltToolchainRootWriteDenied",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltToolchainRootWriteDenied"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-421"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "PATH-TOOLCHAIN-ROOT-ADMISSION",
+      "source": "issue-722",
+      "requirement": "A declared toolchain root is refused at construction, with ErrSandboxPolicy, when it is or covers a broad root, home or the temp base, lies in a go-llm runtime temp directory, is, covers or lies inside an excluded credential or go-llm store (including stores relocated by XDG_DATA_HOME), cannot be resolved, is not a directory, or is not its own canonical spelling. The exclusions are specific folders, not a proof that an admitted root holds nothing sensitive.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestAdmitRoots",
+          "file": "agent/tools/sandbox_policy_test.go",
+          "func": "TestAdmitRoots"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltConstructionRefusals",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltConstructionRefusals"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-422",
+        "M-423",
+        "M-424"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "PATH-DEVDIR-LINK-OWNERSHIP",
+      "source": "issue-722",
+      "requirement": "When a developer directory is declared, construction refuses a selection link (/private/var/select/developer_dir, /private/var/db/xcode_select_link) that exists and is not a root-owned symlink in a root-owned directory chain; a missing link is fine and any other lstat error refuses. This check is not the confinement boundary: the declared, admitted directory is, and on a stock system the check cannot fire.",
+      "status": "verified",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [
+        {
+          "package": "./agent/tools",
+          "test": "TestCheckDeveloperLinks",
+          "file": "agent/tools/devdir_test.go",
+          "func": "TestCheckDeveloperLinks"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestSeatbeltConstructionRefusals",
+          "file": "agent/tools/exec_darwin_test.go",
+          "func": "TestSeatbeltConstructionRefusals"
+        }
+      ],
+      "profiles": [
+        "seatbelt"
+      ],
+      "mutations": [
+        "M-425",
+        "M-426"
+      ],
+      "artifacts": []
+    },
+    {
       "id": "MUT-WRITE",
       "source": "issue-452:53",
       "requirement": "A parent directory substituted at any write phase (before and after the temporary file, before the rename) never lets the write reach the outside-root or guard-denied sibling canaries (#552).",

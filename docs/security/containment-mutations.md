@@ -1,6 +1,6 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 420 entries: 415 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 426 entries: 421 guard and five effect-detection entries.
 
 The original #777 and #789 history is preserved by tag `archive/pr-797-before-restack-254431e` at `254431e5f65387835807392d76739e472777c519`. PR #792 was squash-merged, and #797 was then rebased onto that squash; the baseline hashes below still name the original tested revisions. Fetch the archive with `git fetch origin tag archive/pr-797-before-restack-254431e` before reproducing those entries. Do not substitute the rebased commit hashes for the recorded baselines.
 
@@ -11111,3 +11111,147 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 - Baseline: pass (exit 0, not skipped). Mutant: FAIL `TestBwrapPayloadEnvironment` (`exec_linux_behavioral_test.go:919: payload env carries extra entries: "HOSTNAME=d1a44594461f|HOME=/home/bwrap-test|TMPDIR=/tmp|GO_LLM_REQUIRE_BWRAP=1|SHLVL=1|PATH=/usr/bin:/bin|OLDPWD=/|_=/evidence/tools.test.envC|GO_LLM_BWRAP_PARENT_SENTINEL=leaked|PWD=/home/ubuntu/tmp/TestBwrapPayloadEnvironment1013907067/001"`; exit 1). Restored (`patch -R -p1`, both files `cmp` identical to the baseline's); the test binary rebuilt from the restored export was byte-identical to the baseline's (sha256 `689e509a6417d5b2eed51fe1eac42441f79deebe2ea422b01959c94b581f7ebc`) and passed the command again (exit 0, not skipped).
 - Kind: guard
 - Notes: Two layers keep the parent's environment out of the payload: the outer `[prlimit] bwrap` chain starts with an empty environment (`wrapped.Env = []string{}`, where a nil `Env` would make `os/exec` hand bwrap the parent's), and `--clearenv` empties bwrap's own environment before the approved `--setenv` entries. Each half of the patch alone was applied, built and run the same way and left the test green (exit 0): without `--clearenv` bwrap has no inherited variable to pass on, and with the parent's environment `--clearenv` drops it. With both removed, the test's sentinel `GO_LLM_BWRAP_PARENT_SENTINEL=leaked` and the test process's other variables reach the payload, while the `--setenv` entries still replace the parent's `HOME`, `PATH` and `TMPDIR`. Either layer alone keeps the payload to the approved set, so this ref can see only both removed, and the entry records them as one patch. Each half is caught on its own by unit tests outside this row, run afterwards with the same binaries in the same container (the command above with `-test.run '^(TestBuildBwrapArgsFullPolicy|TestBuildBwrapArgsAllowNetworkOmitsUnshareNet|TestBwrapPrepareWrapsRunSpec)$'` on `baseline`, `envA` and `envB`): the `--clearenv` half by the argv goldens of `TestBuildBwrapArgsFullPolicy` and `TestBuildBwrapArgsAllowNetworkOmitsUnshareNet` (`bwrap_test.go:101: argv mismatch:` and `bwrap_test.go:134: argv mismatch:`), and the `Env` half by `TestBwrapPrepareWrapsRunSpec` (`exec_linux_test.go:535: outer env = []string(nil), want non-nil empty slice`); all three pass at the baseline. The empty outer environment also keeps the parent's environment out of prlimit and bwrap themselves, which this ref cannot observe.
+
+## M-421 — A declared toolchain root is never writable
+- Affected refs: PATH-TOOLCHAIN-ROOT-WRITE: `TestSeatbeltToolchainRootWriteDenied`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestSeatbeltToolchainRootWriteDenied$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/seatbelt.go b/agent/tools/seatbelt.go
+  --- a/agent/tools/seatbelt.go
+  +++ b/agent/tools/seatbelt.go
+  @@ -200,7 +200,7 @@ func buildSeatbeltProfile(p seatbeltPolicy) (string, error) {
+   	// exposes hardware constants only — never kern.* process information.
+   	b.WriteString("(allow sysctl-read (sysctl-name-prefix \"hw.\"))\n")
+   
+  -	fmt.Fprintf(&b, "(allow file-write*\n  (subpath %s)\n  (subpath %s))\n", wsQ, tempQ)
+  +	fmt.Fprintf(&b, "(allow file-write*\n  (subpath %s)\n  (subpath %s)\n  (subpath %s))\n", wsQ, tempQ, strings.Join(sysQ, ") (subpath "))
+   	b.WriteString("(allow file-write-data (literal \"/dev/null\"))\n")
+   
+   	deny, err := seatbeltGitMetadataDeny(p.workspaceRoot, p.gitDirs, p.gitReadOnlyDirs, p.gitIntermediates)
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestSeatbeltToolchainRootWriteDenied` (`exec_darwin_test.go:3756: touch under a declared root succeeded`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: Every system and declared root is also added to the `file-write*` allow, so the declared root becomes host-writable for the sandboxed `touch`. The precondition holds in the test: the root is an ordinary directory the host user owns (the host read of the marker succeeds), the control `touch` in the workspace succeeds, and the same `touch` is denied at the baseline, so the denial is the profile's.
+
+## M-422 — Construction refuses a declared root that fails admission
+- Affected refs: PATH-TOOLCHAIN-ROOT-ADMISSION: `TestSeatbeltConstructionRefusals`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestSeatbeltConstructionRefusals$/^home$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_darwin.go b/agent/tools/exec_darwin.go
+  --- a/agent/tools/exec_darwin.go
+  +++ b/agent/tools/exec_darwin.go
+  @@ -300,7 +300,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
+   		if err != nil {
+   			return nil, fmt.Errorf("tools: seatbelt declared roots: %w", err)
+   		}
+  -		if err := admitRoots(roots, home, seatbeltTempBase, os.Getenv); err != nil {
+  +		if err := error(nil); err != nil || home == "" {
+   			return nil, err
+   		}
+   	}
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestSeatbeltConstructionRefusals/home` (`exec_darwin_test.go:3447: ValidateSandbox = <nil>, want ErrSandboxPolicy with reason "home directory"`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: The `admitRoots` call at construction is dropped (the `home == ""` clause only keeps the variable used). Through `ValidateSandbox`, a root equal to the stand-in home is then accepted. The construction-level proof: `TestAdmitRoots` exercises `admitRoots` directly and would stay green.
+
+## M-423 — Admission excludes go-llm's relocated data stores
+- Affected refs: PATH-TOOLCHAIN-ROOT-ADMISSION: `TestAdmitRoots`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestAdmitRoots$/^relocated_XDG_DATA_HOME$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_policy.go b/agent/tools/sandbox_policy.go
+  --- a/agent/tools/sandbox_policy.go
+  +++ b/agent/tools/sandbox_policy.go
+  @@ -149,7 +149,7 @@ func toolchainExclusions(home string, getenv func(string) string) ([]string, err
+   	if err != nil {
+   		return nil, fmt.Errorf("tools: cannot locate go-llm's data directory: %w", err)
+   	}
+  -	for _, base := range []string{data, filepath.Join(home, ".local", "share")} {
+  +	for _, base := range []string{data[:0] + filepath.Join(home, ".local", "share")} {
+   		out = append(out, filepath.Join(base, "golem"), filepath.Join(base, "go-llm"))
+   	}
+   	config := filepath.Join(home, ".config")
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestAdmitRoots/relocated_XDG_DATA_HOME` (`sandbox_policy_test.go:273: admitRoots("<tmp>/xdg/golem") = <nil>, want an excluded-store refusal`; the same for `<tmp>/xdg/go-llm/x` and `<tmp>/xdg`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: Only the default `~/.local/share` stores stay excluded; the store under `datadir.Base` (which honors `XDG_DATA_HOME`) is dropped. The control, a sibling `<xdg>/other`, is admitted at the baseline and under the mutant; the default-location rows stay refused under it.
+
+## M-424 — Admission requires a canonical spelling
+- Affected refs: PATH-TOOLCHAIN-ROOT-ADMISSION: `TestAdmitRoots`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestAdmitRoots$/^symlink$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_policy.go b/agent/tools/sandbox_policy.go
+  --- a/agent/tools/sandbox_policy.go
+  +++ b/agent/tools/sandbox_policy.go
+  @@ -226,7 +226,7 @@ func admitRoots(roots []string, home, tempBase string, getenv func(string) strin
+   		if err != nil {
+   			return fmt.Errorf("tools: declared root %q: %w", root, err)
+   		}
+  -		if canon != root {
+  +		if false && canon != root {
+   			return fmt.Errorf("tools: declared root %q is not in its canonical spelling %q", root, canon)
+   		}
+   		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestAdmitRoots/symlink` (`sandbox_policy_test.go:251: admitRoots("<tmp>/link") = <nil>, want reason "canonical spelling ..."`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: A root that is a symlink to an existing directory is accepted although it is not its own canonical spelling. The control (a real directory in canonical spelling) is admitted at the baseline.
+
+## M-425 — Construction runs the developer link check
+- Affected refs: PATH-DEVDIR-LINK-OWNERSHIP: `TestSeatbeltConstructionRefusals`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestSeatbeltConstructionRefusals$/^non-root_developer_link$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_darwin.go b/agent/tools/exec_darwin.go
+  --- a/agent/tools/exec_darwin.go
+  +++ b/agent/tools/exec_darwin.go
+  @@ -305,7 +305,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
+   		}
+   	}
+   	if cfg.DeveloperDirectory != "" {
+  -		if err := checkDeveloperLinks(seatbeltLinkLstat); err != nil {
+  +		if err := error(nil); err != nil {
+   			return nil, err
+   		}
+   	}
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestSeatbeltConstructionRefusals/non-root_developer_link` (`exec_darwin_test.go:3447: ValidateSandbox = <nil>, want ErrSandboxPolicy with reason "is not a root-owned symlink"`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: The `checkDeveloperLinks` call at construction is dropped. The test replaces `seatbeltLinkLstat` with a stand-in whose selection link is owned by uid 501; the matched control (the same stand-in with uid 0) passes at the baseline, so only the owner differs.
+
+## M-426 — The developer link check refuses a link not owned by root
+- Affected refs: PATH-DEVDIR-LINK-OWNERSHIP: `TestCheckDeveloperLinks`
+- Baseline: `d3ec8f20` plus the row's markers; the other rows of this task's commit are test comments only
+- Platform: darwin (arm64, go1.27.1), the developer's Mac
+- Profile / command: seatbelt / `GO_LLM_REQUIRE_SEATBELT=1 go test -count=1 -timeout 60s -run '^TestCheckDeveloperLinks$' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_policy.go b/agent/tools/sandbox_policy.go
+  --- a/agent/tools/sandbox_policy.go
+  +++ b/agent/tools/sandbox_policy.go
+  @@ -263,7 +263,7 @@ func checkDeveloperLinks(lstat func(string) (linkInfo, error)) error {
+   		if !info.exists {
+   			continue
+   		}
+  -		if !info.symlink || info.uid != 0 {
+  +		if !info.symlink {
+   			return fmt.Errorf("tools: developer directory link %q is not a root-owned symlink", link)
+   		}
+   		for dir := filepath.Dir(link); ; dir = filepath.Dir(dir) {
+  ```
+- Baseline: pass (not skipped, `GO_LLM_REQUIRE_SEATBELT=1`). Mutant: FAIL `TestCheckDeveloperLinks/select_link_owned_by_501` and `TestCheckDeveloperLinks/db_link_owned_by_501` (`devdir_test.go:89: checkDeveloperLinks = <nil>, want "is not a root-owned symlink" naming ...`). Restored (`git checkout` of the file) and passed again.
+- Kind: guard
+- Notes: The owner test on a selection link is dropped (a link is accepted whoever owns it). The `both links` and single-link controls pass at the baseline.
