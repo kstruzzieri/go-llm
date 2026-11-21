@@ -317,6 +317,34 @@ func TestBwrapConfigSupport(t *testing.T) {
 	}
 }
 
+// TestBwrapConfigSupportRefusesToolchainFields pins the #440 rule for the
+// declared toolchain fields (#722): bwrap cannot enforce them in this release,
+// so each one alone fails construction and the error names it.
+func TestBwrapConfigSupportRefusesToolchainFields(t *testing.T) {
+	base := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	for _, tc := range []struct {
+		field string
+		mod   func(*SandboxConfig)
+	}{
+		{"ReadOnlyRoots", func(c *SandboxConfig) { c.ReadOnlyRoots = []string{"/opt/toolchain"} }},
+		{"DeveloperDirectory", func(c *SandboxConfig) { c.DeveloperDirectory = "/opt/developer" }},
+		{"Env", func(c *SandboxConfig) { c.Env = []SandboxEnv{{Name: "GOPROXY", Value: "off"}} }},
+		{"TempEnv", func(c *SandboxConfig) { c.TempEnv = []string{"GOCACHE"} }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			cfg := base
+			tc.mod(&cfg)
+			err := bwrapConfigSupport(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("bwrapConfigSupport(%s alone) = %v, want an error naming the field", tc.field, err)
+			}
+		})
+	}
+	if err := bwrapConfigSupport(base); err != nil {
+		t.Fatalf("control config rejected: %v", err)
+	}
+}
+
 // TestBuildBwrapArgsExeBindOnlyWhenUncovered pins the executable-literal
 // rule: a bind into an already read-only-mounted region fails mountpoint
 // creation and is redundant, so it is emitted only for workspace-resident

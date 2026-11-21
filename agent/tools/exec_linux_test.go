@@ -1259,3 +1259,26 @@ func TestBwrapAcceptsScratchStampedExecutable(t *testing.T) {
 		})
 	}
 }
+
+// TestNewExecBackendBwrapToolchainSentinel pins that the declared toolchain
+// fields (#722) refused by bwrap reach the public path wrapping
+// ErrSandboxPolicy, from the bwrap refusal itself rather than normalization.
+func TestNewExecBackendBwrapToolchainSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		field string
+		cfg   SandboxConfig
+	}{
+		{"Env", SandboxConfig{Runtime: SandboxRuntimeBwrap, Env: []SandboxEnv{{Name: "GOPROXY", Value: "off"}}}},
+		{"TempEnv", SandboxConfig{Runtime: SandboxRuntimeBwrap, TempEnv: []string{"GOCACHE"}}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			err := ValidateSandbox(tc.cfg, t.TempDir())
+			if !errors.Is(err, ErrSandboxPolicy) {
+				t.Fatalf("ValidateSandbox err = %v, want ErrSandboxPolicy", err)
+			}
+			if !strings.Contains(err.Error(), "bwrap cannot enforce "+tc.field) {
+				t.Fatalf("ValidateSandbox err = %v, want the bwrap refusal naming %s", err, tc.field)
+			}
+		})
+	}
+}
