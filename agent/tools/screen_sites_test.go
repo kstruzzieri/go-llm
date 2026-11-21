@@ -125,7 +125,7 @@ var captureSites = map[string]struct {
 		"assign .Stdout": 1, "assign .Stderr": 1, "cappedBuffer literal": 1, "exec.Command": 1,
 	}, "probeBwrap: a probe with fixed argv; its output goes only into the probe's own error"},
 	"devdir_darwin.go": {map[string]int{".Output()": 1, "exec.Command": 1},
-		"ActiveDeveloperDirectory: the host, never the model, runs the fixed /usr/bin/xcode-select -p; its output is returned only as a validated canonical path, that path may appear in a canonicalization error, and its stderr appears only inside the wrapped exit error"},
+		"ActiveDeveloperDirectory: the host, never the model, runs the fixed /usr/bin/xcode-select -p; its output is returned only as a validated canonical path, that path may appear in a canonicalization error, and on a non-zero exit the first line of its stderr, quoted and bounded, appears in the returned error"},
 	"background_unix.go": {map[string]int{"spawn(": 1},
 		"unixStarter.Start hands the spawner the writers the background manager gives it: one screen stream over each tail ring"},
 	"spawn_darwin.go": {map[string]int{

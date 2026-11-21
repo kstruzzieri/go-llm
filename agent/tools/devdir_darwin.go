@@ -53,6 +53,10 @@ var xcodeSelectPath = "/usr/bin/xcode-select"
 // caller's context.
 var activeDeveloperDirectoryTimeout = 5 * time.Second
 
+// xcodeSelectReasonMax bounds the stderr line ActiveDeveloperDirectory quotes
+// in its error when xcode-select fails.
+const xcodeSelectReasonMax = 200
+
 // ActiveDeveloperDirectory returns the canonical spelling of the host's
 // active developer directory, for a host to declare as
 // SandboxConfig.DeveloperDirectory. It runs xcode-select -p with
@@ -72,7 +76,19 @@ func ActiveDeveloperDirectory(ctx context.Context) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			return "", fmt.Errorf("tools: active developer directory: %w: xcode-select -p: %w", ErrSandboxPolicy, ctxErr)
+		}
+		// The tool's own reason (for example, no developer tools installed)
+		// is what the user can act on: its first stderr line, quoted and
+		// bounded, follows the exit status.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if reason, _, _ := strings.Cut(strings.TrimSpace(string(exitErr.Stderr)), "\n"); reason != "" {
+				if len(reason) > xcodeSelectReasonMax {
+					reason = reason[:xcodeSelectReasonMax]
+				}
+				return "", fmt.Errorf("tools: active developer directory: %w: xcode-select -p: %w: %q", ErrSandboxPolicy, err, reason)
+			}
 		}
 		return "", fmt.Errorf("tools: active developer directory: %w: xcode-select -p: %w", ErrSandboxPolicy, err)
 	}

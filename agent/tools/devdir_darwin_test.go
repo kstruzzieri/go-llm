@@ -80,6 +80,9 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 		{"control character", `printf '%s\t\n' "${DEVELOPER_DIR:-` + clt + `}"`, "not one clean absolute path"},
 		{"missing directory", say(filepath.Join(canon, "missing")), "no such file"},
 		{"non-zero exit", "echo 'xcode-select: error: no developer tools' >&2; exit 2", "exit status 2"},
+		// The tool's own reason reaches the user, quoted, first line only.
+		{"non-zero exit reason", "printf 'xcode-select: error: no developer tools\\nsecond line\\n' >&2; exit 2", `"xcode-select: error: no developer tools"`},
+		{"non-zero exit reason is first line only", "printf 'first\\nsecond line\\n' >&2; exit 2", `"first"`},
 	}
 	for _, r := range refused {
 		t.Run(r.name, func(t *testing.T) {

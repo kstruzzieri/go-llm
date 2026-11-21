@@ -231,7 +231,11 @@ func admitRoots(roots []string, home, tempBase string, getenv func(string) strin
 		if canon != root {
 			return fmt.Errorf("tools: declared root %q is not in its canonical spelling %q", root, canon)
 		}
-		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		fi, err := os.Stat(root)
+		if err != nil {
+			return fmt.Errorf("tools: declared root %q cannot be inspected: %w", root, err)
+		}
+		if !fi.IsDir() {
 			return fmt.Errorf("tools: declared root %q is not a directory", root)
 		}
 	}
