@@ -41,13 +41,59 @@
 // A native session mounts no retrieval, auto-index or model memory tools and
 // rejects -rag-db, -agent-memory (with a session), -delegate, -dispatch,
 // -mcp-stdio, -mcp-http, -progressive and -grounding; AgentFlow modes reject
-// both sandbox flags. Seatbelt sets no memory or CPU quota and may deny
+// every sandbox flag. Seatbelt sets no memory or CPU quota and may deny
 // loader, SDK or cache access outside its reviewed roots: a failed foreground
 // command or verification carries a note saying so, and the recovery is a new
-// host Trusted session or a toolchain and caches inside the workspace, never a
-// broader policy. Bubblewrap's network denial is ip-denied: pathname Unix
-// sockets inside the shared workspace stay reachable. -sandbox does not
-// confine /consult, git-context helpers, MCP servers or the /edit editor.
+// host Trusted session, a toolchain and caches inside the workspace, or a
+// declared toolchain (below); Golem never widens the policy on its own.
+// Bubblewrap's network denial is ip-denied: pathname Unix sockets inside the
+// shared workspace stay reachable. -sandbox does not confine /consult,
+// git-context helpers, MCP servers or the /edit editor.
+//
+// -sandbox seatbelt can declare a toolchain outside the workspace (#722); the
+// four flags below require it, and bwrap and host refuse them.
+// -sandbox-read-root (repeatable) names a directory commands may read and run
+// but never write. Golem resolves each to its canonical spelling once at
+// startup, symlinks resolved, and the permissions line and every command's
+// approval preview show that spelling; the session keeps that directory, so
+// retargeting a link takes effect only at the next startup. A root may not
+// overlap the workspace; may not be or cover home, the temp folder or a broad
+// system folder; and may not be, cover or lie inside ~/.ssh, ~/.gnupg, ~/.aws,
+// ~/.docker, ~/.kube, ~/.netrc, ~/.config, ~/.claude, ~/.codex,
+// ~/Library/Keychains or Golem's own data and config stores. Those are
+// specific exclusions, not a proof that a root holds nothing sensitive:
+// declare only folders every command may read, and keep their contents
+// trusted, since processes outside Golem can still change them.
+// -sandbox-env NAME=VALUE (repeatable) sets a variable from a closed table:
+// GOMODCACHE (a path inside a declared root, in the root's canonical
+// spelling), GOPROXY=off, GOTOOLCHAIN=local and GOFLAGS=-buildvcs=false;
+// anything else is refused without echoing the value. -sandbox-temp-env NAME
+// (repeatable) points a variable into each command's private temp: GOCACHE
+// becomes <private temp>/gocache, a cold cache for every command, so a full
+// test suite may need a run_command timeout_seconds above the 60 s default (at
+// most 600) and a go test -timeout below it. -sandbox-developer-dir declares
+// the active developer directory (xcode-select -p: the Command Line Tools or
+// an Xcode.app bundle) so git, python3 and Go's VCS stamping run, and adds
+// GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and
+// PYTHONDONTWRITEBYTECODE=1. The system's selection still chooses which
+// folder is declared; admission and the preview bound it, and the selection
+// link check it adds is not the confinement boundary.
+//
+// A Go recipe: seed a module cache outside the workspace on the host (for
+// example GOMODCACHE=$HOME/gomod go mod download in the module), put
+// $(go env GOROOT)/bin first on the shell's PATH (commands inherit Golem's
+// PATH; no flag sets it), and start golem with
+//
+//	-sandbox seatbelt -sandbox-read-root "$(go env GOROOT)"
+//	-sandbox-read-root "$HOME/gomod" -sandbox-env GOMODCACHE="$HOME/gomod"
+//	-sandbox-env GOPROXY=off -sandbox-env GOTOOLCHAIN=local
+//	-sandbox-env GOFLAGS=-buildvcs=false -sandbox-temp-env GOCACHE
+//
+// Without -sandbox-developer-dir commands have no git, so keep
+// GOFLAGS=-buildvcs=false; with it, drop that row to stamp builds. In a linked
+// git worktree builds stay unstamped unless the main repository's .git is
+// declared too (or -buildvcs=false is kept). go.work workspaces with modules
+// outside the workspace and cgo are not supported.
 //
 // -credential-screen-budget sets how long the credential screen may spend
 // reading the workspace before each command (#777, #789): 5s to 5m, default
