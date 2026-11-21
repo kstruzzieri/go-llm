@@ -126,11 +126,15 @@ func TestSeatbeltActiveDeveloperDirectory(t *testing.T) {
 // TestSeatbeltActiveDeveloperDirectoryHost runs the real xcode-select once,
 // with DEVELOPER_DIR set to a path that does not exist: a leak would fail
 // canonicalization. Hosts with no developer directory selected skip, judged
-// by running xcode-select directly without DEVELOPER_DIR, as the helper does.
+// by running xcode-select directly without DEVELOPER_DIR, as the helper does;
+// under GO_LLM_REQUIRE_SEATBELT=1 they fail.
 func TestSeatbeltActiveDeveloperDirectoryHost(t *testing.T) {
 	probe := exec.Command(xcodeSelectPath, "-p")
 	probe.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, "DEVELOPER_DIR=") })
 	if err := probe.Run(); err != nil {
+		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but no active developer directory on this host: %v", err)
+		}
 		t.Skipf("no active developer directory on this host: %v", err)
 	}
 	t.Setenv("DEVELOPER_DIR", "/nonexistent-go-llm-developer-dir")

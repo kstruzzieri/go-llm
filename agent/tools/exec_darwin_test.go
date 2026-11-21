@@ -3459,6 +3459,9 @@ func TestSeatbeltRootWorkspaceCaseAlias(t *testing.T) {
 	root := mkdirT(t, filepath.Join(base, "tools"))
 	mkdirT(t, filepath.Join(root, "ws"))
 	if _, err := os.Stat(filepath.Join(base, "TOOLS")); err != nil {
+		if os.Getenv("GO_LLM_REQUIRE_SEATBELT") == "1" {
+			t.Fatalf("GO_LLM_REQUIRE_SEATBELT=1 but the temp volume is case-sensitive: %v", err)
+		}
 		t.Skipf("temp volume is case-sensitive: %v", err)
 	}
 	outer := mkdirT(t, filepath.Join(base, "outer"))
@@ -3882,10 +3885,10 @@ func TestSeatbeltFactoryInputMutation(t *testing.T) {
 }
 
 // requireLinkedXcode logs which developer selection links exist and returns
-// the active developer directory. It skips when no link exists;
-// GO_LLM_REQUIRE_XCODE_LINK=1 makes that a failure, and also fails unless
-// the directory is an Xcode bundle, so a link to the Command Line Tools
-// cannot stand in for the linked-Xcode evidence D3 relies on.
+// the active developer directory. GO_LLM_REQUIRE_XCODE_LINK=1 fails the test
+// unless a link exists and the directory is an Xcode bundle, so a link to the
+// Command Line Tools cannot stand in for the linked-Xcode evidence D3 relies
+// on.
 func requireLinkedXcode(t *testing.T) string {
 	t.Helper()
 	var present []string
@@ -3895,11 +3898,8 @@ func requireLinkedXcode(t *testing.T) string {
 		}
 	}
 	t.Logf("developer selection links checked %q; present %q", developerSelectionLinks, present)
-	if len(present) == 0 {
-		if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" {
-			t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", developerSelectionLinks)
-		}
-		t.Skip("no developer selection link on this host")
+	if len(present) == 0 && os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" {
+		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", developerSelectionLinks)
 	}
 	dev, err := ActiveDeveloperDirectory(context.Background())
 	if err != nil {
@@ -3913,10 +3913,13 @@ func requireLinkedXcode(t *testing.T) string {
 }
 
 // TestSeatbeltDeveloperLinkLiterals is D3's ablation (#722): with the
-// developer directory a link selects, python3 must fail once a link literal
-// is dropped from seatbeltDeveloperLiterals. A literal python3 runs without
-// is not needed and must be removed. It runs only where a selection link
-// exists (requireLinkedXcode).
+// active developer directory declared, python3 must fail once the literal of
+// a link that exists on the host is dropped from seatbeltDeveloperLiterals. A
+// literal python3 runs without is not needed and must be removed. An absent
+// link is not ablated: A0 measured python3 running with neither literal when
+// no link exists, so its run proves nothing about the literal. Its subtest
+// logs that and passes rather than skipping, since the darwin-smoke step
+// fails on any skip.
 func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 	requireSeatbeltCapability(t)
 	dev := requireLinkedXcode(t)
@@ -3933,14 +3936,16 @@ func TestSeatbeltDeveloperLinkLiterals(t *testing.T) {
 			if !slices.Contains(all, link) {
 				t.Fatalf("%s is not in seatbeltDeveloperLiterals %q", link, all)
 			}
+			if _, err := os.Lstat(link); errors.Is(err, os.ErrNotExist) {
+				t.Logf("not exercised: %s absent on this host (lstat: %v)", link, err)
+				return
+			} else if err != nil {
+				t.Fatalf("lstat %s: %v", link, err)
+			}
 			seatbeltDeveloperLiterals = slices.DeleteFunc(slices.Clone(all), func(l string) bool { return l == link })
 			t.Cleanup(func() { seatbeltDeveloperLiterals = all })
 			if res := realSeatbeltRun(t, cfg, ws, argv); res.ExitCode == 0 {
-				host := "present"
-				if _, err := os.Lstat(link); err != nil {
-					host = err.Error()
-				}
-				t.Errorf("python3 ran without the metadata literal %s (on the host: %s): it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link, host)
+				t.Errorf("python3 ran without the metadata literal %s, whose link is present: it is not needed and must be removed from seatbeltDeveloperLiterals (#722 D3)", link)
 			}
 		})
 	}
