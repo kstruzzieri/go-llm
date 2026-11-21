@@ -12,3 +12,4 @@ Parallel task mode still runs the repository's own hooks, filters (git-lfs keeps
 - A `git` executable inside the workspace (for example a workspace directory on `PATH`) is refused.
 - A repository that uses `include.path` or `includeIf` in its local config gets a startup warning (`git context disabled: ...`) instead of the git context block.
 - Parallel task mode no longer runs `core.fsmonitor` helpers. macOS and Windows users with git's built-in monitor may see slower `status` in parallel task mode.
+- Programs git starts by name (a filter command from your global config such as `git-lfs filter-process`, `ssh` for a fetch, commands inside your own global hooks) are looked up on `PATH`, so a workspace directory on `PATH`, or an empty `PATH` entry, can supply them; a working-tree `.gitattributes` can choose when a filter runs. Golem does not filter `PATH`. Version-manager shims (asdf, mise) that pick the real git from files in the workspace are a trust input too.

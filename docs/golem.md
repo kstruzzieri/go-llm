@@ -1022,7 +1022,8 @@ code. Hooks, filters and helpers still run as you with the baseline and can
 read your files under `HOME`. Your global and system git configuration is
 trusted: a filter it defines runs during the snapshot.
 
-Every `git` command Golem runs on the host follows four rules:
+Every `git` command Golem runs on the host follows the first three rules below;
+the fourth applies only to the snapshot:
 
 - It passes `-c safe.bareRepository=explicit -c core.fsmonitor=false`. A bare
   repository that a sandboxed command planted in a workspace with no `.git` of
@@ -1031,7 +1032,7 @@ Every `git` command Golem runs on the host follows four rules:
   `git` binary to check.
 - Golem refuses a `git` found on `PATH` that, after symbolic links are
   resolved, lies inside the workspace. A relative `git` path is refused too.
-- The snapshot refuses a repository whose local or worktree config includes
+- Only the snapshot refuses a repository whose local or worktree config includes
   another file (`include.path` or `includeIf.<condition>.path`). Startup prints
   `git context disabled: ...`. `/git-context refresh` prints
   `git context refresh failed: ...` and keeps the previous block.
@@ -1040,8 +1041,8 @@ Parallel task mode still runs the repository's own hooks, filters (so git-lfs
 keeps working) and lazy fetch, with the environment above. Only `core.fsmonitor`
 helpers are newly off. A sandboxed command can still reach these through:
 
-- On Bubblewrap, creating `hooks/`, `info/` or `config.worktree` in a git
-  directory where they are absent when the command starts
+- On Bubblewrap, creating `hooks/`, `info/`, `config.worktree` or `commondir`
+  in a git directory where they are absent when the command starts
   ([#802](https://github.com/kstruzzieri/go-llm/issues/802); see the
   [Bubblewrap residuals](#native-command-sandbox--sandbox)).
 - On both backends, an include target, a `core.hooksPath` or a linked hook that
@@ -1049,9 +1050,20 @@ helpers are newly off. A sandboxed command can still reach these through:
 - A git directory outside `.git`, which is
   [not protected](#native-command-sandbox--sandbox).
 
+Git honors `.git/commondir`, which redirects local config (and with it
+filters). Because Bubblewrap cannot refuse creating it, the snapshot's premise
+that local config is read-only does not hold on Bubblewrap until #802.
+
 Golem keeps some trust on purpose: your global and system git config, the files
 they include, and a working-tree `.gitattributes` that chooses a filter you
-defined there. If you start Golem with `-root` inside a `.git` directory,
+defined there. Programs git starts by name, such as a filter command from your
+global config (git-lfs installs `git-lfs filter-process`), `ssh` for a fetch, or
+commands inside your own global hooks, are looked up on `PATH`. A workspace
+directory on `PATH`, or an empty `PATH` entry (which means the current
+directory), can supply them, and a working-tree `.gitattributes` can choose when
+a filter runs. Golem does not filter `PATH`. Version-manager shims (asdf, mise)
+that pick the real git from files in the workspace are a trust input too.
+If you start Golem with `-root` inside a `.git` directory,
 `.git/worktrees/<name>` or `.git/modules/<name>`, git treats that root as a
 repository by its path. That is a root you chose.
 
