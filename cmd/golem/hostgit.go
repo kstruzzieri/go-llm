@@ -23,44 +23,54 @@ var (
 )
 
 // hostGitCommand builds the one exec.Cmd every Golem host git call uses. The
-// caller owns Stdout, Stderr and WaitDelay.
+// caller owns Stdout, Stderr and WaitDelay. cmd.Path is the resolved path that
+// was checked, so a symlink retargeted after the check cannot change what runs.
 func hostGitCommand(ctx context.Context, gitPath, workspace, dir string, env []string, args ...string) (*exec.Cmd, error) {
 	cmd := exec.CommandContext(ctx, gitPath, append(slices.Clone(hostGitPrefix), args...)...)
 	if cmd.Err != nil {
 		return nil, fmt.Errorf("git: %w", cmd.Err)
 	}
-	if err := requireHostGit(ctx, cmd.Path, workspace, env); err != nil {
+	resolved, err := requireHostGit(ctx, cmd.Path, workspace, env)
+	if err != nil {
 		return nil, err
 	}
+	cmd.Path = resolved
 	cmd.Dir = dir
 	cmd.Env = env
 	return cmd, nil
 }
 
 // requireHostGit refuses a git executable Golem must not run: one inside the
-// workspace, or older than 2.38.
-func requireHostGit(ctx context.Context, path, workspace string, env []string) error {
+// workspace, or older than 2.38. It returns the resolved absolute path to run.
+func requireHostGit(ctx context.Context, path, workspace string, env []string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("git: refusing relative executable path %s", gitContextText(path))
+	}
+	if !filepath.IsAbs(workspace) {
+		return "", fmt.Errorf("git: workspace %s is not an absolute path", gitContextText(workspace))
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return fmt.Errorf("git: resolve %s: %w", path, err)
+		return "", fmt.Errorf("git: resolve %s: %w", gitContextText(path), err)
 	}
 	ws, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
-		return fmt.Errorf("git: resolve workspace %s: %w", workspace, err)
+		return "", fmt.Errorf("git: resolve workspace %s: %w", gitContextText(workspace), err)
 	}
+	// Both paths are absolute, so a Rel error means different volumes: outside.
 	if rel, err := filepath.Rel(ws, resolved); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("git: refusing %s: the executable is inside the workspace", resolved)
+		return "", fmt.Errorf("git: refusing %s: the executable is inside the workspace", gitContextText(resolved))
 	}
 
 	before, err := os.Stat(resolved)
 	if err != nil {
-		return fmt.Errorf("git: stat %s: %w", resolved, err)
+		return "", fmt.Errorf("git: stat %s: %w", gitContextText(resolved), err)
 	}
 	hostGitMu.Lock()
 	cached, ok := hostGitVerified[resolved]
 	hostGitMu.Unlock()
 	if ok && os.SameFile(cached, before) && cached.Size() == before.Size() && cached.ModTime().Equal(before.ModTime()) {
-		return nil
+		return resolved, nil
 	}
 
 	probe := exec.CommandContext(ctx, resolved, "--version")
@@ -71,19 +81,19 @@ func requireHostGit(ctx context.Context, path, workspace string, env []string) e
 	probe.WaitDelay = gitContextWaitDelay
 	runErr := probe.Run()
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	if runErr != nil {
-		return fmt.Errorf("git: %s --version: %w", resolved, runErr)
+		return "", fmt.Errorf("git: %s --version: %w", gitContextText(resolved), runErr)
 	}
 	major, minor, perr := parseGitVersion(stdout.String())
 	if perr != nil || !gitVersionSupported(major, minor) {
-		return fmt.Errorf("git: %s reports %q; Golem needs git 2.38 or later", resolved, gitContextText(strings.TrimSpace(stdout.String())))
+		return "", fmt.Errorf("git: %s reports %s; Golem needs git 2.38 or later", gitContextText(resolved), gitContextText(strings.TrimSpace(stdout.String())))
 	}
 	hostGitMu.Lock()
 	hostGitVerified[resolved] = before
 	hostGitMu.Unlock()
-	return nil
+	return resolved, nil
 }
 
 // gitVersionSupported reports whether major.minor is at least 2.38.

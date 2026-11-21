@@ -89,8 +89,13 @@ func TestHostGitCommandRefusesWorkspaceExecutable(t *testing.T) {
 	if err := os.Symlink(fake, link); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{fake, link} {
-		_, err := hostGitCommand(ctx, p, ws, ws, nil, "status")
+	wsLink := filepath.Join(out, "wslink")
+	if err := os.Symlink(ws, wsLink); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][2]string{{fake, ws}, {link, ws}, {fake, wsLink}, {link, wsLink}} {
+		p := c[0]
+		_, err := hostGitCommand(ctx, p, c[1], ws, nil, "status")
 		if err == nil || !strings.Contains(err.Error(), "inside the workspace") || !strings.Contains(err.Error(), fake) {
 			t.Fatalf("%s: err = %v", p, err)
 		}
@@ -115,11 +120,92 @@ func TestHostGitCommandReprobesReplacedBinary(t *testing.T) {
 	if err := try("echo 'git version 2.37.0' # padding to change size\n"); err == nil {
 		t.Fatal("replaced old git accepted from cache")
 	}
-	if err := try("echo broken >&2; exit 1 # more padding here\n"); err == nil {
-		t.Fatal("failing --version accepted")
-	}
 	if err := try("echo 'git version 2.56.0'\n"); err != nil {
-		t.Fatalf("error was cached: %v", err)
+		t.Fatalf("fixed binary refused: %v", err)
+	}
+}
+
+// TestHostGitCommandDoesNotCacheFailures calls hostGitCommand repeatedly on
+// UNCHANGED binaries: a refusal or probe failure must be re-probed every time.
+func TestHostGitCommandDoesNotCacheFailures(t *testing.T) {
+	ctx := context.Background()
+	ws := resolvedTemp(t)
+	for name, body := range map[string]string{
+		"old":     `echo "git version 2.37.9"`,
+		"failing": `echo broken >&2; exit 1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := resolvedTemp(t)
+			counter := filepath.Join(bin, "count")
+			fake := filepath.Join(bin, "git")
+			writeExecutable(t, fake, "echo x >> "+shellQuote(counter)+"\n"+body+"\n")
+			for i := 0; i < 3; i++ {
+				if _, err := hostGitCommand(ctx, fake, ws, ws, nil, "status"); err == nil {
+					t.Fatalf("call %d accepted an unchanged bad git", i)
+				}
+			}
+			data, err := os.ReadFile(counter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(string(data), "\n"); n != 3 {
+				t.Fatalf("probe ran %d times; want 3", n)
+			}
+		})
+	}
+}
+
+func TestHostGitCommandRunsResolvedPath(t *testing.T) {
+	ctx := context.Background()
+	bin, ws, out := resolvedTemp(t), resolvedTemp(t), resolvedTemp(t)
+	fake := filepath.Join(bin, "git")
+	writeExecutable(t, fake, "echo 'git version 2.56.0'\n")
+	link := filepath.Join(out, "gitlink")
+	if err := os.Symlink(fake, link); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := hostGitCommand(ctx, link, ws, ws, nil, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != fake {
+		t.Fatalf("Path = %q; want resolved %q", cmd.Path, fake)
+	}
+	if cmd.Args[0] != link {
+		t.Fatalf("Args[0] = %q; want %q", cmd.Args[0], link)
+	}
+}
+
+func TestHostGitCommandRefusesRelativePaths(t *testing.T) {
+	ctx := context.Background()
+	bin, ws := resolvedTemp(t), resolvedTemp(t)
+	fake := filepath.Join(bin, "git")
+	writeExecutable(t, fake, "echo 'git version 2.56.0'\n")
+	if _, err := hostGitCommand(ctx, "bin/git", ws, ws, nil, "status"); err == nil {
+		t.Error("relative git path accepted")
+	}
+	for _, w := range []string{"", "ws"} {
+		if _, err := hostGitCommand(ctx, fake, w, ws, nil, "status"); err == nil {
+			t.Errorf("workspace %q accepted", w)
+		}
+	}
+}
+
+func TestHostGitCommandErrorsAreSanitized(t *testing.T) {
+	ctx := context.Background()
+	ws := resolvedTemp(t)
+	evil := filepath.Join(ws, "a\x1b[31mb", "bin")
+	if err := os.MkdirAll(evil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(evil, "git")
+	writeExecutable(t, fake, "echo 'git version 2.56.0'\n")
+	_, err := hostGitCommand(ctx, fake, ws, ws, nil, "status")
+	if err == nil {
+		t.Fatal("workspace git accepted")
+	}
+	if strings.ContainsRune(err.Error(), 0x1b) {
+		t.Fatalf("raw ESC in error: %q", err)
 	}
 }
 
