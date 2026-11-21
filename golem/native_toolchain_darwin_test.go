@@ -121,11 +121,16 @@ func (s *toolchainSession) ok(argv ...string) string {
 	return res
 }
 
-// fails runs argv and requires a non-zero exit.
-func (s *toolchainSession) fails(argv ...string) {
+// fails runs argv and requires a non-zero exit whose result names reason, so
+// a control cannot pass on an unrelated failure.
+func (s *toolchainSession) fails(reason string, argv ...string) {
 	s.t.Helper()
-	if code, res := s.run(argv...); code == 0 {
+	code, res := s.run(argv...)
+	if code == 0 {
 		s.t.Fatalf("%q succeeded without what it relies on:\n%s", argv, res)
+	}
+	if !strings.Contains(res, reason) {
+		s.t.Fatalf("%q failed (exit %d) without the expected reason %q:\n%s", argv, code, reason, res)
 	}
 }
 
@@ -246,7 +251,9 @@ func syncRequirement(t *testing.T) (version, sum string) {
 }
 
 // reviewedSystemRoots restates the Seatbelt backend's fixed read roots, so
-// the test can show a declared root is not already covered by one.
+// the test can show a declared root is not already covered by one. The source
+// of truth is seatbeltDefaultSystemRoots in agent/tools/exec_darwin.go; this
+// copy must change with it.
 var reviewedSystemRoots = []string{"/System/Library", "/System/Cryptexes/OS", "/usr/bin", "/usr/lib", "/usr/libexec", "/usr/share", "/bin", "/sbin"}
 
 // TestNativeBackendToolchainGoBuildAndTest: with GOROOT and an offline module
@@ -308,30 +315,36 @@ func TestNativeBackendToolchainGoBuildAndTest(t *testing.T) {
 		strconv.Quote("GOMODCACHE="+modRoot), strconv.Quote("GOPROXY=off"), strconv.Quote("GOTOOLCHAIN=local"),
 		strconv.Quote("GOFLAGS=-buildvcs=false"), strconv.Quote("GOCACHE=<private temp>/gocache"))
 
-	without := map[string]func(*agenttools.SandboxConfig){
-		"without GOROOT": func(c *agenttools.SandboxConfig) { c.ReadOnlyRoots = []string{modRoot} },
-		"without the module cache": func(c *agenttools.SandboxConfig) {
+	without := map[string]struct {
+		drop   func(*agenttools.SandboxConfig)
+		reason string
+	}{
+		"without GOROOT": {func(c *agenttools.SandboxConfig) { c.ReadOnlyRoots = []string{modRoot} }, "cannot find GOROOT"},
+		"without the module cache": {func(c *agenttools.SandboxConfig) {
 			c.ReadOnlyRoots = []string{goroot}
 			c.Env = slices.DeleteFunc(c.Env, func(e agenttools.SandboxEnv) bool { return e.Name == "GOMODCACHE" })
-		},
-		"without GOCACHE": func(c *agenttools.SandboxConfig) { c.TempEnv = nil },
+		}, "could not create module cache"},
+		"without GOCACHE": {func(c *agenttools.SandboxConfig) { c.TempEnv = nil }, "failed to initialize build cache"},
 	}
-	for name, drop := range without {
+	for name, w := range without {
 		t.Run(name, func(t *testing.T) {
 			cfg := full.Clone()
-			drop(&cfg)
+			w.drop(&cfg)
 			s := newToolchainSession(t, ws, cfg, true)
-			s.fails("go", "build", "./...")
-			s.fails("go", "test", "./...")
+			s.fails(w.reason, "go", "build", "./...")
+			s.fails(w.reason, "go", "test", "./...")
 		})
 	}
 }
 
-// requireDeveloperLinkIfAsked logs which developer selection links exist.
-// With GO_LLM_REQUIRE_XCODE_LINK=1, none existing fails the test: that job
-// must exercise a developer directory a link selects.
-func requireDeveloperLinkIfAsked(t *testing.T) {
+// requireLinkedXcodeIfAsked logs which developer selection links exist. With
+// GO_LLM_REQUIRE_XCODE_LINK=1, the test fails unless one exists and dev, the
+// active developer directory, is an Xcode bundle: that job must exercise an
+// Xcode a link selects, and a link to the Command Line Tools cannot stand in.
+func requireLinkedXcodeIfAsked(t *testing.T, dev string) {
 	t.Helper()
+	// The source of truth is developerSelectionLinks in
+	// agent/tools/sandbox_policy.go; this copy must change with it.
 	links := []string{"/private/var/select/developer_dir", "/private/var/db/xcode_select_link"}
 	var present []string
 	for _, link := range links {
@@ -340,8 +353,14 @@ func requireDeveloperLinkIfAsked(t *testing.T) {
 		}
 	}
 	t.Logf("developer selection links checked %q; present %q", links, present)
-	if len(present) == 0 && os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") == "1" {
+	if os.Getenv("GO_LLM_REQUIRE_XCODE_LINK") != "1" {
+		return
+	}
+	if len(present) == 0 {
 		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but none of %q exists", links)
+	}
+	if !strings.HasSuffix(dev, ".app") {
+		t.Fatalf("GO_LLM_REQUIRE_XCODE_LINK=1 but the active developer directory %s is not an Xcode bundle", dev)
 	}
 }
 
@@ -384,12 +403,12 @@ func treeOf(t *testing.T, root string) []string {
 // unstamped unless the main repository's .git is declared too (#722 F9).
 func TestNativeBackendDeveloperTools(t *testing.T) {
 	policy := nativePolicyOrSkip(t)
-	requireDeveloperLinkIfAsked(t)
 	dev, err := agenttools.ActiveDeveloperDirectory(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("developer directory %s", dev)
+	requireLinkedXcodeIfAsked(t, dev)
 	goroot, _ := hostGo(t)
 	_, base := canonicalDir(t)
 	home := filepath.Join(base, "home")
@@ -437,7 +456,11 @@ func TestNativeBackendDeveloperTools(t *testing.T) {
 	}
 	s.ok("git", "--version")
 	s.ok("/usr/bin/stat", filepath.Join(repo, "go.mod"))
-	s.fails("/usr/bin/stat", "/private/var/db/receipts")
+	const receipts = "/private/var/db/receipts"
+	if _, err := os.Stat(receipts); err != nil {
+		t.Fatalf("host stat of %s: %v; the denial below needs it to exist", receipts, err)
+	}
+	s.fails("Operation not permitted", "/usr/bin/stat", receipts)
 	fixed := []string{strconv.Quote("GIT_CONFIG_GLOBAL=/dev/null"), strconv.Quote("GIT_CONFIG_NOSYSTEM=1"), strconv.Quote("PYTHONDONTWRITEBYTECODE=1")}
 	s.requirePreviews(append(fixed, "developer_directory="+strconv.Quote(dev))...)
 	if _, err := os.Lstat(noHome); !errors.Is(err, fs.ErrNotExist) {
@@ -452,15 +475,18 @@ func TestNativeBackendDeveloperTools(t *testing.T) {
 	s.requirePreviews(fixed...)
 
 	t.Run("without the developer directory", func(t *testing.T) {
+		// The xcode-select shim's own error: which link it names differs
+		// between a linked Xcode and the implicit Command Line Tools.
+		const shim = "xcode-select: error"
 		s := newToolchainSession(t, repo, policy, false)
 		t.Setenv("HOME", noHome)
-		s.fails(python...)
+		s.fails(shim, python...)
 		t.Setenv("HOME", home)
-		s.fails("git", "--version")
+		s.fails(shim, "git", "--version")
 		noDev := withGo.Clone()
 		noDev.DeveloperDirectory = ""
 		s = newToolchainSession(t, repo, noDev, false)
-		s.fails("go", "build", "-o", "unstamped", ".")
+		s.fails("error obtaining VCS status", "go", "build", "-o", "unstamped", ".")
 	})
 
 	t.Run("worktree", func(t *testing.T) {
