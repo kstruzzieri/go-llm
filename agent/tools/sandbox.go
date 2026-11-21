@@ -50,11 +50,14 @@ const SandboxRuntimeBwrap SandboxRuntime = "bwrap"
 // ErrSandboxPolicy reports that a selected sandbox policy cannot be honored
 // here: its backend could not be constructed (an invalid config, a runtime
 // unsupported on this OS, a failed capability probe) or the workspace root
-// cannot safely bound it. ValidateSandbox, CheckSandboxBindings,
-// NewVerifierSlot and the verification constructors wrap it with the cause;
-// the exec tool constructors do not, so a session validates its policy with
-// ValidateSandbox first. Test with errors.Is. Command errors (a missing
-// executable, an invalid cwd) never wrap it.
+// cannot safely bound it, as when a declared root (#722) overlaps it.
+// ValidateSandbox, CheckSandboxBindings, NewVerifierSlot, the verification
+// constructors and the sandboxed exec tool constructors (NewSandboxedExecTools,
+// NewSandboxedExecToolsWithOptions, NewSandboxedBackgroundManager and the
+// NewExecToolsWithBackground factories) wrap it with the cause; a
+// constructor's own workspace or scratch-option error does not. Test with
+// errors.Is. Command errors (a missing executable, an invalid cwd) never wrap
+// it.
 var ErrSandboxPolicy = errors.New("tools: sandbox policy unavailable")
 
 // SandboxConfig is a permission ceiling for a non-host execution runtime: a
@@ -252,6 +255,7 @@ type sandboxApproval struct {
 	keyComponent string
 	preview      string
 	runtime      SandboxRuntime
+	roots        string // declared roots (#722), NUL-joined; "" for none
 }
 
 // validateWorkspace rejects roots that cannot safely bound the selected
@@ -260,16 +264,39 @@ type sandboxApproval struct {
 func (s sandboxApproval) validateWorkspace(root string) error {
 	switch s.runtime {
 	case SandboxRuntimeSeatbelt:
-		_, err := seatbeltAllowancePath("workspace root", root)
-		return err
+		if _, err := seatbeltAllowancePath("workspace root", root); err != nil {
+			return err
+		}
 	case SandboxRuntimeBwrap:
 		if !posixCleanAbs(root) || bwrapBroadRoot(root) {
 			return fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path outside top-level system directories", root)
 		}
-		return nil
-	default:
+	}
+	return s.checkRootOverlap(root)
+}
+
+// checkRootOverlap refuses a declared root that is, covers or lies inside the
+// workspace root, compared by file identity in both directions. It is the
+// check every exec factory makes where its backend meets its workspace.
+func (s sandboxApproval) checkRootOverlap(workspace string) error {
+	if s.roots == "" {
 		return nil
 	}
+	for _, root := range strings.Split(s.roots, "\x00") {
+		if overlaps(root, workspace) {
+			return fmt.Errorf("tools: declared root %q overlaps the workspace root %q", root, workspace)
+		}
+	}
+	return nil
+}
+
+// checkFactoryRoots is checkRootOverlap at an exec factory, wrapping
+// ErrSandboxPolicy.
+func checkFactoryRoots(approval sandboxApproval, ws *Workspace) error {
+	if err := approval.checkRootOverlap(ws.root); err != nil {
+		return fmt.Errorf("tools: build exec tools: %w: %w", ErrSandboxPolicy, err)
+	}
+	return nil
 }
 
 // sandboxFingerprint hashes the approval-relevant sandbox identity using
@@ -338,6 +365,7 @@ func approvalForSandbox(cfg SandboxConfig) sandboxApproval {
 		keyComponent: "sb:" + sandboxFingerprint(cfg) + ":",
 		preview:      renderSandboxLine(cfg),
 		runtime:      cfg.Runtime,
+		roots:        strings.Join(declaredRoots(cfg), "\x00"),
 	}
 }
 

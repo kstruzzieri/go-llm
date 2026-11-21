@@ -226,10 +226,13 @@ func NewSandboxedExecTools(root string, cfg SandboxConfig) ([]agent.Tool, error)
 func newSandboxedExecTools(root string, cfg SandboxConfig, budget time.Duration) ([]agent.Tool, error) {
 	backend, err := newExecBackend(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, fmt.Errorf("tools: build exec tools: %w: %w", ErrSandboxPolicy, err)
 	}
 	ws, err := newBudgetedWorkspace(root, budget)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkFactoryRoots(backend.approval, ws); err != nil {
 		return nil, err
 	}
 	rc := NewRunCommand(ws, backend)
@@ -287,10 +290,13 @@ func NewSandboxedExecToolsWithOptions(root string, sandbox SandboxConfig, opts E
 	}
 	backend, err := newExecBackend(sandbox)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build exec tools: %w", err)
+		return nil, fmt.Errorf("tools: build exec tools: %w: %w", ErrSandboxPolicy, err)
 	}
 	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkFactoryRoots(backend.approval, ws); err != nil {
 		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, backend.sandbox.Runtime)

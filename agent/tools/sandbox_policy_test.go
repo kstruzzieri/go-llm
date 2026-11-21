@@ -2,6 +2,8 @@ package tools
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,6 +112,212 @@ func TestValidateSandboxEnv(t *testing.T) {
 			err := ValidateSandbox(cfg, t.TempDir())
 			if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), "host runtime accepts no constraints") {
 				t.Fatalf("ValidateSandbox(host + %s) = %v, want host refusal wrapping ErrSandboxPolicy", name, err)
+			}
+		})
+	}
+}
+
+// mkdirT creates dir and its parents, failing the test on error.
+func mkdirT(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// standInHome points HOME at a fresh canonical directory and clears
+// XDG_DATA_HOME, so construction-time admission never looks under the real
+// home or Golem's real data directory. It returns the stand-in home.
+func standInHome(t *testing.T) string {
+	t.Helper()
+	_, base := canonicalTempDir(t)
+	home := mkdirT(t, filepath.Join(base, "home"))
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", "")
+	return home
+}
+
+// TestAdmitRoots pins admission of declared roots (#722 D7) against a
+// stand-in host: a home, a temp base and an environment that names only
+// them. The excluded stores are listed here, not read from the code under
+// test.
+func TestAdmitRoots(t *testing.T) {
+	_, homeParent := canonicalTempDir(t)
+	_, tempParent := canonicalTempDir(t)
+	_, scratch := canonicalTempDir(t)
+	home := mkdirT(t, filepath.Join(homeParent, "home"))
+	tempBase := mkdirT(t, filepath.Join(tempParent, "tmp"))
+	xdg := mkdirT(t, filepath.Join(scratch, "xdg"))
+	env := map[string]string{"HOME": home}
+	getenv := func(k string) string { return env[k] }
+	relocated := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return xdg
+		}
+		return env[k]
+	}
+
+	admitted := []string{
+		mkdirT(t, filepath.Join(tempBase, "go-llm-a0-fixture", "modcache")),
+		mkdirT(t, filepath.Join(home, "go", "pkg", "mod")),
+	}
+	if err := admitRoots(admitted, home, tempBase, getenv); err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
+
+	target := mkdirT(t, filepath.Join(scratch, "target"))
+	link := filepath.Join(scratch, "link")
+	dangling := filepath.Join(scratch, "dangling")
+	file := filepath.Join(scratch, "file")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(scratch, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type row struct {
+		name, root, reason string
+		getenv             func(string) string
+	}
+	rows := []row{
+		{"volume root", "/", "broad", nil},
+		{"System", "/System", "broad", nil},
+		{"System Volumes", "/System/Volumes", "broad", nil},
+		{"data firmlink child", "/System/Volumes/Data/x", "broad", nil},
+		{"symlink", link, "canonical spelling " + `"` + target + `"`, nil},
+		{"dangling link", dangling, "cannot be resolved", nil},
+		{"regular file", file, "not a directory", nil},
+		{"home", home, "home directory", nil},
+		{"covering home", homeParent, "home directory", nil},
+		{"temp base", tempBase, "temp base", nil},
+		{"covering temp base", tempParent, "temp base", nil},
+		{"seatbelt private temp", mkdirT(t, filepath.Join(tempBase, "go-llm-seatbelt-x")), "runtime temp", nil},
+		{"scratch reference", mkdirT(t, filepath.Join(tempBase, "go-llm-scratch-ref-x")), "runtime temp", nil},
+		{"data directory unknown", target, "data directory", func(string) string { return "" }},
+	}
+	excluded := []string{
+		".ssh", ".gnupg", ".aws", ".docker", ".kube", ".netrc", ".config", ".claude", ".codex",
+		"Library/Keychains", ".local/share/golem", ".local/share/go-llm", "Library/Application Support/go-llm",
+	}
+	for _, rel := range excluded {
+		e := mkdirT(t, filepath.Join(home, rel))
+		rows = append(rows,
+			row{"equal " + rel, e, "excluded", nil},
+			row{"inside " + rel, mkdirT(t, filepath.Join(e, "x")), "excluded", nil})
+		if parent := filepath.Dir(e); parent != home {
+			rows = append(rows, row{"covering " + rel, parent, "excluded", nil})
+		}
+	}
+	if os.Geteuid() != 0 { // root lists any directory, so nothing is unverified
+		locked := mkdirT(t, filepath.Join(scratch, "locked"))
+		child := mkdirT(t, filepath.Join(locked, "child"))
+		if err := os.Chmod(locked, 0o311); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+		rows = append(rows, row{"unverifiable spelling", child, "cannot be verified", nil})
+		// An unlistable store turns "inside .ssh" into an ordering check: it is
+		// refused as excluded, never reported unverifiable, so admission did not
+		// try to list the store.
+		ssh := filepath.Join(home, ".ssh")
+		if err := os.Chmod(ssh, 0o311); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(ssh, 0o700) })
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			ge := getenv
+			if r.getenv != nil {
+				ge = r.getenv
+			}
+			err := admitRoots([]string{r.root}, home, tempBase, ge)
+			if err == nil || !strings.Contains(err.Error(), r.reason) {
+				t.Fatalf("admitRoots(%q) = %v, want reason %q", r.root, err, r.reason)
+			}
+		})
+	}
+
+	// go-llm's own stores move with XDG_DATA_HOME.
+	t.Run("relocated XDG_DATA_HOME", func(t *testing.T) {
+		control := mkdirT(t, filepath.Join(xdg, "other"))
+		if err := admitRoots([]string{control}, home, tempBase, relocated); err != nil {
+			t.Fatalf("control refused: %v", err)
+		}
+		for _, root := range []string{
+			mkdirT(t, filepath.Join(xdg, "golem")),
+			mkdirT(t, filepath.Join(xdg, "go-llm", "x")),
+			xdg,
+		} {
+			if err := admitRoots([]string{root}, home, tempBase, relocated); err == nil || !strings.Contains(err.Error(), "excluded") {
+				t.Errorf("admitRoots(%q) = %v, want an excluded-store refusal", root, err)
+			}
+		}
+	})
+}
+
+// TestCanonicalToolchainRoot pins the host's one canonicalization: a symlink
+// resolves to its target's spelling, which then passes admission, and a
+// missing path is refused.
+func TestCanonicalToolchainRoot(t *testing.T) {
+	_, base := canonicalTempDir(t)
+	home := mkdirT(t, filepath.Join(base, "home"))
+	tempBase := mkdirT(t, filepath.Join(base, "tmp"))
+	target := mkdirT(t, filepath.Join(base, "go", "libexec"))
+	link := filepath.Join(base, "golink")
+	if err := os.Symlink(filepath.Join(base, "go"), link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := CanonicalToolchainRoot(filepath.Join(link, "libexec"))
+	if err != nil || got != target {
+		t.Fatalf("CanonicalToolchainRoot(link) = %q, %v; want %q", got, err, target)
+	}
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	if err := admitRoots([]string{got}, home, tempBase, getenv); err != nil {
+		t.Fatalf("canonical spelling refused: %v", err)
+	}
+	if _, err := CanonicalToolchainRoot(filepath.Join(base, "missing")); err == nil {
+		t.Fatal("missing root accepted")
+	}
+}
+
+// TestSandboxRootWorkspaceOverlap pins validateWorkspace's overlap check: a
+// declared root, the developer directory included, may not be, cover or lie
+// inside the workspace.
+func TestSandboxRootWorkspaceOverlap(t *testing.T) {
+	_, base := canonicalTempDir(t)
+	root := mkdirT(t, filepath.Join(base, "root"))
+	ws := mkdirT(t, filepath.Join(base, "ws"))
+	approval := func(cfg SandboxConfig) sandboxApproval {
+		cfg.Runtime = SandboxRuntimeSeatbelt
+		return approvalForSandbox(mustNormalizeSandbox(t, cfg))
+	}
+	if err := approval(SandboxConfig{ReadOnlyRoots: []string{root}, DeveloperDirectory: mkdirT(t, filepath.Join(base, "dev"))}).validateWorkspace(ws); err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
+	rows := map[string]struct {
+		cfg SandboxConfig
+		ws  string
+	}{
+		"workspace is the root":                      {SandboxConfig{ReadOnlyRoots: []string{root}}, root},
+		"workspace inside the root":                  {SandboxConfig{ReadOnlyRoots: []string{root}}, mkdirT(t, filepath.Join(root, "ws"))},
+		"root inside the workspace":                  {SandboxConfig{ReadOnlyRoots: []string{mkdirT(t, filepath.Join(ws, "tools"))}}, ws},
+		"developer directory covering the workspace": {SandboxConfig{DeveloperDirectory: base}, ws},
+	}
+	for name, r := range rows {
+		t.Run(name, func(t *testing.T) {
+			if err := approval(r.cfg).validateWorkspace(r.ws); err == nil || !strings.Contains(err.Error(), "overlaps") {
+				t.Fatalf("validateWorkspace(%q) = %v, want an overlap refusal", r.ws, err)
 			}
 		})
 	}

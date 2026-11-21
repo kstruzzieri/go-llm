@@ -138,7 +138,7 @@ func NewBackgroundManager() *BackgroundManager {
 func NewSandboxedBackgroundManager(cfg SandboxConfig) (*BackgroundManager, error) {
 	backend, err := newExecBackend(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("tools: build background manager: %w", err)
+		return nil, fmt.Errorf("tools: build background manager: %w: %w", ErrSandboxPolicy, err)
 	}
 	return newBackgroundManagerWithBackend(backend, rand.Reader), nil
 }

@@ -275,11 +275,13 @@ type seatbeltBackend struct {
 	tempBase     string
 	systemRoots  func(workspaceRoot string) ([]string, error)
 	inspect      func(root string) (sandboxGitLayout, error)
+	roots        []string // declared roots (#722), admitted at construction
 }
 
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
-// when the config requests ceilings Seatbelt cannot enforce or when the
-// active capability probe fails.
+// when the config requests ceilings Seatbelt cannot enforce, when a declared
+// root fails admission (admitRoots, against the process's HOME and
+// environment), or when the active capability probe fails.
 func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 	return newSeatbeltExecBackendAt(seatbeltExecPath, probeSeatbelt, cfg)
 }
@@ -287,6 +289,16 @@ func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg SandboxConfig) (execBackend, error) {
 	if err := seatbeltConfigSupport(cfg); err != nil {
 		return nil, err
+	}
+	roots := declaredRoots(cfg)
+	if len(roots) > 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("tools: seatbelt declared roots: %w", err)
+		}
+		if err := admitRoots(roots, home, seatbeltTempBase, os.Getenv); err != nil {
+			return nil, err
+		}
 	}
 	b := &seatbeltBackend{
 		execPath:     execPath,
@@ -308,6 +320,7 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			return collectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home, seatbeltBroadRoot)
 		},
 		inspect: inspectSandboxWorkspace,
+		roots:   roots,
 	}
 	// The probe is this backend's first spawn, and construction (so
 	// ValidateSandbox) must fail where every later spawn would (#576). The
@@ -374,6 +387,14 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	}
 	if !posixCleanAbs(spec.WorkspaceRoot) || seatbeltBroadRoot(spec.WorkspaceRoot) {
 		return execSpec{}, nil, fmt.Errorf("tools: seatbelt workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
+	}
+	// Each command re-checks the declared roots against its own workspace
+	// (scratch rewrites it), as collectSystemRoots does for the fixed roots:
+	// a string check, both spellings canonical.
+	for _, root := range b.roots {
+		if pathCovers(root, spec.WorkspaceRoot) || pathCovers(spec.WorkspaceRoot, root) {
+			return execSpec{}, nil, fmt.Errorf("tools: seatbelt declared root %q overlaps the workspace root %q", root, spec.WorkspaceRoot)
+		}
 	}
 	canonBase, err := filepath.EvalSymlinks(b.tempBase)
 	if err != nil {

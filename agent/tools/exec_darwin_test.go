@@ -3377,3 +3377,157 @@ func seatbeltNarrow(t *testing.T, route narrowRoute) {
 		return []string{exe, "__golem_exec_helper__", "dial", network, addr}
 	})
 }
+
+// TestSeatbeltConstructionRefusals pins construction-time refusal of declared
+// roots (#722) through the public ValidateSandbox path: each wraps
+// ErrSandboxPolicy and names its reason. HOME is a stand-in, so nothing
+// under the real home is consulted.
+func TestSeatbeltConstructionRefusals(t *testing.T) {
+	requireSeatbeltCapability(t)
+	home := standInHome(t)
+	base := canonTempDirT(t)
+	ws := mkdirT(t, filepath.Join(base, "ws"))
+	tools := mkdirT(t, filepath.Join(base, "tools"))
+	if err := ValidateSandbox(SandboxConfig{Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{tools}}, ws); err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	dev := mkdirT(t, filepath.Join(base, "dev"))
+	devWS := mkdirT(t, filepath.Join(dev, "ws"))
+	rows := []struct {
+		name   string
+		cfg    SandboxConfig
+		ws     string
+		reason string
+	}{
+		{"home", SandboxConfig{ReadOnlyRoots: []string{home}}, ws, "home directory"},
+		{"parent of home", SandboxConfig{ReadOnlyRoots: []string{filepath.Dir(home)}}, ws, "home directory"},
+		{"dangling link", SandboxConfig{ReadOnlyRoots: []string{dangling}}, ws, "cannot be resolved"},
+		{"control character", SandboxConfig{ReadOnlyRoots: []string{tools + "/a\nb"}}, ws, "control characters"},
+		{"developer directory covering the workspace", SandboxConfig{DeveloperDirectory: dev}, devWS, "overlaps"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			r.cfg.Runtime = SandboxRuntimeSeatbelt
+			err := ValidateSandbox(r.cfg, r.ws)
+			if !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), r.reason) {
+				t.Fatalf("ValidateSandbox = %v, want ErrSandboxPolicy with reason %q", err, r.reason)
+			}
+		})
+	}
+}
+
+// TestSeatbeltRootWorkspaceCaseAlias proves the workspace overlap check
+// compares file identity, not spelling: on a case-insensitive volume a case
+// alias of the workspace is refused in both directions although no string
+// prefix matches.
+func TestSeatbeltRootWorkspaceCaseAlias(t *testing.T) {
+	base := canonTempDirT(t)
+	root := mkdirT(t, filepath.Join(base, "tools"))
+	mkdirT(t, filepath.Join(root, "ws"))
+	if _, err := os.Stat(filepath.Join(base, "TOOLS")); err != nil {
+		t.Skipf("temp volume is case-sensitive: %v", err)
+	}
+	outer := mkdirT(t, filepath.Join(base, "outer"))
+	inner := mkdirT(t, filepath.Join(outer, "lib"))
+	approval := func(r string) sandboxApproval {
+		return approvalForSandbox(mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{r}}))
+	}
+	if err := approval(root).validateWorkspace(outer); err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
+	for name, r := range map[string]struct{ root, ws string }{
+		"workspace alias inside the root": {root, filepath.Join(base, "TOOLS", "ws")},
+		"root inside the workspace alias": {inner, filepath.Join(base, "OUTER")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if pathCovers(r.root, r.ws) || pathCovers(r.ws, r.root) {
+				t.Fatalf("fixture overlaps by spelling; it must differ only by case")
+			}
+			if err := approval(r.root).validateWorkspace(r.ws); err == nil || !strings.Contains(err.Error(), "overlaps") {
+				t.Fatalf("validateWorkspace(%q) = %v, want an overlap refusal", r.ws, err)
+			}
+		})
+	}
+}
+
+// TestSeatbeltFactoryRootOverlap pins the construction check where each exec
+// factory meets its workspace: a declared root overlapping the workspace is
+// refused with ErrSandboxPolicy, while the same factory over a disjoint
+// workspace builds.
+func TestSeatbeltFactoryRootOverlap(t *testing.T) {
+	requireSeatbeltCapability(t)
+	standInHome(t)
+	base := canonTempDirT(t)
+	root := mkdirT(t, filepath.Join(base, "root"))
+	inside := mkdirT(t, filepath.Join(root, "ws"))
+	outside := mkdirT(t, filepath.Join(base, "ws"))
+	cfg := SandboxConfig{Runtime: SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{root}}
+	scratch := ExecToolsOptions{Scratch: ScratchConfig{Enabled: true}}
+	factories := map[string]func(ws string) error{
+		"plain": func(ws string) error { _, err := NewSandboxedExecTools(ws, cfg); return err },
+		"scratch": func(ws string) error {
+			_, err := NewSandboxedExecToolsWithOptions(ws, cfg, scratch)
+			return err
+		},
+		"background": func(ws string) error {
+			m, err := NewSandboxedBackgroundManager(cfg)
+			if err != nil {
+				return err
+			}
+			_, err = NewExecToolsWithBackground(ws, m)
+			return err
+		},
+		"background scratch": func(ws string) error {
+			m, err := NewSandboxedBackgroundManager(cfg)
+			if err != nil {
+				return err
+			}
+			_, err = NewExecToolsWithBackgroundOptions(ws, m, scratch)
+			return err
+		},
+	}
+	for name, build := range factories {
+		t.Run(name, func(t *testing.T) {
+			if err := build(outside); err != nil {
+				t.Fatalf("valid control refused: %v", err)
+			}
+			if err := build(inside); !errors.Is(err, ErrSandboxPolicy) || !strings.Contains(err.Error(), "overlaps") {
+				t.Fatalf("overlapping root = %v, want ErrSandboxPolicy overlap refusal", err)
+			}
+		})
+	}
+}
+
+// TestSeatbeltPrepareRootWorkspace pins prepare's own re-check: it bypasses
+// validateWorkspace, so a spec whose workspace overlaps a declared root must
+// fail there before any private temp exists.
+func TestSeatbeltPrepareRootWorkspace(t *testing.T) {
+	base := canonTempDirT(t)
+	root := mkdirT(t, filepath.Join(base, "root"))
+	outside := mkdirT(t, filepath.Join(base, "ws"))
+	b, tempBase := testSeatbeltBackend(t, &captureRunner{})
+	b.roots = []string{root}
+	_, cleanup, err := b.prepare(seatbeltSpec(t, outside))
+	if err != nil {
+		t.Fatalf("valid control refused: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	for name, ws := range map[string]string{
+		"workspace is the root":     root,
+		"workspace inside the root": mkdirT(t, filepath.Join(root, "ws")),
+		"root inside the workspace": base,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := b.prepare(seatbeltSpec(t, ws)); err == nil || !strings.Contains(err.Error(), "overlaps") {
+				t.Fatalf("prepare(%q) = %v, want an overlap refusal", ws, err)
+			}
+			assertEmptyDir(t, tempBase)
+		})
+	}
+}
