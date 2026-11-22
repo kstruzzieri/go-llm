@@ -523,6 +523,8 @@ func TestRunDeclaresToolchainOnce(t *testing.T) {
 		wantErr     string // "" means the policy reaches the probe
 	}{
 		{"resolved", link, filepath.Join(link, "mod"), nil, filepath.Join(real, "mod"), ""},
+		{"parent after symlink", link + "/..", real, nil, "",
+			"golem: -sandbox-read-root: " + agenttools.ErrSandboxPolicy.Error() + ": toolchain root must not contain a '..' component"},
 		{"module cache is the root", link, link, nil, real, ""},
 		{"module cache outside every root", link, outside, nil, outside, ""},
 		{"missing root", filepath.Join(real, "missing"), filepath.Join(real, "missing"), nil, "", "golem: -sandbox-read-root: "},

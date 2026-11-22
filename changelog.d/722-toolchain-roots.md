@@ -17,5 +17,5 @@ A host can now declare folders outside the workspace that Seatbelt commands may 
 
 - A declared root is a path, not a guarded copy: a process outside Golem can change its contents, so declare only trusted folders.
 - Admission refuses specific folders (home, `/private/tmp` and go-llm's own temp directories in it, broad system folders, credential folders, go-llm's own stores). That is not a proof that an admitted root holds nothing sensitive.
-- Roots must be canonical spellings; a changed symlink means a restart and a new approval.
+- Declared roots must use canonical spellings. The CLI and `CanonicalToolchainRoot` reject paths containing a `..` component before resolving symlinks. A changed symlink requires a restart and a new approval.
 - The developer-directory link-ownership check is not the confinement boundary; the declared, admitted folder is. `go.work` workspaces with modules outside the workspace and cgo are not supported.

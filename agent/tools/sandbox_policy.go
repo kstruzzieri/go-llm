@@ -108,11 +108,17 @@ func declaredRoots(c SandboxConfig) []string {
 // CanonicalToolchainRoot returns path's canonical spelling, the one a
 // declared root (SandboxConfig.ReadOnlyRoots, DeveloperDirectory) must use:
 // absolute, symlinks resolved, every component in its stored filesystem
-// spelling. A host calls it once before building the config; backends never
+// spelling. It rejects a ".." component in the original path before cleaning
+// because a preceding symlink can change which parent it denotes.
+// A host calls it once before building the config; backends never
 // re-resolve, so the config pins the resolved folder: retargeting the link
 // you resolved changes nothing until you resolve again and rebuild. A root
 // whose own path later becomes a link, or that disappears, fails construction.
 func CanonicalToolchainRoot(path string) (string, error) {
+	pathWithoutVolume := strings.TrimPrefix(path, filepath.VolumeName(path))
+	if slices.Contains(strings.Split(filepath.ToSlash(pathWithoutVolume), "/"), "..") {
+		return "", fmt.Errorf("%w: toolchain root must not contain a '..' component", ErrSandboxPolicy)
+	}
 	canon, unverified, err := canonicalWorkspaceRoot(path)
 	if err != nil {
 		return "", err

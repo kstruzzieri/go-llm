@@ -174,14 +174,16 @@ func declareToolchain(ctx context.Context, policy agenttools.SandboxConfig, f fl
 	typed := make([]string, len(policy.ReadOnlyRoots))
 	roots := slices.Clone(policy.ReadOnlyRoots)
 	for i, root := range policy.ReadOnlyRoots {
-		abs, err := filepath.Abs(root)
+		canon, err := agenttools.CanonicalToolchainRoot(root)
 		if err == nil {
-			roots[i], err = agenttools.CanonicalToolchainRoot(abs)
+			// Keep the typed alias for rebasing GOMODCACHE after the original
+			// spelling has passed the root's parent-component check.
+			typed[i], err = filepath.Abs(root)
 		}
 		if err != nil {
 			return policy, fmt.Errorf("golem: -sandbox-read-root: %w", err)
 		}
-		typed[i] = abs
+		roots[i] = canon
 	}
 	env := slices.Clone(policy.Env)
 	for i, e := range env {

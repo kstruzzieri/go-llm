@@ -348,6 +348,17 @@ func TestCanonicalToolchainRoot(t *testing.T) {
 	if _, err := CanonicalToolchainRoot(filepath.Join(base, "missing")); err == nil {
 		t.Fatal("missing root accepted")
 	}
+	t.Chdir(base)
+	for _, raw := range []string{"../go", "go/../go", link + "/..", link + "/../go"} {
+		got, err := CanonicalToolchainRoot(filepath.FromSlash(raw))
+		if got != "" || !errors.Is(err, ErrSandboxPolicy) {
+			t.Errorf("CanonicalToolchainRoot(%q) = %q, %v; want a policy refusal", raw, got, err)
+		}
+	}
+	dotted := mkdirT(t, filepath.Join(base, "go..tools"))
+	if got, err := CanonicalToolchainRoot("./go..tools"); err != nil || got != dotted {
+		t.Errorf("relative dotted name = %q, %v; want %q", got, err, dotted)
+	}
 }
 
 // TestSandboxRootWorkspaceOverlap pins validateWorkspace's overlap check: a
