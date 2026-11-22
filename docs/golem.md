@@ -350,7 +350,11 @@ Read the limits literally:
 - **Metadata that leads into the workspace stays writable on both backends.** A file inside `.git/hooks` or `.git/info` that is a symbolic link to a file elsewhere in the workspace (such as `.git/hooks/pre-commit` linked to `scripts/pre-commit`), any git metadata file that is a hard link to a workspace file, and a file the repository's config pulls in with `[include]` or `[includeIf]` when it lies elsewhere in the workspace or inside `.git` under a name that is not protected are ordinary files a sandboxed command can change. Git runs or reads what it wrote, as with `core.hooksPath`.
 - **A submodule named under `hooks/` or `info/` is read-only.** On both backends, a submodule whose name has a directory called `hooks` or `info` before its last part (for example `hooks/shared`) has its whole git directory read-only inside the sandbox, so git commands that write in that submodule fail there.
 - **Git directories outside `.git` are not protected.** On both backends, a git directory kept inside the workspace somewhere other than `.git`, `.git/modules` or `.git/worktrees` (for example one made with `git init --separate-git-dir` into the workspace) is not recognized: its hooks and config stay writable, and only the `.git` file pointing at it is protected. A `.git` that is itself a symbolic link is not protected either.
-- **A bare repository in the workspace can run commands through git on the host.** On both backends, a sandboxed command can create a directory that git treats as a bare repository (one holding `HEAD`, `objects` and `refs`; `git init --bare` succeeds inside the sandbox), or change the config or hooks of one already in the workspace, such as a bare test fixture under `testdata/`. Git run on the host from inside that directory or below it, or from the workspace root when the workspace has no `.git` of its own, uses that repository and reads its config, which can run commands on the host. The sandbox does not refuse this. A Seatbelt rule refusing new `HEAD` entries was measured and rejected: it broke git dependencies in Cargo, Go and Bundler, bare test fixtures and any file named `head`, and a command could still build the directory in its private temp and move it in. Golem's own git calls refuse such a repository (see [Golem's own git calls](#golems-own-git-calls)). Your own git, and any editor or tool that runs git in the workspace, is covered only if you run `git config --global safe.bareRepository explicit` (git 2.38 or later): git then uses a bare repository only when you name it with `--git-dir` or `GIT_DIR`, and a repository named that way is not checked. A program that runs git in a sandboxed workspace should pass `-c safe.bareRepository=explicit` on every git call, as Golem does.
+- **Host Git can run commands from a bare repository in the workspace.** On both backends, a sandboxed command can create a bare repository (a directory holding `HEAD`, `objects` and `refs`) or change the config or hooks of an existing one, such as a fixture under `testdata/`. Host Git can discover the bare repository when run from that directory or a subdirectory, including when the bare repository is the workspace root. The repository's configuration can cause Git to run programs outside the sandbox.
+
+  A Seatbelt rule against creating new `HEAD` entries in the workspace broke bare test fixtures and operations that create entries named `head`. It still allowed a rename from the command's private temp into the workspace. Extending the rule to private temp blocked that rename and broke Git dependencies in Cargo, direct Go module fetches, and Bundler. Both variants left the config and hooks of existing bare repositories writable, so neither rule shipped.
+
+  With Git 2.38 or later, run `git config --global safe.bareRepository explicit` for your own Git commands. Editors, IDEs, and scripts can pass `-c safe.bareRepository=explicit` on each host Git invocation, as [Golem does](#golems-own-git-calls). The setting rejects ordinary bare repositories discovered implicitly. Git still honors `--git-dir` and `GIT_DIR`, and can exempt paths it recognizes as `.git`, linked-worktree, or submodule metadata. See [Git's documentation](https://git-scm.com/docs/BreakingChanges.html).
 
 ### Post-write verification under -sandbox
 
@@ -1058,9 +1062,10 @@ trusted: a filter it defines runs during the snapshot.
 Every `git` command Golem runs on the host follows the first three rules below;
 the fourth applies only to the snapshot:
 
-- It passes `-c safe.bareRepository=explicit -c core.fsmonitor=false`. A bare
-  repository that a sandboxed command planted in a workspace with no `.git` of
-  its own is refused, and no `core.fsmonitor` helper runs.
+- It passes `-c safe.bareRepository=explicit -c core.fsmonitor=false`. The first
+  setting rejects ordinary bare repositories during discovery. See
+  [What each backend enforces](#what-each-backend-enforces) for Git's exceptions.
+  The second setting disables filesystem monitor helpers.
 - Golem refuses `git` older than 2.38. It runs `git --version` once for each
   `git` binary to check.
 - Golem refuses a `git` found on `PATH` that, after symbolic links are

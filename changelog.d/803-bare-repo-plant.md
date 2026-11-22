@@ -1,8 +1,12 @@
 ### Security — A bare repository a sandboxed command makes stays a documented limit (#803)
 
-A sandboxed command can still create a bare repository in the workspace (a directory holding `HEAD`, `objects` and `refs`), or change the config or hooks of one already there. Git run on the host inside that directory, or at a workspace root with no `.git` of its own, reads its config, which can run commands outside the sandbox. Golem's own git calls refuse such a repository (see the host git hardening entry). The sandbox does not: a Seatbelt rule refusing new `HEAD` entries was measured and rejected, because it broke git dependencies in Cargo, Go and Bundler, bare test fixtures and any file named `head`, and a command could still build the directory in its private temp and move it in. Under Bubblewrap the same limit is tracked with #802. See [What each backend enforces](docs/golem.md#what-each-backend-enforces).
+A sandboxed command can still create a bare repository in the workspace (a directory holding `HEAD`, `objects` and `refs`) or change the config or hooks of an existing one. Host Git can discover a bare repository when run from that directory or below it, including when the bare repository is the workspace root. Its configuration can cause Git to run programs outside the sandbox. Under Bubblewrap, the same limit is tracked in #802.
+
+A Seatbelt rule for new `HEAD` entries in the workspace broke bare fixtures and operations that create entries named `head`. It still allowed a rename from private temp into the workspace. Extending the rule to private temp blocked that rename and broke Git dependencies in Cargo, direct Go module fetches, and Bundler. Both variants left the config and hooks of existing bare repositories writable, so neither rule shipped.
 
 #### What to do
 
-- Run `git config --global safe.bareRepository explicit` (git 2.38 or later). Git then uses a bare repository only when you name it with `--git-dir` or `GIT_DIR`; a repository named that way is not checked.
-- Programs that run git in a workspace where sandboxed commands run (editors, IDE git panels, scripts) should pass `-c safe.bareRepository=explicit` on every git call, as Golem does.
+- With Git 2.38 or later, run `git config --global safe.bareRepository explicit` for your own Git commands.
+- Editors, IDEs, and scripts can pass `-c safe.bareRepository=explicit` on each host Git invocation, as Golem does.
+
+The setting rejects ordinary bare repositories discovered implicitly. Git still honors `--git-dir` and `GIT_DIR`, and can exempt paths it recognizes as `.git`, linked-worktree, or submodule metadata. See [What each backend enforces](docs/golem.md#what-each-backend-enforces).
