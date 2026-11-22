@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"strings"
 	"sync"
 
@@ -314,8 +313,8 @@ type Runtime struct {
 	fileTools []agent.Tool
 	// profile, ceiling, guarded, sandbox and scratchKey are frozen at New
 	// (#387, #576). ceiling is nil for the profile's whole universe; guarded
-	// records a non-nil ScopeGuard; sandbox is the caller's policy (DropCaps
-	// copied); scratchKey is the scratch identity a native session's command
+	// records a non-nil ScopeGuard; sandbox is an owned copy of the caller's
+	// policy; scratchKey is the scratch identity a native session's command
 	// tools must carry.
 	profile         Profile
 	ceiling         map[string]struct{}
@@ -360,8 +359,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	if err := checkProfile(opts.Profile, opts.Tools); err != nil {
 		return nil, err
 	}
-	sandbox := opts.Sandbox
-	sandbox.DropCaps = slices.Clone(sandbox.DropCaps)
+	sandbox := opts.Sandbox.Clone()
 	if nativeRuntime(sandbox) && opts.Profile != ProfileTrusted {
 		return nil, fmt.Errorf("%w: sandbox runtime %q requires the %s profile", ErrProfileIncompatible, sandbox.Runtime, ProfileTrusted)
 	}

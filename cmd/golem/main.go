@@ -120,6 +120,12 @@ type flags struct {
 	sandboxSet        bool
 	sandboxNetwork    string
 	sandboxNetworkSet bool
+	// The declared toolchain for -sandbox seatbelt (#722): roots and env as
+	// typed; run resolves the roots and the developer directory once.
+	sandboxReadRoots    stringSliceFlag
+	sandboxEnv          stringSliceFlag
+	sandboxTempEnv      stringSliceFlag
+	sandboxDeveloperDir bool
 	// -credential-screen-budget: how long the credential screen may read the
 	// workspace before each command. screenBudgetSet distinguishes a typed
 	// value: validateFlags checks the range only then, so a zero nobody typed
@@ -227,6 +233,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.profile, "profile", "", "permission profile: inspect (default, workspace reads only) or trusted; preview is reserved")
 	fs.StringVar(&f.sandbox, "sandbox", "", "command sandbox for Trusted sessions: host (default), seatbelt (macOS) or bwrap (Linux); fails closed when unavailable; does not confine /consult, git context, MCP servers or the /edit editor")
 	fs.StringVar(&f.sandboxNetwork, "sandbox-network", "", "network policy for -sandbox seatbelt|bwrap: denied (default) or allowed")
+	fs.Var(&f.sandboxReadRoots, "sandbox-read-root", "read-only toolchain directory for -sandbox seatbelt commands (repeatable): readable and runnable, never writable; resolved to its canonical spelling at startup; refused if it overlaps the workspace or a credential or data store")
+	fs.Var(&f.sandboxEnv, "sandbox-env", "set NAME=VALUE for -sandbox seatbelt commands (repeatable) from a closed table: GOMODCACHE=<path inside a -sandbox-read-root>, GOPROXY=off, GOTOOLCHAIN=local, GOFLAGS=-buildvcs=false")
+	fs.Var(&f.sandboxTempEnv, "sandbox-temp-env", "point NAME into each -sandbox seatbelt command's private temp (repeatable) from a closed table: GOCACHE (<private temp>/gocache)")
+	fs.BoolVar(&f.sandboxDeveloperDir, "sandbox-developer-dir", false, "for -sandbox seatbelt: declare the standalone Command Line Tools read-only (requires xcode-select to select them), so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1")
 	fs.Var(&f.allowTools, "allow-tool", "one-shot mode: mount and non-interactively approve one exact built-in gated tool by name (repeatable; write_file, edit_file, run_command, start_command, stop_command); creates no session grants; MCP tools and submit_plan are never eligible; requires -p")
 	// main() prefixes "golem: " when it prints the error.
 	if err := parseQuietly(fs, args, nil); err != nil {
@@ -1022,6 +1032,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// cleared first, before this probe or any spawn; host sessions keep them.
 	if nativeSandbox(sandbox) {
 		clearInheritedDescriptors()
+		// #722: once per run and after the descriptors are cleared, since
+		// the developer directory comes from a spawned xcode-select.
+		if sandbox, err = declareToolchain(context.Background(), sandbox, f); err != nil {
+			return err
+		}
 		if err := validateSandbox(sandbox, root); err != nil {
 			return fmt.Errorf("golem: sandbox: %w", err)
 		}

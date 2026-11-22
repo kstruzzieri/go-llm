@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -79,6 +83,39 @@ func validateSandboxFlags(f flags) error {
 	if f.sandboxNetworkSet && !nativeSandbox(policy) {
 		return errors.New("golem: -sandbox-network requires -sandbox seatbelt or -sandbox bwrap")
 	}
+	for _, opt := range []struct {
+		set  bool
+		flag string
+	}{
+		{len(f.sandboxReadRoots) > 0, "-sandbox-read-root"},
+		{len(f.sandboxEnv) > 0, "-sandbox-env"},
+		{len(f.sandboxTempEnv) > 0, "-sandbox-temp-env"},
+		{f.sandboxDeveloperDir, "-sandbox-developer-dir"},
+	} {
+		if opt.set && policy.Runtime != agenttools.SandboxRuntimeSeatbelt {
+			return errors.New("golem: " + opt.flag + " requires -sandbox seatbelt")
+		}
+	}
+	// An empty value is usually an unset variable or a failed $(go env ...);
+	// filepath.Abs would turn an empty root into the working directory.
+	for _, opt := range []struct {
+		vals []string
+		flag string
+	}{
+		{f.sandboxReadRoots, "-sandbox-read-root"},
+		{f.sandboxEnv, "-sandbox-env"},
+		{f.sandboxTempEnv, "-sandbox-temp-env"},
+	} {
+		if slices.Contains(opt.vals, "") {
+			return errors.New("golem: " + opt.flag + " must not be empty")
+		}
+	}
+	for _, kv := range f.sandboxEnv {
+		if !strings.Contains(kv, "=") {
+			// Value-free: the library's table refuses the rest at startup.
+			return errors.New("golem: -sandbox-env must be NAME=VALUE")
+		}
+	}
 	if !nativeSandbox(policy) {
 		return nil
 	}
@@ -109,18 +146,89 @@ func validateSandboxFlags(f flags) error {
 // policy. "" (the zero flags value) and "host" are the host zero value;
 // network is denied unless -sandbox-network allowed. Any other runtime name
 // is passed through, so an unvalidated value fails closed in
-// agenttools.ValidateSandbox rather than becoming host.
+// agenttools.ValidateSandbox rather than becoming host. The declared
+// toolchain's roots stay as typed and its developer directory unset: this
+// runs twice (validateSandboxFlags and run), so it touches no host state, and
+// run resolves both once with declareToolchain.
 func resolveSandbox(f flags) agenttools.SandboxConfig {
 	if f.sandbox == "" || f.sandbox == string(agenttools.SandboxRuntimeHost) {
 		return agenttools.SandboxConfig{}
 	}
-	return agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntime(f.sandbox), AllowNetwork: f.sandboxNetwork == "allowed"}
+	policy := agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntime(f.sandbox), AllowNetwork: f.sandboxNetwork == "allowed",
+		ReadOnlyRoots: slices.Clone(f.sandboxReadRoots), TempEnv: slices.Clone(f.sandboxTempEnv)}
+	for _, kv := range f.sandboxEnv {
+		name, value, _ := strings.Cut(kv, "=")
+		policy.Env = append(policy.Env, agenttools.SandboxEnv{Name: name, Value: value})
+	}
+	return policy
+}
+
+// declareToolchain completes policy's declared toolchain (#722) for run:
+// each -sandbox-read-root in its canonical spelling, the one the backend,
+// approval key and permissions notice carry; a GOMODCACHE typed inside a root
+// respelled under that root's canonical spelling; and with
+// -sandbox-developer-dir the active developer directory, asked for once per
+// run. It returns new slices and leaves policy's untouched; a nil slice stays
+// nil, so a policy declaring no toolchain is unchanged.
+func declareToolchain(ctx context.Context, policy agenttools.SandboxConfig, f flags) (agenttools.SandboxConfig, error) {
+	typed := make([]string, len(policy.ReadOnlyRoots))
+	roots := slices.Clone(policy.ReadOnlyRoots)
+	for i, root := range policy.ReadOnlyRoots {
+		canon, err := agenttools.CanonicalToolchainRoot(root)
+		if err == nil {
+			// Keep the typed alias for rebasing GOMODCACHE after the original
+			// spelling has passed the root's parent-component check.
+			typed[i], err = filepath.Abs(root)
+		}
+		if err != nil {
+			return policy, fmt.Errorf("golem: -sandbox-read-root: %w", err)
+		}
+		roots[i] = canon
+	}
+	env := slices.Clone(policy.Env)
+	for i, e := range env {
+		if e.Name == "GOMODCACHE" {
+			env[i].Value = rebaseUnderRoot(e.Value, typed, roots)
+		}
+	}
+	policy.ReadOnlyRoots, policy.Env = roots, env
+	if f.sandboxDeveloperDir {
+		dir, err := activeDeveloperDirectory(ctx)
+		if err != nil {
+			return policy, fmt.Errorf("golem: -sandbox-developer-dir: %w", err)
+		}
+		policy.DeveloperDirectory = dir
+	}
+	return policy, nil
+}
+
+// rebaseUnderRoot respells a clean absolute path that lies lexically in a
+// typed root (the longest, when several hold it) under that root's canonical
+// spelling. It resolves nothing, so the path need not exist and stays inside
+// the canonical root; any other value is returned unchanged, for the library
+// to refuse without echoing it.
+func rebaseUnderRoot(path string, typed, canon []string) string {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return path
+	}
+	best, out := -1, path
+	for i, root := range typed {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && (rel == "." || filepath.IsLocal(rel)) && len(root) > best {
+			best, out = len(root), filepath.Join(canon[i], rel)
+		}
+	}
+	return out
 }
 
 // validateSandbox is agenttools.ValidateSandbox, replaceable only by this
 // package's tests so run's startup probes are observable without a backend
 // (mirrors golem's own seam).
 var validateSandbox = agenttools.ValidateSandbox
+
+// activeDeveloperDirectory is agenttools.ActiveDeveloperDirectory, replaceable
+// only by this package's tests, which count its calls.
+var activeDeveloperDirectory = agenttools.ActiveDeveloperDirectory
 
 // nativeSandbox reports whether policy selects a runtime other than host.
 func nativeSandbox(policy agenttools.SandboxConfig) bool {
@@ -208,6 +316,17 @@ func renderPermissions(ep golemruntime.EffectivePermissions) string {
 	// came without limits must still show its network policy.
 	if rt := agenttools.SandboxRuntime(ep.Command.Runtime); rt == agenttools.SandboxRuntimeSeatbelt || rt == agenttools.SandboxRuntimeBwrap {
 		line += " network=" + ep.Command.Network + " limits=" + strings.Join(ep.Command.Limits, "; ")
+		// The declared toolchain (#722), quoted like the approval preview and
+		// shown only when set, so earlier lines are unchanged.
+		if len(ep.Command.ReadOnlyRoots) > 0 {
+			line += " read-only-roots=" + previewValues(ep.Command.ReadOnlyRoots)
+		}
+		if ep.Command.DeveloperDirectory != "" {
+			line += " developer-dir=" + previewText(ep.Command.DeveloperDirectory)
+		}
+		if len(ep.Command.Env) > 0 {
+			line += " env=" + previewValues(ep.Command.Env)
+		}
 	}
 	scratch := "off"
 	if ep.Scratch {

@@ -68,6 +68,9 @@ func newExecToolsWithBackground(root string, manager *BackgroundManager, budget 
 	if err != nil {
 		return nil, err
 	}
+	if err := checkFactoryRoots(manager.backend.approval, ws); err != nil {
+		return nil, err
+	}
 	rc := NewRunCommand(ws, manager.backend)
 	rc.sandbox = manager.backend.approval
 	return []agent.Tool{
@@ -101,6 +104,9 @@ func NewExecToolsWithBackgroundOptions(root string, manager *BackgroundManager, 
 	}
 	ws, err := newBudgetedWorkspace(root, opts.CredentialScreenBudget)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkFactoryRoots(manager.backend.approval, ws); err != nil {
 		return nil, err
 	}
 	rt, err := newScratchRuntime(root, opts.Scratch, opts.PromotionJournal, manager.backend.sandbox.Runtime)
