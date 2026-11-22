@@ -536,7 +536,7 @@ func TestInspectSandboxWorkspaceChangeRefusals(t *testing.T) {
 	// containment: GITMETA-DISCOVERY
 	t.Run("root missing", func(t *testing.T) {
 		_, err := inspectSandboxWorkspace(filepath.Join(t.TempDir(), "gone"))
-		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) {
+		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) || strings.HasSuffix(err.Error(), "; retry") {
 			t.Fatalf("err = %v, want a not-exist failure, not a change", err)
 		}
 	})
@@ -544,7 +544,7 @@ func TestInspectSandboxWorkspaceChangeRefusals(t *testing.T) {
 		root := canonGitTempDir(t)
 		writeGitFixture(t, root)
 		_, passes, err := inspectWithChange(t, root, ".", os.RemoveAll)
-		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) || passes != 1 {
+		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) || strings.HasSuffix(err.Error(), "; retry") || passes != 1 {
 			t.Fatalf("err = %v after %d passes, want a not-exist failure in pass 1", err, passes)
 		}
 	})
@@ -580,8 +580,8 @@ func TestInspectSandboxWorkspaceChangeRefusals(t *testing.T) {
 			}
 		})
 		if !errors.Is(err, errSandboxWorkspaceChanged) || !strings.Contains(err.Error(), `"churn"`) ||
-			!strings.HasSuffix(err.Error(), "; retry") || passes != sandboxInspectPasses {
-			t.Fatalf("err = %v after %d passes, want a change naming churn after %d", err, passes, sandboxInspectPasses)
+			!strings.HasSuffix(err.Error(), "; retry") || passes != 3 {
+			t.Fatalf("err = %v after %d passes, want a change naming churn after 3", err, passes)
 		}
 	})
 }
@@ -604,21 +604,72 @@ func TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused(t *testing.T) {
 	}
 }
 
-// A link count that changes during a pass discards it; the next pass counts
-// every name again.
-func TestInspectSandboxWorkspaceLinkCountChangeRewalks(t *testing.T) {
-	requireLazyStat(t)
-	ws := t.TempDir()
-	a, m := filepath.Join(ws, "a"), filepath.Join(ws, "m")
-	if err := os.WriteFile(a, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
+// A pass whose link counts change under it is discarded too, and the next
+// pass counts every name again. A count left short is checked at the inode's
+// first name, so a name removed during the pass is not taken for a link
+// outside the workspace.
+func TestInspectSandboxWorkspaceLinkChangeRewalks(t *testing.T) {
+	write := func(t *testing.T, p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.Link(a, m); err != nil {
-		t.Skipf("hard links unavailable: %v", err)
+	pair := func(first, second string) func(t *testing.T, ws string) {
+		return func(t *testing.T, ws string) {
+			write(t, filepath.Join(ws, first))
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(ws, second)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(filepath.Join(ws, first), filepath.Join(ws, second)); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+		}
 	}
-	// a is counted with two links; a third appears before m is read.
-	_, passes, err := inspectWithChange(t, ws, "m", func(p string) error { return os.Link(p, filepath.Join(ws, "z")) })
-	if err != nil || passes != 2 {
-		t.Fatalf("err = %v after %d passes, want success in pass 2", err, passes)
+	for _, c := range []struct {
+		name, change string
+		setup        func(t *testing.T, ws string)
+		do           func(ws, p string) error
+		lazyStat     bool // the change is to a file at its own visit: only Info can see it
+	}{
+		// a is counted with two links; a third appears before m is read.
+		{"third link added", "m", pair("a", "m"),
+			func(ws, p string) error { return os.Link(p, filepath.Join(ws, "z")) }, true},
+		// a/f is counted with two links, then removed: b/g has one.
+		{"counted name removed", "b", pair("a/f", "b/g"),
+			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "a/f")) }, false},
+		// b/g is removed before b is listed: a/f is short one name.
+		{"uncounted name removed", "b", pair("a/f", "b/g"),
+			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "b/g")) }, false},
+		// a is walked, then moved into z before z is listed: both names count twice.
+		{"directory walked twice", "z", func(t *testing.T, ws string) {
+			pair("a/f", "a/g")(t, ws)
+			if err := os.Mkdir(filepath.Join(ws, "z"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, func(ws, _ string) error { return os.Rename(filepath.Join(ws, "a"), filepath.Join(ws, "z/a")) }, false},
+		// x is listed as a file and read as a directory, whose link count is 2 or more.
+		{"file became a directory", "x", func(t *testing.T, ws string) { write(t, filepath.Join(ws, "x")) },
+			func(_, p string) error {
+				if err := os.Remove(p); err != nil {
+					return err
+				}
+				return os.Mkdir(p, 0o755)
+			}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.lazyStat {
+				requireLazyStat(t)
+			}
+			ws := t.TempDir()
+			c.setup(t, ws)
+			_, passes, err := inspectWithChange(t, ws, c.change, func(p string) error { return c.do(ws, p) })
+			if err != nil || passes != 2 {
+				t.Fatalf("err = %v after %d passes, want success in pass 2", err, passes)
+			}
+		})
 	}
 }

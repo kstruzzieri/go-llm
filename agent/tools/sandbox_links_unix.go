@@ -38,7 +38,7 @@ type sandboxGitLayout struct {
 	root string // the workspace root; errors name paths relative to it
 }
 
-// inspectSandboxWorkspace walks the workspace once before a sandboxed spawn.
+// inspectSandboxWorkspace walks the workspace before a sandboxed spawn.
 // It rejects an inode with any directory entry outside root: pathname-based
 // sandboxes authorize names, so an allowed workspace hard link would
 // otherwise let a child mutate the same inode through an outside name.
@@ -63,8 +63,10 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 const sandboxInspectPasses = 3
 
 // errSandboxWorkspaceChanged marks a pass that saw the workspace change under
-// it: an entry its parent listed, other than the root, no longer resolved, or
-// an inode's link count changed. Nothing the pass recorded is kept.
+// it: an entry its parent listed, other than the root, no longer resolved or
+// had become a directory, or an inode's link count changed (at a later name,
+// or at its first name when the pass found fewer names than links). Nothing
+// the pass recorded is kept.
 var errSandboxWorkspaceChanged = errors.New("tools: sandbox workspace changed while inspecting")
 
 // inspectSandboxWorkspaceWithHook is inspectSandboxWorkspace with a
@@ -134,6 +136,9 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 		if err != nil {
 			return entryErr(rel, err)
 		}
+		if info.IsDir() { // listed as a non-directory, so replaced since
+			return fmt.Errorf("%w %q: became a directory", errSandboxWorkspaceChanged, rel)
+		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
 			return fmt.Errorf("tools: sandbox inspect workspace entry %q: link metadata unavailable", rel)
@@ -160,6 +165,17 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 	for _, key := range order {
 		record := links[key]
 		if record.seen < record.total {
+			// A name that went or came during the pass also leaves the count
+			// short. Only a first name that still holds the inode at the count
+			// it was recorded with shows a link outside the workspace.
+			fi, err := os.Lstat(filepath.Join(root, record.first))
+			if err != nil {
+				return sandboxGitLayout{}, entryErr(record.first, err)
+			}
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok &&
+				(uint64(st.Dev) != key.dev || uint64(st.Ino) != key.ino || uint64(st.Nlink) != record.total) {
+				return sandboxGitLayout{}, fmt.Errorf("%w %q: link count changed", errSandboxWorkspaceChanged, record.first)
+			}
 			return sandboxGitLayout{}, fmt.Errorf("tools: sandbox workspace entry %q is linked outside the workspace", record.first)
 		}
 		if record.seen > record.total {
