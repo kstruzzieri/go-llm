@@ -3,11 +3,15 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -383,5 +387,238 @@ func TestInspectSandboxWorkspaceManySubmodules(t *testing.T) {
 	// containment: GITMETA-DISCOVERY
 	if len(got.gitDirs) != 300 {
 		t.Fatalf("len(gitDirs) = %d, want 300", len(got.gitDirs))
+	}
+}
+
+// inspectWithChange inspects root, applying change once, at the first visit
+// of rel (workspace-relative; "." is the root): after its parent listed it and
+// before the walk reads it, as git's automatic gc deletes loose objects. It
+// also reports how many passes the inspection made.
+func inspectWithChange(t *testing.T, root, rel string, change func(p string) error) (sandboxGitLayout, int, error) {
+	t.Helper()
+	target := filepath.Join(root, rel)
+	passes, fired := 0, false
+	got, err := inspectSandboxWorkspaceWithHook(root, func(name string) {
+		if name == root {
+			passes++
+		}
+		if name != target || fired {
+			return
+		}
+		fired = true
+		if err := change(name); err != nil {
+			t.Errorf("change %s: %v", rel, err)
+		}
+	})
+	if !fired {
+		t.Fatalf("the walk never visited %s", rel)
+	}
+	return got, passes, err
+}
+
+// requireLazyStat skips t unless this filesystem's listing reports entry
+// types, so os.ReadDir leaves each entry's lstat to DirEntry.Info. Elsewhere
+// os.ReadDir stats every entry while listing and Info returns that result, so
+// a file removed after the listing is never seen as gone.
+func requireLazyStat(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "probe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("list probe: %v %v", entries, err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entries[0].Info(); err == nil {
+		t.Skip("this filesystem's listing reports no entry types, so a file removed after it is not seen")
+	}
+}
+
+// requireListed fails t unless rel's presence in field matches want.
+func requireListed(t *testing.T, field string, list []string, root, rel string, want bool) {
+	t.Helper()
+	if got := slices.Contains(list, filepath.Join(root, rel)); got != want {
+		t.Errorf("%s holds %s = %v, want %v: %q", field, rel, got, want, list)
+	}
+}
+
+// A pass that sees an entry its parent listed no longer resolve is discarded
+// and the walk starts again: the second pass sees the workspace as it now
+// stands, a renamed entry under its new name.
+func TestInspectSandboxWorkspaceRewalksAfterChange(t *testing.T) {
+	remove := func(string, string) func(string) error { return os.RemoveAll }
+	renameTo := func(root, rel string) func(string) error {
+		return func(p string) error { return os.Rename(p, filepath.Join(root, rel)) }
+	}
+	for _, c := range []struct {
+		name, change string
+		do           func(root, arg string) func(string) error
+		arg          string
+		lazyStat     bool // a file changes: only Info can see it
+		check        func(t *testing.T, root string, got sandboxGitLayout)
+	}{
+		{name: "file removed", change: "src/b.go", do: remove, lazyStat: true},
+		{name: "directory removed", change: "build", do: remove},
+		{name: "loose object pruned", change: ".git/objects/ab/cdef0123", do: remove, lazyStat: true},
+		{name: "emptied fan-out directory removed", change: ".git/objects/ab", do: remove},
+		{name: "worktree git dir pruned", change: ".git/worktrees/wt", do: remove,
+			check: func(t *testing.T, root string, got sandboxGitLayout) {
+				requireListed(t, "gitDirs", got.gitDirs, root, ".git/worktrees/wt", false)
+				requireListed(t, "metadata", got.metadata, root, ".git/worktrees/wt/gitdir", false)
+				requireListed(t, "gitFiles", got.gitFiles, root, "wt/.git", true)
+				requireListed(t, "metadata", got.metadata, root, ".git/modules/m/config", true)
+			}},
+		{name: "gitfile removed", change: "libs/a/.git", do: remove, lazyStat: true,
+			check: func(t *testing.T, root string, got sandboxGitLayout) {
+				requireListed(t, "gitFiles", got.gitFiles, root, "libs/a/.git", false)
+				requireListed(t, "gitDirs", got.gitDirs, root, ".git/modules/libs/a", true)
+			}},
+		{name: "nested .git removed", change: "nested/.git", do: remove,
+			check: func(t *testing.T, root string, got sandboxGitLayout) {
+				requireListed(t, "dotGitDirs", got.dotGitDirs, root, "nested/.git", false)
+				requireListed(t, "metadata", got.metadata, root, "nested/.git/config", false)
+				requireListed(t, "dotGitDirs", got.dotGitDirs, root, ".git", true)
+			}},
+		{name: "checkout renamed", change: "nested", do: renameTo, arg: "nested-moved",
+			check: func(t *testing.T, root string, got sandboxGitLayout) {
+				requireListed(t, "dotGitDirs", got.dotGitDirs, root, "nested-moved/.git", true)
+				requireListed(t, "metadata", got.metadata, root, "nested-moved/.git/config", true)
+				requireListed(t, "metadata", got.metadata, root, "nested-moved/.git/hooks", true)
+				requireListed(t, "dotGitDirs", got.dotGitDirs, root, "nested/.git", false)
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.lazyStat {
+				requireLazyStat(t)
+			}
+			root := canonGitTempDir(t)
+			writeGitFixture(t, root)
+			for _, rel := range []string{"src/b.go", "build/out.o", ".git/objects/ab/cdef0123"} {
+				p := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, passes, err := inspectWithChange(t, root, c.change, c.do(root, c.arg))
+			// containment: GITMETA-DISCOVERY
+			if err != nil {
+				t.Fatalf("%s changed during the walk refused the spawn: %v", c.change, err)
+			}
+			if passes != 2 {
+				t.Errorf("passes = %d, want 2: the changed pass is discarded and one clean pass follows", passes)
+			}
+			if c.check != nil {
+				c.check(t, root, got)
+			}
+			want, err := inspectSandboxWorkspace(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("layout after %s changed:\n got %+v\nwant %+v", c.change, got, want)
+			}
+		})
+	}
+}
+
+// What is not a change to an entry the walk listed still fails the spawn in
+// the first pass: the root gone, an entry that became another type. A change
+// in every pass fails it after the last.
+func TestInspectSandboxWorkspaceChangeRefusals(t *testing.T) {
+	// containment: GITMETA-DISCOVERY
+	t.Run("root missing", func(t *testing.T) {
+		_, err := inspectSandboxWorkspace(filepath.Join(t.TempDir(), "gone"))
+		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) {
+			t.Fatalf("err = %v, want a not-exist failure, not a change", err)
+		}
+	})
+	t.Run("root removed", func(t *testing.T) {
+		root := canonGitTempDir(t)
+		writeGitFixture(t, root)
+		_, passes, err := inspectWithChange(t, root, ".", os.RemoveAll)
+		if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errSandboxWorkspaceChanged) || passes != 1 {
+			t.Fatalf("err = %v after %d passes, want a not-exist failure in pass 1", err, passes)
+		}
+	})
+	t.Run("directory became a file", func(t *testing.T) {
+		root := canonGitTempDir(t)
+		writeGitFixture(t, root)
+		_, passes, err := inspectWithChange(t, root, "src", func(p string) error {
+			if err := os.RemoveAll(p); err != nil {
+				return err
+			}
+			return os.WriteFile(p, []byte("x"), 0o644)
+		})
+		if !errors.Is(err, syscall.ENOTDIR) || !strings.Contains(err.Error(), `"src"`) || passes != 1 {
+			t.Fatalf("err = %v after %d passes, want ENOTDIR naming src in pass 1", err, passes)
+		}
+	})
+	t.Run("changes in every pass", func(t *testing.T) {
+		root := canonGitTempDir(t)
+		writeGitFixture(t, root)
+		churn := filepath.Join(root, "churn")
+		passes := 0
+		_, err := inspectSandboxWorkspaceWithHook(root, func(name string) {
+			var err error
+			switch name {
+			case root: // before the root is listed: churn is listed in every pass
+				passes++
+				err = os.Mkdir(churn, 0o755)
+			case churn: // before churn is read
+				err = os.Remove(churn)
+			}
+			if err != nil {
+				t.Error(err)
+			}
+		})
+		if !errors.Is(err, errSandboxWorkspaceChanged) || !strings.Contains(err.Error(), `"churn"`) ||
+			!strings.HasSuffix(err.Error(), "; retry") || passes != sandboxInspectPasses {
+			t.Fatalf("err = %v after %d passes, want a change naming churn after %d", err, passes, sandboxInspectPasses)
+		}
+	})
+}
+
+// A rename after the listing hides nothing from the hard-link refusal: the
+// second pass finds the outside-linked inode under its new name.
+func TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused(t *testing.T) {
+	requireLazyStat(t)
+	ws := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside-canary")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, filepath.Join(ws, "a")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	_, passes, err := inspectWithChange(t, ws, "a", func(p string) error { return os.Rename(p, filepath.Join(ws, "b")) })
+	if err == nil || !strings.Contains(err.Error(), `"b" is linked outside the workspace`) || passes != 2 {
+		t.Fatalf("err = %v after %d passes, want b refused in pass 2", err, passes)
+	}
+}
+
+// A link count that changes during a pass discards it; the next pass counts
+// every name again.
+func TestInspectSandboxWorkspaceLinkCountChangeRewalks(t *testing.T) {
+	requireLazyStat(t)
+	ws := t.TempDir()
+	a, m := filepath.Join(ws, "a"), filepath.Join(ws, "m")
+	if err := os.WriteFile(a, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(a, m); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	// a is counted with two links; a third appears before m is read.
+	_, passes, err := inspectWithChange(t, ws, "m", func(p string) error { return os.Link(p, filepath.Join(ws, "z")) })
+	if err != nil || passes != 2 {
+		t.Fatalf("err = %v after %d passes, want success in pass 2", err, passes)
 	}
 }

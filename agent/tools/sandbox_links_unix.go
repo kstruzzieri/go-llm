@@ -44,11 +44,48 @@ type sandboxGitLayout struct {
 // otherwise let a child mutate the same inode through an outside name.
 // Internal-only hard links remain valid. It also returns the workspace's git
 // layout: every entry named .git, then each .git directory's submodule and
-// worktree structure (scanGitDir). Any error fails the spawn, so the layout
-// is complete or there is none. This is the final host check; an
-// unsandboxed same-UID process can still race it by the documented threat
-// model.
+// worktree structure (scanGitDir). A pass that sees the workspace change
+// under it (errSandboxWorkspaceChanged: git's automatic gc pruning objects, an
+// editor replacing a file) is discarded whole and the walk starts again, at
+// most sandboxInspectPasses times. The layout therefore always comes from one
+// pass that saw no change, the pass a single walk would accept. Any other
+// error, and a change in every pass, fails the spawn, so the layout is
+// complete or there is none. This is the final host check; an unsandboxed
+// same-UID process can still race it by the documented threat model.
 func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
+	return inspectSandboxWorkspaceWithHook(root, nil)
+}
+
+// sandboxInspectPasses bounds the workspace passes inspectSandboxWorkspace
+// makes while the workspace keeps changing under it.
+// ponytail: three passes, no wait between them; add a short backoff if a
+// tool's churn routinely outlasts three walks.
+const sandboxInspectPasses = 3
+
+// errSandboxWorkspaceChanged marks a pass that saw the workspace change under
+// it: an entry its parent listed, other than the root, no longer resolved, or
+// an inode's link count changed. Nothing the pass recorded is kept.
+var errSandboxWorkspaceChanged = errors.New("tools: sandbox workspace changed while inspecting")
+
+// inspectSandboxWorkspaceWithHook is inspectSandboxWorkspace with a
+// deterministic seam: beforeVisit, when non-nil, runs in every pass at each
+// visit the walk does not fail outright, with the entry's path, so tests can
+// stand in for a concurrent process changing an entry the walk has already
+// listed.
+func inspectSandboxWorkspaceWithHook(root string, beforeVisit func(name string)) (sandboxGitLayout, error) {
+	var err error
+	for range sandboxInspectPasses {
+		var layout sandboxGitLayout
+		layout, err = inspectSandboxWorkspaceOnce(root, beforeVisit)
+		if !errors.Is(err, errSandboxWorkspaceChanged) {
+			return layout, err
+		}
+	}
+	return sandboxGitLayout{}, fmt.Errorf("%w; retry", err)
+}
+
+// inspectSandboxWorkspaceOnce is one pass of inspectSandboxWorkspace.
+func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sandboxGitLayout, error) {
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -62,6 +99,14 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 	layout := sandboxGitLayout{root: root}
 	links := make(map[inode]linkRecord)
 	order := make([]inode, 0)
+	// entryErr fails the pass on entry rel. An entry its parent listed that
+	// no longer resolves marks the pass changed; the root never does.
+	entryErr := func(rel string, err error) error {
+		if rel != "." && errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w %q: %w", errSandboxWorkspaceChanged, rel, err)
+		}
+		return fmt.Errorf("tools: sandbox inspect workspace entry %q: %w", rel, err)
+	}
 	err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, name)
 		if relErr != nil {
@@ -69,7 +114,10 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		if walkErr != nil {
-			return fmt.Errorf("tools: sandbox inspect workspace entry %q: %w", rel, walkErr)
+			return entryErr(rel, walkErr)
+		}
+		if beforeVisit != nil {
+			beforeVisit(name)
 		}
 		if strings.EqualFold(entry.Name(), ".git") {
 			switch {
@@ -84,7 +132,7 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return fmt.Errorf("tools: sandbox inspect workspace entry %q: %w", rel, err)
+			return entryErr(rel, err)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
@@ -100,7 +148,7 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 			record = linkRecord{total: total, first: rel}
 			order = append(order, key)
 		} else if record.total != total {
-			return fmt.Errorf("tools: sandbox workspace link count changed while inspecting %q", rel)
+			return fmt.Errorf("%w %q: link count changed", errSandboxWorkspaceChanged, rel)
 		}
 		record.seen++
 		links[key] = record
@@ -115,7 +163,7 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 			return sandboxGitLayout{}, fmt.Errorf("tools: sandbox workspace entry %q is linked outside the workspace", record.first)
 		}
 		if record.seen > record.total {
-			return sandboxGitLayout{}, fmt.Errorf("tools: sandbox workspace link count changed while inspecting %q", record.first)
+			return sandboxGitLayout{}, fmt.Errorf("%w %q: link count changed", errSandboxWorkspaceChanged, record.first)
 		}
 	}
 	for _, d := range layout.dotGitDirs {
