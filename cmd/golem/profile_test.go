@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -239,6 +240,25 @@ func TestValidateFlagsSandbox(t *testing.T) {
 		{"network without sandbox", []string{"-sandbox-network", "denied"}, networkNative},
 		{"network with host", []string{"-sandbox", "host", "-sandbox-network", "allowed"}, networkNative},
 		{"inspect seatbelt", []string{"-profile", "inspect", "-sandbox", "seatbelt"}, inspectSandbox},
+
+		// #722: the declared toolchain flags are Seatbelt-only; validation
+		// parses -sandbox-env's shape and leaves its table to the library.
+		{"seatbelt toolchain", []string{"-sandbox", "seatbelt", "-sandbox-read-root", "/a", "-sandbox-read-root", "/b",
+			"-sandbox-env", "GOPROXY=off", "-sandbox-env", "GOFLAGS=", "-sandbox-temp-env", "GOCACHE", "-sandbox-developer-dir"}, ""},
+		{"env without equals", []string{"-sandbox", "seatbelt", "-sandbox-env", "GOPROXY"}, "golem: -sandbox-env must be NAME=VALUE"},
+		// An empty value (an unset variable, a failed $(go env GOROOT)) is
+		// refused, never resolved: filepath.Abs("") is the working directory.
+		{"empty read root", []string{"-sandbox", "seatbelt", "-sandbox-read-root", "/a", "-sandbox-read-root", ""}, "golem: -sandbox-read-root must not be empty"},
+		{"empty env", []string{"-sandbox", "seatbelt", "-sandbox-env", ""}, "golem: -sandbox-env must not be empty"},
+		{"empty temp env", []string{"-sandbox", "seatbelt", "-sandbox-temp-env", ""}, "golem: -sandbox-temp-env must not be empty"},
+	}
+	for _, tool := range [][]string{
+		{"-sandbox-read-root", "/a"}, {"-sandbox-env", "GOPROXY=off"}, {"-sandbox-temp-env", "GOCACHE"}, {"-sandbox-developer-dir"},
+	} {
+		want := "golem: " + tool[0] + " requires -sandbox seatbelt"
+		for _, sel := range [][]string{nil, {"-sandbox", "host"}, {"-sandbox", "bwrap"}} {
+			rows = append(rows, row{tool[0] + " with " + fmt.Sprint(sel), append(slices.Clone(sel), tool...), want})
+		}
 	}
 	for _, rt := range []string{"seatbelt", "bwrap"} {
 		for _, sel := range trustedSelectors {
@@ -320,6 +340,12 @@ func TestResolveSandbox(t *testing.T) {
 			agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt}},
 		{"bwrap allowed", flags{sandbox: "bwrap", sandboxSet: true, sandboxNetwork: "allowed", sandboxNetworkSet: true},
 			agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeBwrap, AllowNetwork: true}},
+		// #722: roots pass through as typed and the developer directory stays
+		// unset: run resolves both once, since this function runs twice.
+		{"seatbelt toolchain", flags{sandbox: "seatbelt", sandboxSet: true, sandboxReadRoots: stringSliceFlag{"/b", "/a"},
+			sandboxEnv: stringSliceFlag{"GOPROXY=off", "GOMODCACHE=/a/m=x"}, sandboxTempEnv: stringSliceFlag{"GOCACHE"}, sandboxDeveloperDir: true},
+			agenttools.SandboxConfig{Runtime: agenttools.SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{"/b", "/a"},
+				Env: []agenttools.SandboxEnv{{Name: "GOPROXY", Value: "off"}, {Name: "GOMODCACHE", Value: "/a/m=x"}}, TempEnv: []string{"GOCACHE"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := resolveSandbox(tc.f); !reflect.DeepEqual(got, tc.want) {
@@ -380,6 +406,12 @@ func TestRenderPermissionsFormat(t *testing.T) {
 		{"native without limits", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileTrusted, Tools: read,
 			Command: golemruntime.CommandPermissions{Runtime: "seatbelt", Network: "allowed"}, Verification: golemruntime.Verification{State: "none"}},
 			"permissions: profile=trusted tools=read_file,list commands=seatbelt network=allowed limits= scratch=off verification=none"},
+		{"native toolchain", golemruntime.EffectivePermissions{Profile: golemruntime.ProfileTrusted, Tools: read,
+			Command: golemruntime.CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{"L1"},
+				ReadOnlyRoots: []string{"/opt/go", "/opt/mod cache"}, DeveloperDirectory: "/Library/Developer/CommandLineTools",
+				Env: []string{"GOCACHE=<private temp>/gocache", "GOPROXY=off"}},
+			Verification: golemruntime.Verification{State: "none"}},
+			`permissions: profile=trusted tools=read_file,list commands=seatbelt network=denied limits=L1 read-only-roots=["/opt/go", "/opt/mod cache"] developer-dir="/Library/Developer/CommandLineTools" env=["GOCACHE=<private temp>/gocache", "GOPROXY=off"] scratch=off verification=none`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := renderPermissions(tc.ep); got != tc.want {
@@ -417,6 +449,10 @@ func TestParseFlags_SandboxHelp(t *testing.T) {
 	for _, want := range []string{
 		"  -sandbox string\n    \tcommand sandbox for Trusted sessions: host (default), seatbelt (macOS) or bwrap (Linux); fails closed when unavailable; does not confine /consult, git context, MCP servers or the /edit editor\n",
 		"  -sandbox-network string\n    \tnetwork policy for -sandbox seatbelt|bwrap: denied (default) or allowed\n",
+		"  -sandbox-read-root value\n    \tread-only toolchain directory for -sandbox seatbelt commands (repeatable): readable and runnable, never writable; resolved to its canonical spelling at startup; refused if it overlaps the workspace or a credential or data store\n",
+		"  -sandbox-env value\n    \tset NAME=VALUE for -sandbox seatbelt commands (repeatable) from a closed table: GOMODCACHE=<path inside a -sandbox-read-root>, GOPROXY=off, GOTOOLCHAIN=local, GOFLAGS=-buildvcs=false\n",
+		"  -sandbox-temp-env value\n    \tpoint NAME into each -sandbox seatbelt command's private temp (repeatable) from a closed table: GOCACHE (<private temp>/gocache)\n",
+		"  -sandbox-developer-dir\n    \tfor -sandbox seatbelt: declare the standalone Command Line Tools read-only (requires xcode-select to select them), so git, python3 and Go's VCS stamping run, and set GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null and PYTHONDONTWRITEBYTECODE=1\n",
 	} {
 		if !strings.Contains(string(help), want) {
 			t.Fatalf("help lacks %q:\n%s", want, help)
@@ -457,6 +493,114 @@ func TestNativeProbeBeforeResources(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("XDG_DATA_HOME has %d entries (first %q), want none", len(entries), entries[0].Name())
+	}
+}
+
+// TestRunDeclaresToolchainOnce: run resolves each -sandbox-read-root to its
+// canonical spelling (a symlink to the real directory), respells a GOMODCACHE
+// typed through a root the same way, and asks for the active developer
+// directory exactly once, although resolveSandbox runs twice; the startup
+// probe receives that one policy. A GOMODCACHE outside every typed root
+// passes through unchanged, and the library then refuses it. A root or
+// developer directory that cannot be resolved stops run before the probe.
+// Portable: both backend seams are stubbed, and the missing config stops a
+// good run.
+func TestRunDeclaresToolchainOnce(t *testing.T) {
+	const devDir = "/Library/Developer/CommandLineTools"
+	devFailed := errors.New("no developer directory")
+	real := canonicalDir(t, t.TempDir())
+	link := filepath.Join(t.TempDir(), "toolchain")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling sharing the link's name as a prefix: lexically outside it.
+	outside := link + "x/mod"
+	for _, tc := range []struct {
+		name        string
+		root, gomod string
+		devErr      error
+		wantGomod   string
+		wantErr     string // "" means the policy reaches the probe
+	}{
+		{"resolved", link, filepath.Join(link, "mod"), nil, filepath.Join(real, "mod"), ""},
+		{"parent after symlink", link + "/..", real, nil, "",
+			"golem: -sandbox-read-root: " + agenttools.ErrSandboxPolicy.Error() + ": toolchain root must not contain a '..' component"},
+		{"module cache is the root", link, link, nil, real, ""},
+		{"module cache outside every root", link, outside, nil, outside, ""},
+		{"missing root", filepath.Join(real, "missing"), filepath.Join(real, "missing"), nil, "", "golem: -sandbox-read-root: "},
+		{"developer directory fails", link, link, devFailed, "", "golem: -sandbox-developer-dir: no developer directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateRunEnv(t)
+			var probes []agenttools.SandboxConfig
+			savedProbe, savedDev := validateSandbox, activeDeveloperDirectory
+			t.Cleanup(func() { validateSandbox, activeDeveloperDirectory = savedProbe, savedDev })
+			validateSandbox = func(cfg agenttools.SandboxConfig, _ string) error {
+				probes = append(probes, cfg)
+				return nil
+			}
+			devCalls := 0
+			activeDeveloperDirectory = func(context.Context) (string, error) {
+				devCalls++
+				return devDir, tc.devErr
+			}
+			stdin, stdout, stderr := runTestFiles(t)
+			err := run([]string{"-config", filepath.Join(t.TempDir(), "missing-models.json"), "-root", t.TempDir(),
+				"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-project-context",
+				"-sandbox", "seatbelt", "-sandbox-read-root", tc.root, "-sandbox-env", "GOPROXY=off",
+				"-sandbox-env", "GOMODCACHE=" + tc.gomod, "-sandbox-temp-env", "GOCACHE", "-sandbox-developer-dir"}, stdin, stdout, stderr)
+			if tc.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tc.wantErr) || len(probes) != 0 {
+					t.Fatalf("run = %v with %d probes, want %q before any probe", err, len(probes), tc.wantErr)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "golem: load config") {
+				t.Fatalf("run = %v, want the missing config's error after the sandbox checks", err)
+			}
+			if devCalls != 1 {
+				t.Fatalf("ActiveDeveloperDirectory calls = %d, want 1", devCalls)
+			}
+			want := []agenttools.SandboxConfig{{Runtime: agenttools.SandboxRuntimeSeatbelt, ReadOnlyRoots: []string{real},
+				DeveloperDirectory: devDir, Env: []agenttools.SandboxEnv{{Name: "GOPROXY", Value: "off"}, {Name: "GOMODCACHE", Value: tc.wantGomod}},
+				TempEnv: []string{"GOCACHE"}}}
+			if !reflect.DeepEqual(probes, want) {
+				t.Fatalf("probes = %+v, want %+v", probes, want)
+			}
+			// The real check refuses a module cache outside every root by its
+			// pure table check, before any backend: on every OS, value-free.
+			verr := agenttools.ValidateSandbox(probes[0], t.TempDir())
+			if refused := verr != nil && strings.Contains(verr.Error(), "GOMODCACHE must be a clean absolute path inside a declared root"); refused != (tc.wantGomod == outside) {
+				t.Fatalf("ValidateSandbox = %v, want a GOMODCACHE refusal only for the module cache outside every root", verr)
+			}
+			if verr != nil && strings.Contains(verr.Error(), outside) {
+				t.Fatalf("ValidateSandbox echoed the refused value: %v", verr)
+			}
+		})
+	}
+}
+
+// rebaseUnderRoot respells only clean absolute paths lexically in a typed
+// root, under the longest such root: an inner root may be a link of its own,
+// and the longest match is where the path resolves.
+func TestRebaseUnderRoot(t *testing.T) {
+	typed := []string{"/t", "/t/inner", "/u"}
+	canon := []string{"/c", "/elsewhere", "/u"}
+	for _, tc := range []struct{ in, want string }{
+		{"/t", "/c"},
+		{"/t/mod", "/c/mod"},
+		{"/t/inner/mod", "/elsewhere/mod"},
+		{"/t/innerx/mod", "/c/innerx/mod"},
+		{"/tx/mod", "/tx/mod"},
+		{"/u/mod", "/u/mod"},
+		{"/other/mod", "/other/mod"},
+		{"t/mod", "t/mod"},
+		{"/t/../etc", "/t/../etc"},
+		{"/t/mod/", "/t/mod/"},
+	} {
+		if got := rebaseUnderRoot(tc.in, typed, canon); got != tc.want {
+			t.Errorf("rebaseUnderRoot(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

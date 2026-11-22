@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -275,11 +276,16 @@ type seatbeltBackend struct {
 	tempBase     string
 	systemRoots  func(workspaceRoot string) ([]string, error)
 	inspect      func(root string) (sandboxGitLayout, error)
+	roots        []string      // declared roots (#722), admitted at construction
+	toolchain    SandboxConfig // owned copy: its developer opt-in and EffectiveEnv (#722)
 }
 
 // newSeatbeltExecBackend constructs the real Seatbelt backend, failing closed
-// when the config requests ceilings Seatbelt cannot enforce or when the
-// active capability probe fails.
+// when the config requests ceilings Seatbelt cannot enforce, when a declared
+// root fails admission (admitRoots, against the process's HOME and
+// environment), when a developer directory is set and a selection link fails
+// the ownership check (checkDeveloperLinks over seatbeltLinkLstat), or when
+// the active capability probe fails.
 func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 	return newSeatbeltExecBackendAt(seatbeltExecPath, probeSeatbelt, cfg)
 }
@@ -287,6 +293,21 @@ func newSeatbeltExecBackend(cfg SandboxConfig) (execBackend, error) {
 func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg SandboxConfig) (execBackend, error) {
 	if err := seatbeltConfigSupport(cfg); err != nil {
 		return nil, err
+	}
+	roots := declaredRoots(cfg)
+	if len(roots) > 0 {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("tools: seatbelt declared roots: %w", err)
+		}
+		if err := admitRoots(roots, home, seatbeltTempBase, os.Getenv); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.DeveloperDirectory != "" {
+		if err := checkDeveloperLinks(seatbeltLinkLstat); err != nil {
+			return nil, err
+		}
 	}
 	b := &seatbeltBackend{
 		execPath:     execPath,
@@ -307,7 +328,9 @@ func newSeatbeltExecBackendAt(execPath string, probe seatbeltProbeFunc, cfg Sand
 			}
 			return collectSystemRoots(seatbeltDefaultSystemRoots, workspaceRoot, home, seatbeltBroadRoot)
 		},
-		inspect: inspectSandboxWorkspace,
+		inspect:   inspectSandboxWorkspace,
+		roots:     roots,
+		toolchain: cfg.Clone(),
 	}
 	// The probe is this backend's first spawn, and construction (so
 	// ValidateSandbox) must fail where every later spawn would (#576). The
@@ -357,6 +380,12 @@ func seatbeltTempCleanup(dir string, created os.FileInfo) func() error {
 // The stamped WorkspaceRoot is consumed as-is — re-resolving it here could
 // silently change the policy after approval.
 //
+// The #722 fields: each declared root, the developer directory included, is
+// a read and exec subpath with its traversal spine, never writable; a
+// developer directory adds seatbeltDeveloperLiterals; and the child
+// environment gains EffectiveEnv over the private temp. The probe prepares
+// through here too, so it runs the same policy.
+//
 // Before constructing the profile, prepare requires the executable target it
 // resolves to be the approved object (spec.ExeIdentity, os.SameFile): the
 // last check binding the approved object, not its bytes, and not atomic with
@@ -374,6 +403,14 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	}
 	if !posixCleanAbs(spec.WorkspaceRoot) || seatbeltBroadRoot(spec.WorkspaceRoot) {
 		return execSpec{}, nil, fmt.Errorf("tools: seatbelt workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
+	}
+	// Each command re-checks the declared roots against its own workspace
+	// (scratch rewrites it), as collectSystemRoots does for the fixed roots:
+	// a string check, both spellings canonical.
+	for _, root := range b.roots {
+		if pathCovers(root, spec.WorkspaceRoot) || pathCovers(spec.WorkspaceRoot, root) {
+			return execSpec{}, nil, fmt.Errorf("tools: seatbelt declared root %q overlaps the workspace root %q", root, spec.WorkspaceRoot)
+		}
 	}
 	canonBase, err := filepath.EvalSymlinks(b.tempBase)
 	if err != nil {
@@ -424,26 +461,37 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 	if err != nil {
 		return fail(err)
 	}
-	ancestorSources := append(append([]string(nil), sysRoots...),
+	// Declared roots (#722) get what the system roots get: read and exec
+	// subpaths and their traversal spines, never a write.
+	readRoots := slices.Concat(sysRoots, b.roots)
+	ancestorSources := append(slices.Clone(readRoots),
 		spec.WorkspaceRoot, canonTemp, canonExe,
 		"/dev/null", "/dev/random", "/dev/urandom")
-	var links []string
+	var literals []string // exact metadata literals beyond the ancestors
 	if canonExe != spec.Path && posixCleanAbs(spec.Path) {
 		// sandbox-exec's execvp reads every link on the approved spelling's
 		// chain, so each link node gets a metadata literal and its own
 		// traversal spine; the content allowance stays on canonExe alone.
 		// The chain is walked here: a change before launch is the
 		// documented pathname-launch residual, still inside the profile.
-		if links, err = seatbeltSymlinkChain(spec.Path, canonExe); err != nil {
+		links, err := seatbeltSymlinkChain(spec.Path, canonExe)
+		if err != nil {
 			return fail(err)
 		}
 		ancestorSources = append(append(ancestorSources, spec.Path), links...)
+		literals = links
+	}
+	if b.toolchain.DeveloperDirectory != "" {
+		// The xcode-select shim reads the selection by these spellings
+		// (#722 A0 F4): each gets a metadata literal and its spine.
+		ancestorSources = append(ancestorSources, seatbeltDeveloperLiterals...)
+		literals = append(literals, seatbeltDeveloperLiterals...)
 	}
 	ancestors, err := seatbeltMetadataAncestors(ancestorSources)
 	if err != nil {
 		return fail(err)
 	}
-	ancestors = append(ancestors, links...)
+	ancestors = append(ancestors, literals...)
 	// The workspace walk rejects an inode linked outside the workspace and
 	// finds the git layout whose metadata the profile denies writes to (#721).
 	// It is also the last workspace walk before spawn: a change after it is
@@ -457,7 +505,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		workspaceRoot:     spec.WorkspaceRoot,
 		tempRoot:          canonTemp,
 		exePath:           canonExe,
-		systemReadRoots:   sysRoots,
+		systemReadRoots:   readRoots,
 		metadataAncestors: ancestors,
 		allowNetwork:      b.allowNetwork,
 		gitDirs:           layout.gitDirs,
@@ -473,7 +521,7 @@ func (b *seatbeltBackend) prepare(spec execSpec) (execSpec, func() error, error)
 		return fail(err)
 	}
 	wrapped := spec
-	wrapped.Env = sandboxChildEnv(spec.Env, canonTemp)
+	wrapped.Env = append(sandboxChildEnv(spec.Env, canonTemp), b.toolchain.EffectiveEnv(canonTemp)...)
 	wrapped.Path = b.execPath
 	wrapped.Argv = append([]string{"sandbox-exec", "-p", profile, spec.Path}, spec.Argv[1:]...)
 	return wrapped, cleanup, nil

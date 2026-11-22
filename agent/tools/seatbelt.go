@@ -81,14 +81,15 @@ func seatbeltMetadataAncestors(paths []string) ([]string, error) {
 // seatbeltPolicy is the per-invocation input to profile generation. All paths
 // must already be canonical (symlink-free), except that metadataAncestors,
 // the exact file-read-metadata literals, also carries each link node on the
-// approved executable's symlink chain at its canonical-parent spelling. The
-// builder validates shape and treats them as data, performing no filesystem
-// I/O.
+// approved executable's symlink chain at its canonical-parent spelling and,
+// with a developer directory (#722), /var and the active developer selection
+// link (seatbeltDeveloperLiterals). The builder validates shape and treats
+// them as data, performing no filesystem I/O.
 type seatbeltPolicy struct {
 	workspaceRoot     string
 	tempRoot          string
 	exePath           string
-	systemReadRoots   []string
+	systemReadRoots   []string // reviewed system roots and declared roots (#722): read and exec, never write
 	metadataAncestors []string
 	allowNetwork      bool
 	// gitDirs are submodule / linked-worktree git dirs (not named .git);
@@ -123,8 +124,9 @@ func seatbeltAllowancePath(kind, p string) (string, error) {
 }
 
 // buildSeatbeltProfile renders the SBPL profile for one invocation:
-// deny-default, exec and reads restricted to the reviewed system roots +
-// workspace + private temp + the exact executable, with read-only device literals,
+// deny-default, exec and reads restricted to the reviewed system roots and
+// declared toolchain roots (#722) + workspace + private temp + the exact
+// executable, with read-only device literals,
 // metadata scoped to allowed subtrees plus exact traversal ancestors, writes
 // restricted to workspace + private temp, and network denied unless the
 // approved config allows it. Rendering is deterministic: list inputs are

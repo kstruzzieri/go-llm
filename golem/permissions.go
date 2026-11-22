@@ -30,6 +30,7 @@ const hostCommandWarning = "unsandboxed; runs with the host user's filesystem an
 // runtime and network value's list whole, never by appending to another's.
 const (
 	limitSeatbeltProfile  = "deny-default profile with reviewed system reads, allowed workspace and private temp"
+	limitSeatbeltRoots    = "deny-default profile with reviewed system reads, declared read-only roots, allowed workspace and private temp"
 	limitNetworkDenied    = "network operations denied"
 	limitNoQuota          = "no memory/CPU quota"
 	limitNetworkAllowed   = "networking explicitly allowed by policy; filesystem limits remain"
@@ -76,6 +77,18 @@ type CommandPermissions struct {
 	// followed by the strict-approval policy line when it applies; nil for
 	// Inspect and host.
 	Limits []string
+	// ReadOnlyRoots are the declared toolchain roots (#722) commands may read
+	// and run but never write, sorted and deduplicated, in the canonical
+	// spelling the host declared; nil when none or under Inspect.
+	ReadOnlyRoots []string
+	// DeveloperDirectory is the declared developer directory (#722), "" when
+	// not opted in or under Inspect.
+	DeveloperDirectory string
+	// Env is every variable the backend adds to a command, sorted NAME=value
+	// with the private temp shown as "<private temp>": the policy's
+	// SandboxConfig.EffectiveEnv("<private temp>"). nil when none or under
+	// Inspect.
+	Env []string
 }
 
 // Verification describes post-write verification as the runtime would run it
@@ -138,23 +151,42 @@ func (r *Runtime) EffectivePermissions() EffectivePermissions {
 	}
 }
 
-// commandPermissions projects the frozen sandbox policy (spec section 7).
-// With strict set, a native policy that allows network also lists the
-// narrowing its commands get once the conversation is exposed (#584).
+// commandPermissions projects the frozen sandbox policy (spec section 7) and
+// its declared toolchain (#722) into slices of the caller's own. With strict
+// set, a native policy that allows network also lists the narrowing its
+// commands get once the conversation is exposed (#584).
 func commandPermissions(p Profile, s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	if p == ProfileInspect {
 		return CommandPermissions{Runtime: "n/a", Network: "n/a"}
 	}
+	c := runtimePermissions(s, strict)
+	// s is New's owned copy, validated but kept as the caller spelled it:
+	// sort and deduplicate into a new slice, as the backend normalizes it.
+	c.ReadOnlyRoots = slices.Compact(slices.Sorted(slices.Values(s.ReadOnlyRoots)))
+	c.DeveloperDirectory = s.DeveloperDirectory
+	c.Env = s.EffectiveEnv("<private temp>")
+	return c
+}
+
+// runtimePermissions is commandPermissions' runtime, network, warning and
+// limits for a non-Inspect profile.
+func runtimePermissions(s agenttools.SandboxConfig, strict bool) CommandPermissions {
 	switch s.Runtime {
 	case agenttools.SandboxRuntimeSeatbelt:
+		// #722: a declared toolchain is named in the first limit; a session
+		// without one keeps its line unchanged.
+		profile := limitSeatbeltProfile
+		if len(s.ReadOnlyRoots) > 0 || s.DeveloperDirectory != "" {
+			profile = limitSeatbeltRoots
+		}
 		if s.AllowNetwork {
-			c := CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{limitSeatbeltProfile, limitNetworkAllowed, limitNoQuota}}
+			c := CommandPermissions{Runtime: "seatbelt", Network: "allowed", Limits: []string{profile, limitNetworkAllowed, limitNoQuota}}
 			if strict {
 				c.Limits = append(c.Limits, limitStrictNarrows)
 			}
 			return c
 		}
-		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{limitSeatbeltProfile, limitNetworkDenied, limitNoQuota}}
+		return CommandPermissions{Runtime: "seatbelt", Network: "denied", Limits: []string{profile, limitNetworkDenied, limitNoQuota}}
 	case agenttools.SandboxRuntimeBwrap:
 		c := CommandPermissions{Runtime: "bwrap", Network: "ip-denied", Limits: []string{limitBwrapIPDenied, limitBwrapUnixSockets, limitBwrapMounts, limitBwrapCaps}}
 		if s.AllowNetwork {

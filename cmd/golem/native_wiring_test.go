@@ -274,8 +274,8 @@ func golemWorkspace(t *testing.T) (configPath, root string) {
 // with -profile trusted, the policy's -sandbox flags and extra, then calls fn
 // on the session run built and stops the run. It also pins the runtime's
 // policy: run() must hand the golem runtime the selected backend, and its
-// startup permissions: line must name it.
-func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxConfig, extra []string, fn func(*replSession)) {
+// startup permissions: line must name it. It returns the permissions: lines.
+func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxConfig, extra []string, fn func(*replSession)) []string {
 	t.Helper()
 	args := []string{"-config", configPath, "-root", root, "-profile", "trusted",
 		"-no-probe", "-no-cap-probe", "-no-session", "-no-memory", "-no-rag",
@@ -315,6 +315,7 @@ func withGolem(t *testing.T, configPath, root string, policy agenttools.SandboxC
 	if len(permissions) == 0 || !strings.Contains(permissions[0], " commands="+runtimeName+" ") {
 		t.Fatalf("startup permissions: lines %q, want the first to carry \" commands=%s \"", permissions, runtimeName)
 	}
+	return permissions
 }
 
 // wiringCase is one probe run first under the host policy and then under the

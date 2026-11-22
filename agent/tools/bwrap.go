@@ -129,6 +129,21 @@ func bwrapConfigSupport(cfg SandboxConfig) error {
 	if cfg.CPULimit != 0 {
 		return fmt.Errorf("tools: bwrap cannot enforce CPULimit")
 	}
+	// The declared toolchain fields (#722) are macOS Seatbelt only; bwrap
+	// refuses them rather than silently ignoring a request it cannot honor.
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"ReadOnlyRoots", len(cfg.ReadOnlyRoots) > 0},
+		{"DeveloperDirectory", cfg.DeveloperDirectory != ""},
+		{"Env", len(cfg.Env) > 0},
+		{"TempEnv", len(cfg.TempEnv) > 0},
+	} {
+		if f.set {
+			return fmt.Errorf("tools: bwrap cannot enforce %s", f.name)
+		}
+	}
 	_, err := bwrapMemoryCapBytes(cfg.MemoryCapMB)
 	return err
 }
