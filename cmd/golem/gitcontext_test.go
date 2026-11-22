@@ -599,7 +599,7 @@ func TestLoadGitContextBareRepoWarns(t *testing.T) {
 		t.Fatalf("bare repository classified as absence %v; want an error the startup path warns about", snap.Absence)
 	}
 	var exit *gitExitError
-	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "work tree") {
+	if !errors.As(err, &exit) || !strings.Contains(err.Error(), "safe.bareRepository") {
 		t.Fatalf("err=%v, want Git's bare-repository refusal surfaced", err)
 	}
 }

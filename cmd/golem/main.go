@@ -1783,7 +1783,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	gitContextLine := ""
 	if !f.noGitContext {
 		if snap, gerr := loadGitContext(ctx, "git", root); gerr != nil {
-			warns = append(warns, "git context disabled: "+gerr.Error())
+			warns = append(warns, "git context disabled: "+gitContextText(gerr.Error()))
 		} else {
 			gitSnap = snap
 			if snap.Absence == gitContextPresent {

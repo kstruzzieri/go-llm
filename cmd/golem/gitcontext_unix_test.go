@@ -14,6 +14,10 @@ import (
 	"unicode"
 )
 
+// fakeGitVersion is prepended to every fake git script so the version probe
+// every host git call makes sees a supported git.
+const fakeGitVersion = "if [ \"$1\" = \"--version\" ]; then echo 'git version 2.56.0'; exit 0; fi\n"
+
 // fakeGit writes an executable /bin/sh script standing in for git. The
 // deadline and malformed-output cases need a controllable process; the
 // script sees the same argv and cwd the real capture would pass.
@@ -23,7 +27,7 @@ func fakeGit(t *testing.T, body string) string {
 		t.Skip("/bin/sh not available")
 	}
 	path := filepath.Join(t.TempDir(), "git")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+fakeGitVersion+body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -46,13 +50,14 @@ func fakeGitRoot(t *testing.T) string {
 
 func TestRunGitDisablesLazyFetch(t *testing.T) {
 	t.Setenv("GIT_NO_LAZY_FETCH", "0")
-	fake := fakeGit(t, "printf '%s\\n' \"$1\" \"$GIT_NO_LAZY_FETCH\"\n")
+	fake := fakeGit(t, "printf '%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$GIT_NO_LAZY_FETCH\"\n")
 	out, err := runGit(t.Context(), fake, t.TempDir(), "--version")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); got != "--no-lazy-fetch\n1\n" {
-		t.Errorf("runGit lazy-fetch option and environment = %q, want %q", got, "--no-lazy-fetch\n1\n")
+	want := strings.Join(hostGitPrefix, "\n") + "\n--no-lazy-fetch\n1\n"
+	if got := out.String(); got != want {
+		t.Errorf("runGit prefix, lazy-fetch option and environment = %q, want %q", got, want)
 	}
 	if got := envValues(hostGitEnv(), "GIT_NO_LAZY_FETCH"); len(got) != 0 {
 		t.Errorf("hostGitEnv forwarded the parent lazy-fetch setting: %q", got)
@@ -60,7 +65,7 @@ func TestRunGitDisablesLazyFetch(t *testing.T) {
 }
 
 func TestLoadGitContextRequiresLazyFetchControl(t *testing.T) {
-	fake := fakeGit(t, `if [ "$1" = "--no-lazy-fetch" ]; then
+	fake := fakeGit(t, `if [ "$5" = "--no-lazy-fetch" ]; then
   printf 'unknown option: --no-lazy-fetch\n' >&2
   exit 129
 fi
@@ -296,7 +301,7 @@ func fakeGitOnPath(t *testing.T, body string) {
 		t.Skip("/bin/sh not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\n"+fakeGitVersion+body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -292,21 +292,25 @@ func (e *gitExitError) Error() string {
 
 // runGit runs one read-only Git command with argv only: no shell, no stdin,
 // cmd.Dir=root, the capture environment, capped stdout/stderr, and a pipe
-// grace of gitContextWaitDelay after ctx ends. Context errors are surfaced
+// grace of gitContextWaitDelay after ctx ends. The command is built by
+// hostGitCommand, so it carries the host git prefix, refuses a git inside
+// the workspace or older than 2.38, and runs the resolved executable; such a
+// refusal is returned wrapped, with args excluding the prefix. Context errors are surfaced
 // through errors.Is; a start failure wraps exec's error (so exec.ErrNotFound
 // stays visible); a nonzero exit becomes *gitExitError.
 func runGit(ctx context.Context, gitPath, root string, args ...string) (*capWriter, error) {
 	// Older Git may ignore the environment guard; an unsupported option
 	// instead rejects capture before any repository command runs.
 	args = append([]string{"--no-lazy-fetch"}, args...)
-	cmd := exec.CommandContext(ctx, gitPath, args...)
-	cmd.Dir = root
-	cmd.Env = gitContextEnv()
+	cmd, err := hostGitCommand(ctx, gitPath, root, root, gitContextEnv(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	stdout := &capWriter{max: gitContextRawCap}
 	stderr := &capWriter{max: gitContextStderrCap}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	cmd.WaitDelay = gitContextWaitDelay
-	err := cmd.Run()
+	err = cmd.Run()
 	if err == nil {
 		return stdout, nil
 	}
@@ -333,11 +337,14 @@ func completeLines(w *capWriter) []string {
 }
 
 // gitNotRepository classifies the one silent capture failure: Git's stable
-// LC_ALL=C refusal outside a work tree. Bare repositories, dubious ownership,
+// LC_ALL=C refusal outside a work tree. The message must be the whole of
+// Git's output (stderr is trimmed, so it starts the text): a refusal that only
+// quotes the phrase, such as one naming a workspace directory called "not a
+// git repository", stays an error. Bare repositories, dubious ownership,
 // and corruption exit 128 with different text and stay errors.
 func gitNotRepository(err error) bool {
 	var exit *gitExitError
-	return errors.As(err, &exit) && exit.code == 128 && strings.Contains(exit.stderr, "not a git repository")
+	return errors.As(err, &exit) && exit.code == 128 && strings.HasPrefix(exit.stderr, "fatal: not a git repository")
 }
 
 // workspacePrefix computes the slash-terminated path of root below toplevel,
@@ -378,12 +385,16 @@ func nearestGitEntry(root string) string {
 }
 
 // gitLocalFilterDriver reports the first content filter driver
-// (filter.<name>.clean or .process) defined in the repository's local or
-// worktree config scope, or "" when there is none. Global and system
+// (filter.<name>.clean or .process) or config include (include.path,
+// includeIf.<condition>.path) defined in the repository's local or worktree
+// config scope, or "" when there is none; the caller tells them apart by the
+// key's include. prefix. An include is refused because local config is
+// read-only to a sandboxed command but an included file may not be, and this
+// precheck and status are separate processes. Global, system and command
 // definitions (git-lfs installs there) are the user's own trust roots and are
 // not reported. `git config --get-regexp` exits 1 when nothing matches.
 func gitLocalFilterDriver(ctx context.Context, gitPath, root string) (string, error) {
-	out, err := runGit(ctx, gitPath, root, "--no-pager", "config", "--null", "--show-scope", "--name-only", "--get-regexp", `^filter\..*\.(clean|process)$`)
+	out, err := runGit(ctx, gitPath, root, "--no-pager", "config", "--null", "--show-scope", "--name-only", "--get-regexp", `^(filter\..*\.(clean|process)|include\.path|includeif\..*\.path)$`)
 	if err != nil {
 		var exit *gitExitError
 		if errors.As(err, &exit) && exit.code == 1 {
@@ -469,15 +480,18 @@ func loadGitContext(ctx context.Context, gitPath, root string) (gitContextSnapsh
 	// A content filter driver defined in the repository's own config would be
 	// executed by the index refresh status performs on a stale-stat tracked
 	// file, and that config is attacker-influenced in the archive threat model.
-	// Such a repository is refused as a genuine error: startup warns once and
-	// injects nothing, refresh retains the previous block.
+	// An include in that config can pull in a file a sandboxed command could
+	// have written. Such a repository is refused as a genuine error: startup
+	// warns once and injects nothing, refresh retains the previous block.
 	if key, err := gitLocalFilterDriver(ctx, gitPath, root); err != nil {
 		return gitContextSnapshot{}, err
+	} else if strings.HasPrefix(key, "include.") || strings.HasPrefix(key, "includeif.") {
+		return gitContextSnapshot{}, fmt.Errorf("git status skipped: repository-local config includes another file (%s)", key)
 	} else if key != "" {
 		return gitContextSnapshot{}, fmt.Errorf("git status skipped: repository-local config defines content filter driver %s", key)
 	}
 
-	out, err = runGit(ctx, gitPath, root, "--no-pager", "-c", "core.fsmonitor=false", "--no-optional-locks",
+	out, err = runGit(ctx, gitPath, root, "--no-pager", "--no-optional-locks",
 		"status", "--porcelain=v1", "--branch", "--no-renames", "--untracked-files=normal", "--ignore-submodules=dirty")
 	if err != nil {
 		return gitContextSnapshot{}, err

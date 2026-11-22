@@ -713,7 +713,7 @@ func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
 	for i := range c.workers {
 		workerRoot := filepath.Join(parent, c.workers[i].sourceID)
 		_, preErr := os.Lstat(workerRoot)
-		if _, err := runParallelGit(ctx, c.root, "worktree", "add", "--detach", workerRoot, c.head); err != nil {
+		if _, err := runParallelGit(ctx, c.root, c.root, "worktree", "add", "--detach", workerRoot, c.head); err != nil {
 			// Git keeps a worktree whose post-checkout hook failed. Record a root
 			// this add created, so failure reporting names it as preserved and a
 			// cleanup removes it; never record a directory that was already there.
@@ -795,7 +795,7 @@ func (c *parallelCoordinator) cleanup(ctx context.Context) error {
 		if c.workers[i].root == "" {
 			continue
 		}
-		if _, err := runParallelGit(ctx, c.root, "worktree", "remove", "--force", c.workers[i].root); err != nil {
+		if _, err := runParallelGit(ctx, c.root, c.root, "worktree", "remove", "--force", c.workers[i].root); err != nil {
 			errs = append(errs, fmt.Errorf("remove worktree %s: %w", c.workers[i].sourceID, err))
 			continue
 		}
@@ -812,7 +812,7 @@ func (c *parallelCoordinator) cleanup(ctx context.Context) error {
 }
 
 func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker parallelWorker) error {
-	top, err := runParallelGit(ctx, worker.root, "rev-parse", "--show-toplevel")
+	top, err := runParallelGit(ctx, c.root, worker.root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("recheck worker %s Git toplevel: %w", worker.sourceID, err)
 	}
@@ -827,16 +827,17 @@ func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker
 	if gotTop != wantTop {
 		return fmt.Errorf("worker %s Git toplevel is %s, want %s", worker.sourceID, gotTop, wantTop)
 	}
-	head, err := runParallelGit(ctx, worker.root, "rev-parse", "--verify", "HEAD")
+	head, err := runParallelGit(ctx, c.root, worker.root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return fmt.Errorf("recheck worker %s HEAD: %w", worker.sourceID, err)
 	}
 	if got := strings.TrimSpace(string(head)); got != c.head {
 		return fmt.Errorf("worker %s HEAD changed from %s to %s", worker.sourceID, c.head, got)
 	}
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "HEAD")
-	cmd.Dir = worker.root
-	cmd.Env = hostGitEnv()
+	cmd, err := hostGitCommand(ctx, "git", c.root, worker.root, hostGitEnv(), "symbolic-ref", "--quiet", "HEAD")
+	if err != nil {
+		return fmt.Errorf("check worker %s detached HEAD: %w", worker.sourceID, err)
+	}
 	if out, err := cmd.CombinedOutput(); err == nil {
 		return fmt.Errorf("worker %s is attached to branch %s; want detached HEAD", worker.sourceID, strings.TrimSpace(string(out)))
 	} else {
@@ -852,7 +853,7 @@ func (c *parallelCoordinator) acquireWorkspaceLock(ctx context.Context) error {
 	if c.lock != nil {
 		return errors.New("parallel workspace lock is already held")
 	}
-	out, err := runParallelGit(ctx, c.root, "rev-parse", "--path-format=absolute", "--git-path", "golem-parallel.lock")
+	out, err := runParallelGit(ctx, c.root, c.root, "rev-parse", "--path-format=absolute", "--git-path", "golem-parallel.lock")
 	if err != nil {
 		return fmt.Errorf("resolve parallel workspace lock: %w", err)
 	}
@@ -897,7 +898,7 @@ func (c *parallelCoordinator) recordBase(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve parallel root symlinks: %w", err)
 	}
-	top, err := runParallelGit(ctx, c.root, "rev-parse", "--show-toplevel")
+	top, err := runParallelGit(ctx, c.root, c.root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("resolve Git toplevel: %w", err)
 	}
@@ -908,7 +909,7 @@ func (c *parallelCoordinator) recordBase(ctx context.Context) error {
 	if c.root != c.topLevel {
 		return fmt.Errorf("parallel root %s must equal Git toplevel %s", c.root, c.topLevel)
 	}
-	head, err := runParallelGit(ctx, c.root, "rev-parse", "--verify", "HEAD")
+	head, err := runParallelGit(ctx, c.root, c.root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return fmt.Errorf("record Git HEAD: %w", err)
 	}
@@ -917,7 +918,7 @@ func (c *parallelCoordinator) recordBase(ctx context.Context) error {
 }
 
 func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
-	top, err := runParallelGit(ctx, c.root, "rev-parse", "--show-toplevel")
+	top, err := runParallelGit(ctx, c.root, c.root, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return fmt.Errorf("recheck Git toplevel: %w", err)
 	}
@@ -928,7 +929,7 @@ func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
 	if got != c.topLevel || got != c.root {
 		return fmt.Errorf("git toplevel changed from %s to %s", c.topLevel, got)
 	}
-	head, err := runParallelGit(ctx, c.root, "rev-parse", "--verify", "HEAD")
+	head, err := runParallelGit(ctx, c.root, c.root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return fmt.Errorf("recheck Git HEAD: %w", err)
 	}
@@ -953,7 +954,7 @@ func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
 }
 
 func (c *parallelCoordinator) requireCleanRoot(ctx context.Context) error {
-	out, err := runParallelGit(ctx, c.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
+	out, err := runParallelGit(ctx, c.root, c.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
 	if err != nil {
 		return fmt.Errorf("inspect parallel root: %w", err)
 	}
@@ -962,7 +963,7 @@ func (c *parallelCoordinator) requireCleanRoot(ctx context.Context) error {
 			return fmt.Errorf("parallel root must be clean outside .agent: %s", file)
 		}
 	}
-	unexpected, err := parallelUnexpectedIndexPath(ctx, c.root)
+	unexpected, err := parallelUnexpectedIndexPath(ctx, c.root, c.root)
 	if err != nil {
 		return fmt.Errorf("inspect parallel root index flags: %w", err)
 	}
@@ -977,7 +978,7 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 	if err != nil {
 		return false, nil
 	}
-	index, err := runParallelGit(ctx, c.root, "ls-files", "-v", "-z", "--", ":(literal)"+file)
+	index, err := runParallelGit(ctx, c.root, c.root, "ls-files", "-v", "-z", "--", ":(literal)"+file)
 	if err != nil {
 		return false, fmt.Errorf("inspect index flags for %s: %w", file, err)
 	}
@@ -988,7 +989,7 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 		if !exists {
 			return false, nil
 		}
-		out, err := runParallelGit(ctx, c.root, "ls-tree", "-z", "--full-tree", "--name-only", c.head, "--", ":(literal)"+file)
+		out, err := runParallelGit(ctx, c.root, c.root, "ls-tree", "-z", "--full-tree", "--name-only", c.head, "--", ":(literal)"+file)
 		if err != nil {
 			return false, fmt.Errorf("check whether %s is tracked at %s: %w", file, c.head, err)
 		}
@@ -997,9 +998,10 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 	if exists {
 		return false, nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "check-ignore", "-q", "--", file)
-	cmd.Dir = c.root
-	cmd.Env = hostGitEnv()
+	cmd, err := hostGitCommand(ctx, "git", c.root, c.root, hostGitEnv(), "check-ignore", "-q", "--", file)
+	if err != nil {
+		return false, fmt.Errorf("check whether %s is ignored: %w", file, err)
+	}
 	err = cmd.Run()
 	if err == nil {
 		return false, nil
@@ -1016,7 +1018,7 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 	for _, file := range worker.paths {
 		assigned[file] = struct{}{}
 	}
-	unexpected, err := parallelUnexpectedIndexPath(ctx, worker.root)
+	unexpected, err := parallelUnexpectedIndexPath(ctx, c.root, worker.root)
 	if err != nil {
 		return nil, fmt.Errorf("inspect worker %s index flags: %w", worker.sourceID, err)
 	}
@@ -1033,7 +1035,7 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 	}
 	// --no-renames keeps every -z entry in "XY path" form; rename records would
 	// emit the old path as a bare second token that defeats prefix parsing.
-	out, err := runParallelGit(ctx, worker.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignored=matching")
+	out, err := runParallelGit(ctx, c.root, worker.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignored=matching")
 	if err != nil {
 		return nil, fmt.Errorf("inspect worker %s changes: %w", worker.sourceID, err)
 	}
@@ -1062,10 +1064,15 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 	return changed, nil
 }
 
-func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = hostGitEnv()
+// runParallelGit runs git in dir through hostGitCommand, which refuses a git
+// inside workspace or older than 2.38 and pins safe.bareRepository=explicit
+// and core.fsmonitor=false, so a repository planted in the workspace cannot run
+// code as Golem. workspace is the coordinator root even for worker dirs.
+func runParallelGit(ctx context.Context, workspace, dir string, args ...string) ([]byte, error) {
+	cmd, err := hostGitCommand(ctx, "git", workspace, dir, hostGitEnv(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -1123,8 +1130,8 @@ func hostGitEnv() []string {
 	return buildHostGitEnv(runtime.GOOS, os.LookupEnv, "GIT_TERMINAL_PROMPT=0")
 }
 
-func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {
-	index, err := runParallelGit(ctx, root, "ls-files", "-v", "-z")
+func parallelUnexpectedIndexPath(ctx context.Context, workspace, root string) (string, error) {
+	index, err := runParallelGit(ctx, workspace, root, "ls-files", "-v", "-z")
 	if err != nil {
 		return "", err
 	}
