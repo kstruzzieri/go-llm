@@ -59,7 +59,7 @@ Keep minimal. Allowed external dependencies:
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
 - `golang.org/x/term` — VT100 line editor for the Golem REPL prompt (only imported by `cmd/golem/`). Pinned to v0.42.0, the version already selected transitively, so promoting it moves no other module.
-- `golang.org/x/sys` — already required transitively; imported directly (build-tagged) by `agent/tools/` (exit watching, CoW cloning, no-replace install, exec directory read, Windows workspace identity), `cmd/golem/`'s PTY tests, and `profiles/`'s Windows directory-fsync
+- `golang.org/x/sys` — already required transitively; imported directly, build-tagged, by `agent/tools/` (exit watching, CoW cloning, no-replace install, directory reads, workspace identity), `mcpclient/` (pins), `config/`, `profiles/` and `signing/` (Windows directory fsync), and tests in `cmd/golem/` and `consult/`
 - `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
@@ -82,7 +82,7 @@ This is the native `ollama/` client's wire API (the `ollama` provider format). T
 Base URL: `http://localhost:11434`
 
 | Endpoint | Method | Purpose |
-|----------|--------|---------|
+|---|---|---|
 | `/api/chat` | POST | Chat completions (streaming/non-streaming) |
 | `/api/generate` | POST | Raw text generation |
 | `/api/embed` | POST | Generate embeddings |
@@ -96,17 +96,11 @@ Base URL: `http://localhost:11434`
   "model": "gemma4:31b",
   "messages": [{"role": "user", "content": "hello"}],
   "stream": true,
-  "options": {
-    "temperature": 0.7,
-    "num_predict": 2048,
-    "num_ctx": 32768
-  }
+  "options": {"temperature": 0.7, "num_predict": 2048, "num_ctx": 32768}
 }
 ```
 
-Model names in examples reflect the current `models.json` defaults but are
-not required by `go-llm` — any model the configured provider can load
-works. See `docs/llm/` for the reference lineup and BYO guidance.
+Example model names are the current `models.json` defaults, not requirements: any model the configured provider can load works. See `docs/llm/` for the reference lineup and BYO guidance.
 
 ### Embed Request
 ```json
