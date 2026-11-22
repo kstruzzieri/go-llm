@@ -28,8 +28,8 @@ func plantBare(t *testing.T, dir string) {
 
 func requireNoMarker(t *testing.T, marker string) {
 	t.Helper()
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("a planted program ran: the marker exists")
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("want absent marker, stat returned %v", err)
 	}
 }
 
@@ -344,7 +344,13 @@ func TestSnapshotDoesNotRunWorkspaceProgramFromPath(t *testing.T) {
 			requireMarkerIf(t, marker, true)
 
 			stale()
-			_, _ = loadGitContext(context.Background(), "git", ws)
+			snap, err := loadGitContext(t.Context(), "git", ws)
+			if err != nil {
+				t.Fatalf("load git snapshot: %v", err)
+			}
+			if snap.Absence != gitContextPresent || snap.Block == "" {
+				t.Fatalf("expected a populated git snapshot, absence=%v", snap.Absence)
+			}
 			requireMarkerIf(t, marker, tc.wantRan)
 		})
 	}
@@ -352,11 +358,11 @@ func TestSnapshotDoesNotRunWorkspaceProgramFromPath(t *testing.T) {
 
 func requireMarkerIf(t *testing.T, marker string, want bool) {
 	t.Helper()
-	_, err := os.Stat(marker)
-	if want && err != nil {
-		t.Fatalf("expected the program to run (marker missing): %v", err)
+	if !want {
+		requireNoMarker(t, marker)
+		return
 	}
-	if !want && err == nil {
-		t.Fatal("a planted program ran: the marker exists")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected marker: %v", err)
 	}
 }

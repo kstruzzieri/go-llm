@@ -1065,10 +1065,11 @@ global config (git-lfs installs `git-lfs filter-process`), `ssh` for a fetch, or
 commands inside your own global hooks, are looked up on `PATH`. For every git
 it runs, Golem drops empty entries (which mean the current directory), relative
 entries, entries inside the workspace and entries that do not exist or cannot
-be resolved from `PATH`, and passes each kept directory by its resolved path
-(symbolic links followed), so such a program is not taken from the workspace
-and a link retargeted later cannot redirect the lookup. Parallel task mode's
-hooks see that filtered `PATH`. Version-manager shims (asdf, mise) that pick the
+be resolved. It also drops directories whose resolved names contain the
+platform's `PATH` separator. Golem passes each remaining directory by its
+resolved path so retargeting a symbolic link cannot redirect the lookup.
+Parallel task mode's hooks see that filtered `PATH`. Version-manager shims
+(asdf, mise) that pick the
 real git from files in the workspace are still a trust input, and so is a
 program your config names by an absolute path inside the workspace.
 If you start Golem with `-root` inside a `.git` directory,

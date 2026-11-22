@@ -1,9 +1,43 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"testing"
 )
+
+func TestHostGitFilterPathResolvedSeparator(t *testing.T) {
+	ws := t.TempDir()
+	outside, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sep := string(os.PathListSeparator)
+	target := filepath.Join(outside, "tools"+sep+"archive")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Both inputs name a single directory. Windows accepts quoted PATH
+	// entries; on Unix a symlink can resolve to a name containing ':'.
+	var entry string
+	if runtime.GOOS == "windows" {
+		entry = `"` + target + `"`
+	} else {
+		entry = filepath.Join(outside, "tools")
+		if err := os.Symlink(target, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := hostGitFilterPath([]string{"PATH=" + entry + sep + outside}, ws)
+	if err != nil || !slices.Equal(got, []string{"PATH=" + outside}) {
+		t.Errorf("mixed PATH: got %q, %v; want only %q", got, err, outside)
+	}
+	if _, err := hostGitFilterPath([]string{"PATH=" + entry}, ws); err == nil {
+		t.Error("expected refusal when no usable PATH entry remains")
+	}
+}
 
 func TestParseGitVersion(t *testing.T) {
 	ok := []struct {

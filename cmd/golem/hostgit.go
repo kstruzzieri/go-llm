@@ -79,7 +79,9 @@ func hostGitFilterPath(env []string, workspace string) ([]string, error) {
 				continue
 			}
 			resolved, err := filepath.EvalSymlinks(entry)
-			if err != nil {
+			// A resolved name containing the list separator would become
+			// multiple entries when written back to the child's PATH.
+			if err != nil || strings.ContainsRune(resolved, os.PathListSeparator) {
 				continue
 			}
 			// pathWithin checks a path's directory, so ask about a file in entry.
