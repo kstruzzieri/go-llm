@@ -1140,7 +1140,7 @@
     {
       "id": "GITMETA-DISCOVERY",
       "source": "issue-721:64",
-      "requirement": "Before a native sandboxed spawn, the workspace walk finds the git layout both backends protect: every directory or regular file named .git at any depth (ASCII case-folded; a symbolic link named .git is neither), each linked-worktree and submodule git dir under a worktrees or modules container, recursively, the intermediate directories of slash-named submodules, each present hooks, info, config, config.worktree, commondir and gitdir entry, and each modules-tree directory named hooks or info that is not a git dir. A module directory with a HEAD file is a git dir; one named hooks or info is read-only whole; one holding any other file (Finder's .DS_Store and AppleDouble ._ files aside) is a broken git dir, protected and not descended. A scan error other than absence fails the spawn. A walk pass in which an entry its parent listed (not the root) no longer resolves when the walk reaches it, or a link count changes, is discarded and the walk restarts, at most three passes before the spawn fails; the layout comes from one unchanged pass, so a checkout renamed after its parent was listed and before the walk reached it keeps its .git found under the new name, and a .git removed in that window is not recorded. A change after the walk has passed an entry is the documented same-UID race.",
+      "requirement": "Before a native sandboxed spawn, the workspace walk finds the git layout both backends protect: every directory or regular file named .git at any depth (ASCII case-folded; a symbolic link named .git is neither), each linked-worktree and submodule git dir under a worktrees or modules container, recursively, the intermediate directories of slash-named submodules, each present hooks, info, config, config.worktree, commondir and gitdir entry, and each modules-tree directory named hooks or info that is not a git dir. A module directory with a HEAD file is a git dir; one named hooks or info is read-only whole; one holding any other file (Finder's .DS_Store and AppleDouble ._ files aside) is a broken git dir, protected and not descended. A scan error other than absence fails the spawn. The walk checks current metadata at each visit, including on filesystems that cache entry information at listing time. A listed child that has disappeared or a changed link count discards the pass. A short hard-link count must recur for the same inode, first name and counts on consecutive passes before it is reported as linked outside. The walk makes at most three passes. Only a successful pass supplies the layout, so a renamed checkout is found under its new name and a .git removed between listing and visit is omitted. A change after the walk has passed an entry is the documented same-UID race.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
@@ -1230,6 +1230,18 @@
           "test": "TestInspectSandboxWorkspaceChangeRefusals",
           "file": "agent/tools/sandbox_links_unix_test.go",
           "func": "TestInspectSandboxWorkspaceChangeRefusals"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestInspectSandboxWorkspaceLinkChangeRewalks",
+          "file": "agent/tools/sandbox_links_unix_test.go",
+          "func": "TestInspectSandboxWorkspaceLinkChangeRewalks"
         }
       ],
       "profiles": [

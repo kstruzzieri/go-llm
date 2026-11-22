@@ -416,27 +416,23 @@ func inspectWithChange(t *testing.T, root, rel string, change func(p string) err
 	return got, passes, err
 }
 
-// requireLazyStat skips t unless this filesystem's listing reports entry
-// types, so os.ReadDir leaves each entry's lstat to DirEntry.Info. Elsewhere
-// os.ReadDir stats every entry while listing and Info returns that result, so
-// a file removed after the listing is never seen as gone.
-func requireLazyStat(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	probe := filepath.Join(dir, "probe")
-	if err := os.WriteFile(probe, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("list probe: %v %v", entries, err)
-	}
-	if err := os.Remove(probe); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := entries[0].Info(); err == nil {
-		t.Skip("this filesystem's listing reports no entry types, so a file removed after it is not seen")
-	}
+// inspectSandboxWorkspaceWithHook supplies directory entries whose Info is
+// cached, as on filesystems without directory-entry types. The hook changes
+// the workspace after the listing and before the inspector visits the entry.
+func inspectSandboxWorkspaceWithHook(root string, beforeVisit func(string)) (sandboxGitLayout, error) {
+	return inspectSandboxWorkspaceWithWalk(root, func(root string, visit fs.WalkDirFunc) error {
+		return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return visit(path, entry, err)
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return visit(path, entry, err)
+			}
+			beforeVisit(path)
+			return visit(path, fs.FileInfoToDirEntry(info), nil)
+		})
+	})
 }
 
 // requireListed fails t unless rel's presence in field matches want.
@@ -459,12 +455,11 @@ func TestInspectSandboxWorkspaceRewalksAfterChange(t *testing.T) {
 		name, change string
 		do           func(root, arg string) func(string) error
 		arg          string
-		lazyStat     bool // a file changes: only Info can see it
 		check        func(t *testing.T, root string, got sandboxGitLayout)
 	}{
-		{name: "file removed", change: "src/b.go", do: remove, lazyStat: true},
+		{name: "file removed", change: "src/b.go", do: remove},
 		{name: "directory removed", change: "build", do: remove},
-		{name: "loose object pruned", change: ".git/objects/ab/cdef0123", do: remove, lazyStat: true},
+		{name: "loose object pruned", change: ".git/objects/ab/cdef0123", do: remove},
 		{name: "emptied fan-out directory removed", change: ".git/objects/ab", do: remove},
 		{name: "worktree git dir pruned", change: ".git/worktrees/wt", do: remove,
 			check: func(t *testing.T, root string, got sandboxGitLayout) {
@@ -473,7 +468,7 @@ func TestInspectSandboxWorkspaceRewalksAfterChange(t *testing.T) {
 				requireListed(t, "gitFiles", got.gitFiles, root, "wt/.git", true)
 				requireListed(t, "metadata", got.metadata, root, ".git/modules/m/config", true)
 			}},
-		{name: "gitfile removed", change: "libs/a/.git", do: remove, lazyStat: true,
+		{name: "gitfile removed", change: "libs/a/.git", do: remove,
 			check: func(t *testing.T, root string, got sandboxGitLayout) {
 				requireListed(t, "gitFiles", got.gitFiles, root, "libs/a/.git", false)
 				requireListed(t, "gitDirs", got.gitDirs, root, ".git/modules/libs/a", true)
@@ -493,9 +488,6 @@ func TestInspectSandboxWorkspaceRewalksAfterChange(t *testing.T) {
 			}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.lazyStat {
-				requireLazyStat(t)
-			}
 			root := canonGitTempDir(t)
 			writeGitFixture(t, root)
 			for _, rel := range []string{"src/b.go", "build/out.o", ".git/objects/ab/cdef0123"} {
@@ -587,9 +579,8 @@ func TestInspectSandboxWorkspaceChangeRefusals(t *testing.T) {
 }
 
 // A rename after the listing hides nothing from the hard-link refusal: the
-// second pass finds the outside-linked inode under its new name.
+// second pass finds the inode under its new name and the third confirms the shortfall.
 func TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused(t *testing.T) {
-	requireLazyStat(t)
 	ws := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside-canary")
 	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
@@ -599,8 +590,9 @@ func TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused(t *testing.T) {
 		t.Skipf("hard links unavailable: %v", err)
 	}
 	_, passes, err := inspectWithChange(t, ws, "a", func(p string) error { return os.Rename(p, filepath.Join(ws, "b")) })
-	if err == nil || !strings.Contains(err.Error(), `"b" is linked outside the workspace`) || passes != 2 {
-		t.Fatalf("err = %v after %d passes, want b refused in pass 2", err, passes)
+	// containment: GITMETA-DISCOVERY
+	if err == nil || !strings.Contains(err.Error(), `"b" is linked outside the workspace`) || passes != 3 {
+		t.Fatalf("err = %v after %d passes, want b refused in pass 3", err, passes)
 	}
 }
 
@@ -629,28 +621,56 @@ func TestInspectSandboxWorkspaceLinkChangeRewalks(t *testing.T) {
 			}
 		}
 	}
+	t.Run("different short counts on consecutive passes", func(t *testing.T) {
+		ws := t.TempDir()
+		names := []string{"one", "two"}
+		for _, name := range names {
+			pair("a/"+name, "b/"+name)(t, ws)
+		}
+		passes := 0
+		_, err := inspectSandboxWorkspaceWithHook(ws, func(path string) {
+			if path == ws {
+				passes++
+			}
+			if path == filepath.Join(ws, "b") && passes <= len(names) {
+				// Move a different internal name behind the walk in each pass.
+				name := names[passes-1]
+				if err := os.Rename(filepath.Join(path, name), filepath.Join(ws, "a", "moved-"+name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+		// containment: GITMETA-DISCOVERY
+		if err != nil || passes != 3 {
+			t.Fatalf("err = %v after %d passes, want success in pass 3", err, passes)
+		}
+	})
 	for _, c := range []struct {
 		name, change string
 		setup        func(t *testing.T, ws string)
 		do           func(ws, p string) error
-		lazyStat     bool // the change is to a file at its own visit: only Info can see it
 	}{
 		// a is counted with two links; a third appears before m is read.
 		{"third link added", "m", pair("a", "m"),
-			func(ws, p string) error { return os.Link(p, filepath.Join(ws, "z")) }, true},
+			func(ws, p string) error { return os.Link(p, filepath.Join(ws, "z")) }},
 		// a/f is counted with two links, then removed: b/g has one.
 		{"counted name removed", "b", pair("a/f", "b/g"),
-			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "a/f")) }, false},
+			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "a/f")) }},
 		// b/g is removed before b is listed: a/f is short one name.
 		{"uncounted name removed", "b", pair("a/f", "b/g"),
-			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "b/g")) }, false},
+			func(ws, _ string) error { return os.Remove(filepath.Join(ws, "b/g")) }},
+		// Both links stay internal, but b/g moves into a after a was walked.
+		{"internal name moved behind the walk", "b", pair("a/f", "b/g"),
+			func(ws, _ string) error {
+				return os.Rename(filepath.Join(ws, "b/g"), filepath.Join(ws, "a/g"))
+			}},
 		// a is walked, then moved into z before z is listed: both names count twice.
 		{"directory walked twice", "z", func(t *testing.T, ws string) {
 			pair("a/f", "a/g")(t, ws)
 			if err := os.Mkdir(filepath.Join(ws, "z"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-		}, func(ws, _ string) error { return os.Rename(filepath.Join(ws, "a"), filepath.Join(ws, "z/a")) }, false},
+		}, func(ws, _ string) error { return os.Rename(filepath.Join(ws, "a"), filepath.Join(ws, "z/a")) }},
 		// x is listed as a file and read as a directory, whose link count is 2 or more.
 		{"file became a directory", "x", func(t *testing.T, ws string) { write(t, filepath.Join(ws, "x")) },
 			func(_, p string) error {
@@ -658,12 +678,9 @@ func TestInspectSandboxWorkspaceLinkChangeRewalks(t *testing.T) {
 					return err
 				}
 				return os.Mkdir(p, 0o755)
-			}, true},
+			}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.lazyStat {
-				requireLazyStat(t)
-			}
 			ws := t.TempDir()
 			c.setup(t, ws)
 			_, passes, err := inspectWithChange(t, ws, c.change, func(p string) error { return c.do(ws, p) })

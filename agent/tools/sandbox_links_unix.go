@@ -47,13 +47,13 @@ type sandboxGitLayout struct {
 // worktree structure (scanGitDir). A pass that sees the workspace change
 // under it (errSandboxWorkspaceChanged: git's automatic gc pruning objects, an
 // editor replacing a file) is discarded whole and the walk starts again, at
-// most sandboxInspectPasses times. The layout therefore always comes from one
-// pass that saw no change, the pass a single walk would accept. Any other
-// error, and a change in every pass, fails the spawn, so the layout is
-// complete or there is none. This is the final host check; an unsandboxed
-// same-UID process can still race it by the documented threat model.
+// most sandboxInspectPasses passes in total. A short hard-link count must
+// recur on consecutive passes before it is reported as an outside link.
+// Only a successful pass supplies a layout. Any other error or exhaustion
+// of the pass limit fails the spawn. An unsandboxed same-UID process can
+// still race this final host check under the documented threat model.
 func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
-	return inspectSandboxWorkspaceWithHook(root, nil)
+	return inspectSandboxWorkspaceWithWalk(root, filepath.WalkDir)
 }
 
 // sandboxInspectPasses bounds the workspace passes inspectSandboxWorkspace
@@ -63,22 +63,34 @@ func inspectSandboxWorkspace(root string) (sandboxGitLayout, error) {
 const sandboxInspectPasses = 3
 
 // errSandboxWorkspaceChanged marks a pass that saw the workspace change under
-// it: an entry its parent listed, other than the root, no longer resolved or
-// had become a directory, or an inode's link count changed (at a later name,
-// or at its first name when the pass found fewer names than links). Nothing
-// the pass recorded is kept.
+// it, or could not account for all names of a hard-linked inode. The next
+// pass rebuilds the layout and the link counts from scratch.
 var errSandboxWorkspaceChanged = errors.New("tools: sandbox workspace changed while inspecting")
 
-// inspectSandboxWorkspaceWithHook is inspectSandboxWorkspace with a
-// deterministic seam: beforeVisit, when non-nil, runs in every pass at each
-// visit the walk does not fail outright, with the entry's path, so tests can
-// stand in for a concurrent process changing an entry the walk has already
-// listed.
-func inspectSandboxWorkspaceWithHook(root string, beforeVisit func(name string)) (sandboxGitLayout, error) {
+// sandboxLinkShortfall identifies the same incomplete count across two walks.
+type sandboxLinkShortfall struct {
+	dev, ino    uint64
+	seen, total uint64
+	first       string
+}
+
+func (s *sandboxLinkShortfall) Error() string {
+	return fmt.Sprintf("tools: sandbox workspace entry %q is linked outside the workspace", s.first)
+}
+
+// inspectSandboxWorkspaceWithWalk runs a fresh walk for each attempt.
+func inspectSandboxWorkspaceWithWalk(root string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
+	var previous *sandboxLinkShortfall
 	var err error
 	for range sandboxInspectPasses {
 		var layout sandboxGitLayout
-		layout, err = inspectSandboxWorkspaceOnce(root, beforeVisit)
+		layout, err = inspectSandboxWorkspaceOnce(root, walk)
+		var short *sandboxLinkShortfall
+		if errors.As(err, &short) && (previous == nil || *previous != *short) {
+			// Another internal name may have moved into an already visited directory.
+			err = fmt.Errorf("%w %q: found %d of %d hard links", errSandboxWorkspaceChanged, short.first, short.seen, short.total)
+		}
+		previous = short
 		if !errors.Is(err, errSandboxWorkspaceChanged) {
 			return layout, err
 		}
@@ -87,7 +99,7 @@ func inspectSandboxWorkspaceWithHook(root string, beforeVisit func(name string))
 }
 
 // inspectSandboxWorkspaceOnce is one pass of inspectSandboxWorkspace.
-func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sandboxGitLayout, error) {
+func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -109,7 +121,7 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 		}
 		return fmt.Errorf("tools: sandbox inspect workspace entry %q: %w", rel, err)
 	}
-	err := filepath.WalkDir(root, func(name string, entry fs.DirEntry, walkErr error) error {
+	err := walk(root, func(name string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, name)
 		if relErr != nil {
 			return fmt.Errorf("tools: sandbox inspect workspace links: %w", relErr)
@@ -118,26 +130,29 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 		if walkErr != nil {
 			return entryErr(rel, walkErr)
 		}
-		if beforeVisit != nil {
-			beforeVisit(name)
-		}
-		if strings.EqualFold(entry.Name(), ".git") {
-			switch {
-			case entry.IsDir():
-				layout.dotGitDirs = append(layout.dotGitDirs, name)
-			case entry.Type().IsRegular():
-				layout.gitFiles = append(layout.gitFiles, name)
-			}
-		}
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-		info, err := entry.Info()
+		// DirEntry.Info can return metadata cached when the parent was listed.
+		// Classify the name as it exists at this visit.
+		info, err := os.Lstat(name)
 		if err != nil {
 			return entryErr(rel, err)
 		}
-		if info.IsDir() { // listed as a non-directory, so replaced since
-			return fmt.Errorf("%w %q: became a directory", errSandboxWorkspaceChanged, rel)
+		kind := info.Mode().Type()
+		if kind != entry.Type() {
+			if entry.IsDir() {
+				return entryErr(rel, syscall.ENOTDIR)
+			}
+			return fmt.Errorf("%w %q: entry type changed", errSandboxWorkspaceChanged, rel)
+		}
+		if strings.EqualFold(entry.Name(), ".git") {
+			switch {
+			case info.IsDir():
+				layout.dotGitDirs = append(layout.dotGitDirs, name)
+			case kind.IsRegular():
+				layout.gitFiles = append(layout.gitFiles, name)
+			}
+		}
+		if info.IsDir() || kind&os.ModeSymlink != 0 {
+			return nil
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
@@ -165,9 +180,8 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 	for _, key := range order {
 		record := links[key]
 		if record.seen < record.total {
-			// A name that went or came during the pass also leaves the count
-			// short. Only a first name that still holds the inode at the count
-			// it was recorded with shows a link outside the workspace.
+			// A changed first name already explains the short count. Otherwise
+			// the caller checks whether a fresh walk sees the same shortfall.
 			fi, err := os.Lstat(filepath.Join(root, record.first))
 			if err != nil {
 				return sandboxGitLayout{}, entryErr(record.first, err)
@@ -176,7 +190,9 @@ func inspectSandboxWorkspaceOnce(root string, beforeVisit func(name string)) (sa
 				(uint64(st.Dev) != key.dev || uint64(st.Ino) != key.ino || uint64(st.Nlink) != record.total) {
 				return sandboxGitLayout{}, fmt.Errorf("%w %q: link count changed", errSandboxWorkspaceChanged, record.first)
 			}
-			return sandboxGitLayout{}, fmt.Errorf("tools: sandbox workspace entry %q is linked outside the workspace", record.first)
+			return sandboxGitLayout{}, &sandboxLinkShortfall{
+				dev: key.dev, ino: key.ino, seen: record.seen, total: record.total, first: record.first,
+			}
 		}
 		if record.seen > record.total {
 			return sandboxGitLayout{}, fmt.Errorf("%w %q: link count changed", errSandboxWorkspaceChanged, record.first)
