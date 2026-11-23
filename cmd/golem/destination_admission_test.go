@@ -413,7 +413,16 @@ func TestAdmissionPartialAllowlistStillFails(t *testing.T) {
 
 // remoteRow matches one remote header line of the model-server section: name,
 // URL and its state on one line (the test writer is 80 columns).
-var remoteRow = regexp.MustCompile(`(?m)^  (\S+)\s+(https?://\S+)  (needs your OK|allowed by -allow-destination|allowed earlier this session|not allowed \(.*\))$`)
+var remoteRow = regexp.MustCompile(`(?m)^  (\S+)\s+(https?://\S+)  (` + remoteStateAlternation() + `)$`)
+
+// remoteStateAlternation is the regexp alternation of every state's copy.
+func remoteStateAlternation() string {
+	var alts []string
+	for _, st := range []remoteState{remoteNeedsOK, remoteAllowedByFlag, remoteAllowedEarlier, remoteNotAllowed, remoteRefused} {
+		alts = append(alts, regexp.QuoteMeta(st.text()))
+	}
+	return strings.Join(alts, "|")
+}
 
 // assertRows checks each remote's full header line (name, URL and state), that
 // no other remote row is drawn, and that the remotes reading "needs your OK"

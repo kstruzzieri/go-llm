@@ -149,7 +149,7 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 	// At startup the baseline is only the exact allow flags (plus the
 	// loopback rule inside Permits): nothing has been granted yet.
 	flags := provider.NewDestinationPolicy(a.allowed...)
-	renderErr := a.renderForConsent(a.manifest, flags, flags)
+	renderErr := a.renderForConsent(a.manifest, flags, a.baselineLocked())
 
 	policy, _, err := a.consent(ctx, a.manifest, flags, renderErr)
 	if err != nil {
@@ -282,10 +282,7 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 	// silently re-admit a remote they cleared, so only the exact flags (and
 	// the normal loopback rule inside Permits) survive a revoke.
 	flags := provider.NewDestinationPolicy(a.allowed...)
-	baseline := flags
-	if a.admitted {
-		baseline = a.granted
-	}
+	baseline := a.baselineLocked()
 
 	// Rendered before the decision: the question names the remotes of the
 	// PROPOSED manifest that need a yes, and the rendering shows their uses.
@@ -408,7 +405,7 @@ func (a *destinationAdmission) pinLoopback(providerKey string, d provider.Destin
 	}
 	a.manifest = m
 	a.edges = edges
-	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), displayURL(d.BaseURL()))
+	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), destinationURL(d))
 	return nil
 }
 
@@ -437,14 +434,22 @@ func (a *destinationAdmission) render(w io.Writer, style consoleStyle) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	flags := provider.NewDestinationPolicy(a.allowed...)
-	baseline := flags
-	if a.admitted {
-		baseline = a.granted
-	}
+	baseline := a.baselineLocked()
 	// A listing asks nothing, so a failed write admits nothing; like the rest
 	// of the slash command's output, it is not reported.
 	_ = renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
 		manifestOpts{style: style, cleared: !a.admitted})
+}
+
+// baselineLocked is the policy a consent decision and its rendering are judged
+// against: the grant while admitted, else only the exact allow flags (plus the
+// loopback rule inside Permits). Once revoked, granted is authority the user
+// withdrew, so it never counts. The caller holds a.mu.
+func (a *destinationAdmission) baselineLocked() provider.DestinationPolicy {
+	if a.admitted {
+		return a.granted
+	}
+	return provider.NewDestinationPolicy(a.allowed...)
 }
 
 // consentMode is the render mode for a manifest shown before the consent
@@ -459,8 +464,8 @@ func (a *destinationAdmission) consentMode() renderMode {
 // startupPromptYN is the pre-REPL consent reader: one line from stdin, read
 // byte-at-a-time so no buffered read-ahead can steal bytes from the line
 // editor that takes over the same descriptor moments later. A prompt that
-// fails to print is an error, and nothing is read: a typed-ahead answer must
-// not reply to a question the user never saw.
+// fails to print is an error, and nothing is read: a question whose prompt
+// fails to write is never answered.
 func startupPromptYN(in io.Reader, out io.Writer) func(context.Context, string) (bool, error) {
 	return func(_ context.Context, prompt string) (bool, error) {
 		if _, err := fmt.Fprint(out, prompt); err != nil {

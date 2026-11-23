@@ -138,7 +138,8 @@ Send data to opencode (remote) during this session? [y/N]
 ```
 
 A remote not covered by `-allow-destination` waits for a yes. Color follows
-`NO_COLOR`, `TERM=dumb`, `-no-color` and whether the output is a terminal.
+`NO_COLOR`, `TERM=dumb` and whether the output is a terminal; only
+`golem index` and the top-level flags also take `-no-color`.
 For scripts and one-shot runs, pre-admit exact destinations with the
 repeatable flag:
 

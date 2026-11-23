@@ -62,6 +62,8 @@ type termIO struct {
 
 func (t termIO) Read(p []byte) (int, error) { return t.r.Read(p) }
 
+// Write forwards to the output and records the first write error of the current
+// read window in writeErr, which x/term would otherwise drop.
 func (t termIO) Write(p []byte) (int, error) {
 	n, err := t.w.Write(p)
 	if err != nil && t.writeErr != nil {

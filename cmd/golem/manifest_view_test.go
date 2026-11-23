@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -89,6 +90,45 @@ func TestRemoteStates(t *testing.T) {
 		if got[flagged] != remoteAllowedByFlag || got[granted] != remoteAllowedEarlier || got[fresh] != c.fresh {
 			t.Errorf("mode %d: got %v", c.mode, got)
 		}
+	}
+}
+
+// A flagged remote the baseline does not cover reads the mode's uncovered
+// state, and the asking-mode "needs your OK" set equals uncoveredAll.
+func TestRemoteStatesBaselineDecidesCoverage(t *testing.T) {
+	flagged := admDest(t, "flagged", "https://flagged.example.com/v1")
+	granted := admDest(t, "granted", "https://granted.example.com/v1")
+	m, err := provider.NewDestinationManifest(
+		provider.DestinationEdge{Purpose: "agent", Destination: flagged},
+		provider.DestinationEdge{Purpose: "agent", Destination: granted},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := provider.NewDestinationPolicy(flagged)
+	baseline := provider.NewDestinationPolicy(granted) // flags not a subset
+	for _, c := range []struct {
+		mode renderMode
+		want remoteState
+	}{{renderAsking, remoteNeedsOK}, {renderRefusing, remoteRefused}, {renderListing, remoteNotAllowed}} {
+		got := remoteStates(m, flags, baseline, c.mode)
+		if got[flagged] != c.want || got[granted] != remoteAllowedEarlier {
+			t.Errorf("mode %d: got %v", c.mode, got)
+		}
+	}
+	got := remoteStates(m, flags, baseline, renderAsking)
+	uncovered := uncoveredAll(m.Destinations(), baseline)
+	n := 0
+	for d, st := range got {
+		if st == remoteNeedsOK {
+			n++
+			if !slices.Contains(uncovered, d) {
+				t.Errorf("%v needs OK but is covered", d)
+			}
+		}
+	}
+	if n != len(uncovered) {
+		t.Errorf("needs-OK rows = %d, uncoveredAll = %d", n, len(uncovered))
 	}
 }
 

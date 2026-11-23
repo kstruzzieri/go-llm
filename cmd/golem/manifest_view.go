@@ -72,14 +72,15 @@ func destinationName(name string) string {
 	return strconv.QuoteToASCII(name)
 }
 
-// displayURL is the one formatter for a server URL (row and pin receipt). The
-// URL is an identity, like the provider name, so it is shown as exact code
+// destinationURL formats a canonical Destination URL (row and pin receipt); it
+// does no redaction, so it is for canonical destination URLs only, never a raw
+// base_url. The URL is an identity, like the provider name, so it is shown as exact code
 // points: every non-ASCII rune is escaped with strconv.QuoteToASCII's
 // convention, minus the quotes. Escaping only blank-rendering runes would mean
 // enumerating them (U+3000 and U+00A0 are graphic, and so is U+3164), and a
 // missed one lets a hostile base_url draw a fake state on its own row.
-func displayURL(u string) string {
-	q := strconv.QuoteToASCII(u)
+func destinationURL(d provider.Destination) string {
+	q := strconv.QuoteToASCII(d.BaseURL())
 	return q[1 : len(q)-1]
 }
 
@@ -138,17 +139,23 @@ func remoteStates(m *provider.DestinationManifest, flags, baseline provider.Dest
 		if d.IsLocal() {
 			continue
 		}
+		// Coverage is decided by the baseline alone, so the "needs your OK"
+		// rows are exactly uncoveredAll(dests, baseline), the set the
+		// question names, whatever the flags hold.
 		switch {
+		case !baseline.Permits(d):
+			switch mode {
+			case renderAsking:
+				out[d] = remoteNeedsOK
+			case renderRefusing:
+				out[d] = remoteRefused
+			default:
+				out[d] = remoteNotAllowed
+			}
 		case flags.Permits(d):
 			out[d] = remoteAllowedByFlag
-		case baseline.Permits(d):
-			out[d] = remoteAllowedEarlier
-		case mode == renderAsking:
-			out[d] = remoteNeedsOK
-		case mode == renderRefusing:
-			out[d] = remoteRefused
 		default:
-			out[d] = remoteNotAllowed
+			out[d] = remoteAllowedEarlier
 		}
 	}
 	return out
@@ -180,15 +187,11 @@ type manifestOpts struct {
 // its header line.
 const manifestNameMax = 16
 
-// rowLabelCols is the width of a row label ("used for  ", "checks    "), so
-// wrapped items line up under the first one.
-const rowLabelCols = 10
-
 // renderManifest writes the model-server section for m: a rule, then the
 // servers on this machine and the remote ones, one block per destination with
 // its name, URL, consent state (remotes only), the purposes it serves, the
 // metadata checks it gets, and where its key comes from. Untrusted fields go
-// through displayField, destinationName and displayURL; layout is measured on
+// through displayField, destinationName and destinationURL; layout is measured on
 // the uncolored text. states must hold every remote: a missing entry panics
 // rather than defaulting to a state. An empty manifest writes nothing. The
 // section is written in one call, and its error is returned so a caller about
@@ -237,22 +240,22 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 		if len(items) == 0 {
 			return
 		}
-		first := indent + label + strings.Repeat(" ", rowLabelCols-len(label))
-		for i, l := range wrapList(items, first, indent+strings.Repeat(" ", rowLabelCols), s.width) {
+		for i, l := range wrapList(items, indent+label, indent+strings.Repeat(" ", displayCols(label)), s.width) {
 			if i == 0 {
-				l = indent + s.paint(sgrCyan, label) + l[len(indent)+len(label):]
+				word := strings.TrimRight(label, " ")
+				l = indent + s.paint(sgrCyan, word) + l[len(indent)+len(word):]
 			}
 			line(l)
 		}
 	}
 
 	sub := "where this session's model requests can go"
-	usesLabel := "used for"
+	usesLabel := "used for  "
 	switch opt.operation {
 	case "":
 	case "models":
 		sub = "servers golem models lists and checks"
-		usesLabel = "in route"
+		usesLabel = "in route  "
 	default:
 		sub = "where golem " + opt.operation + " sends model requests"
 	}
@@ -270,7 +273,7 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 			line(s.paint(sgrYellowBold, "Remote"))
 		}
 		// The URL is never wrapped or cut: it is the identity being granted.
-		name, url := destinationName(d.Provider()), displayURL(d.BaseURL())
+		name, url := destinationName(d.Provider()), destinationURL(d)
 		head := "  " + name + strings.Repeat(" ", max(0, nameCol-displayCols(name))) + "  " + url
 		if displayCols(name) > nameCol {
 			line("  " + name)
@@ -296,7 +299,7 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 			}
 		}
 		row(usesLabel, uses[d])
-		row("checks", checks[d])
+		row("checks    ", checks[d])
 		if k, ok := keySources[d.Provider()]; ok {
 			line(indent + s.paint(sgrDim, displayField(k)))
 		}
