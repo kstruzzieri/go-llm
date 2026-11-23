@@ -784,8 +784,9 @@ a session grant, and the failure adds
 Reusing an existing grant, a local destination, or an exact
 `-allow-destination` flag grants nothing new and prints no such notice.
 Switching away from a route is not revocation either: `/grants` lists the
-session's destination authority, including routes that are no longer active,
-and `/grants clear` revokes all of it.
+servers the session has admitted or may re-admit, with each remote's state,
+including routes that are no longer active, and `/grants clear` revokes all of
+them (after a clear nothing is admitted until the next admission).
 
 ## golem ops
 

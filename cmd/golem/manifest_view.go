@@ -45,19 +45,27 @@ var purposeTable = map[string]purposeInfo{
 }
 
 // purposeLabel returns the display label for a manifest purpose and whether
-// it is a metadata purpose. An unknown purpose is shown as "other: <purpose>"
-// so a raw "chat" stays distinct from the "agent" label "chat".
+// it is a metadata purpose. An unknown purpose is shown as "other: " and the
+// id through destinationName, so a raw "chat" stays distinct from the "agent"
+// label "chat", and an id that is not bare is quoted: the renderer's
+// " (fallback)" lands outside the quotes, so a primary "custom (fallback)"
+// cannot read as a fallback "custom".
 func purposeLabel(purpose string) (label string, metadata bool) {
 	if p, ok := purposeTable[purpose]; ok {
 		return p.label, p.metadata
 	}
-	return "other: " + displayField(purpose), false
+	return "other: " + destinationName(purpose), false
 }
 
 // destinationName is the one identity formatter for a provider name (row,
-// question and pin receipt). A name of only [A-Za-z0-9._-] stays bare; any
-// other is quoted with strconv.QuoteToASCII so it cannot run into its
-// neighbours or carry a control or look-alike character.
+// question and pin receipt) and an unknown purpose id. A name of only
+// [A-Za-z0-9._-] stays bare; any other is quoted with strconv.QuoteToASCII so
+// it cannot run into its neighbours or carry a control or look-alike
+// character, and each ASCII space in it is then written \x20. QuoteToASCII
+// keeps spaces, so a long quoted name padded with them could soft-wrap a
+// forged state label (say "allowed by -allow-destination") onto a physical
+// line of its own. The escape is unambiguous: a literal backslash is already
+// \\, and nothing else in the quoted form is a space.
 func destinationName(name string) string {
 	bare := name != ""
 	for _, r := range name {
@@ -69,7 +77,7 @@ func destinationName(name string) string {
 	if bare {
 		return name
 	}
-	return strconv.QuoteToASCII(name)
+	return strings.ReplaceAll(strconv.QuoteToASCII(name), " ", `\x20`)
 }
 
 // destinationURL formats a canonical Destination URL (row and pin receipt); it
@@ -261,7 +269,7 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 	}
 	line(s.rule("model servers", sub))
 	if opt.cleared {
-		line(s.paint(sgrDim, "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again"))
+		line(s.paint(sgrDim, "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination"))
 	}
 
 	asking := false

@@ -192,6 +192,10 @@ func (a *destinationAdmission) revoke() {
 // Callers hold a.mu and render m before calling, so the user sees what each
 // remote the question names is used for, and pass renderErr, the error that
 // rendering returned: a question whose section failed to print is never asked.
+// The write error counts only where golem would ask about an uncovered
+// remote: a manifest the baseline covers (local and flag-covered servers) is
+// admitted even if its section failed to print, as before, and a
+// noninteractive refusal keeps its exact bytes.
 func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy, renderErr error) (provider.DestinationPolicy, bool, error) {
 	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
 	// literal loopback, so uncoveredAll can only ever surface remotes; a
@@ -215,8 +219,9 @@ func (a *destinationAdmission) consent(ctx context.Context, m *provider.Destinat
 	if a.consentMode() != renderAsking {
 		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered[0].String())
 	}
-	// Fail closed when the section did not print: the user has not seen what
-	// a yes admits, and a typed-ahead "y" must not answer for them. In the
+	// Fail closed when the section did not print and golem would ask about an
+	// uncovered remote: the user has not seen what a yes admits, and a
+	// typed-ahead "y" must not answer for them. In the
 	// REPL (replOut is bound only there, beside the line-source prompt) the
 	// line typed after the command is still its answer, never a goal, so one
 	// line is read and dropped through the same seam; no question is shown and
@@ -357,7 +362,8 @@ func (a *destinationAdmission) setReplOut(out io.Writer) {
 
 // renderForConsent draws m before the consent decision on the writer the
 // question is asked on (replOut once bound, else Out), asking when a question
-// can be asked and refusing otherwise, and returns the write error for consent.
+// can be asked and refusing otherwise, and returns the write error for consent,
+// which refuses on it only where golem would ask about an uncovered remote.
 // Callers hold a.mu.
 func (a *destinationAdmission) renderForConsent(m *provider.DestinationManifest, flags, baseline provider.DestinationPolicy) error {
 	w := a.out

@@ -91,21 +91,31 @@ func TestRule(t *testing.T) {
 	if !strings.HasSuffix(got, strings.Repeat("\u2500", 17)) || strings.HasSuffix(got, strings.Repeat("\u2500", 18)) {
 		t.Fatalf("fill: %q", got)
 	}
-	if got := (consoleStyle{false, 10}).rule("model servers", "x"); !strings.HasSuffix(got, " \u2500\u2500\u2500") {
-		t.Fatalf("narrow: %q", got)
+	// Too narrow for the title: at least three dashes, and the subtitle on
+	// its own line.
+	if got, want := (consoleStyle{false, 10}).rule("model servers", "x"), "\u2500\u2500 model servers \u2500\u2500\u2500\nx"; got != want {
+		t.Fatalf("narrow: %q, want %q", got, want)
 	}
-	// The session prefix is 63 columns, so at the 40-column floor the
-	// subtitle is dropped and the title-only rule fills exactly the width.
-	narrow := (consoleStyle{false, 40}).rule("model servers", "where this session's model requests can go")
-	if want := "\u2500\u2500 model servers " + strings.Repeat("\u2500", 23); narrow != want {
-		t.Fatalf("width 40: %q, want %q", narrow, want)
+	// At the 40-column floor a subtitle that does not fit on the rule moves
+	// under the title-only rule, which fills exactly the width.
+	const index = "where golem index sends model requests" // 38 columns
+	titleOnly40 := "\u2500\u2500 model servers " + strings.Repeat("\u2500", 23)
+	if got, want := (consoleStyle{false, 40}).rule("model servers", index), titleOnly40+"\n"+index; got != want {
+		t.Fatalf("width 40: %q, want %q", got, want)
 	}
-	// 63 + 3 = 66 columns is the narrowest width that keeps the subtitle.
-	if got := (consoleStyle{false, 66}).rule("model servers", "where this session's model requests can go"); !strings.HasSuffix(got, "go \u2500\u2500\u2500") {
-		t.Fatalf("width 66 dropped the subtitle: %q", got)
+	// The session subtitle is 42 columns: wider than 40 on its own, so it is
+	// dropped and the title-only rule stands alone.
+	const session = "where this session's model requests can go"
+	if got := (consoleStyle{false, 40}).rule("model servers", session); got != titleOnly40 {
+		t.Fatalf("width 40: %q, want %q", got, titleOnly40)
 	}
-	if got := (consoleStyle{false, 65}).rule("model servers", "where this session's model requests can go"); strings.Contains(got, "where") || len([]rune(got)) != 65 {
-		t.Fatalf("width 65 kept the subtitle or missed the width: %q", got)
+	// The session prefix is 63 columns: 63 + 3 = 66 is the narrowest width
+	// that keeps the subtitle on the rule; at 65 it takes its own line.
+	if got := (consoleStyle{false, 66}).rule("model servers", session); !strings.HasSuffix(got, "go \u2500\u2500\u2500") || strings.Contains(got, "\n") {
+		t.Fatalf("width 66 moved the subtitle off the rule: %q", got)
+	}
+	if got, want := (consoleStyle{false, 65}).rule("model servers", session), "\u2500\u2500 model servers "+strings.Repeat("\u2500", 48)+"\n"+session; got != want {
+		t.Fatalf("width 65: %q, want %q", got, want)
 	}
 	if got, want := s.rule("t", ""), "\u2500\u2500 t "+strings.Repeat("\u2500", 75); got != want {
 		t.Fatalf("no subtitle: %q, want %q", got, want)
@@ -114,6 +124,11 @@ func TestRule(t *testing.T) {
 	wantColor := "\x1b[2m\u2500\u2500 \x1b[0m\x1b[1mt\x1b[0m \x1b[2m\u2500\u2500 s " + strings.Repeat("\u2500", 70) + "\x1b[0m"
 	if got := c.rule("t", "s"); got != wantColor {
 		t.Fatalf("color: %q, want %q", got, wantColor)
+	}
+	// A subtitle on its own line is dim too.
+	wantColor = "\x1b[2m\u2500\u2500 \x1b[0m\x1b[1mt\x1b[0m \x1b[2m" + strings.Repeat("\u2500", 35) + "\x1b[0m\n\x1b[2m" + index + "\x1b[0m"
+	if got := (consoleStyle{true, 40}).rule("t", index); got != wantColor {
+		t.Fatalf("color, subtitle below: %q, want %q", got, wantColor)
 	}
 }
 

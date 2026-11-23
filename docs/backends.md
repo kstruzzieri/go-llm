@@ -113,8 +113,10 @@ name and URL (non-ASCII characters in the URL shown escaped), a
 `used for` row in plain words (chat, summaries, code
 delegation, embeddings; `(fallback)` marks a use reached only through fallback
 entries), and a `checks` row for metadata requests (model list, capabilities,
-slot status). Under each server whose provider sends a key, the section adds
-`sends api_key from $NAME` (several: `$A, $B`) or `sends a literal api_key`, so
+slot status). A name that is not only letters, digits, `.`, `_` and `-` is
+quoted, with spaces shown as `\x20`. Under each server whose provider sends a
+key, the section adds `sends api_key from $NAME` (several: `$A, $B`) or
+`sends a literal api_key`, so
 you see which secret goes where; this extends the #477 consent field set. Each
 remote carries its own state: `needs your OK`, `allowed by -allow-destination`,
 `allowed earlier this session`, `not allowed (needs -allow-destination)`

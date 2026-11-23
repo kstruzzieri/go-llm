@@ -1063,7 +1063,7 @@ func grantsEdges(t *testing.T) []provider.DestinationEdge {
 
 // /grants lists each remote's state as the session holds it, and after
 // /grants clear says so: every destination, local and flagged included, is
-// out of the gate until the next goal re-admits.
+// out of the gate until the next admission.
 func TestGrantsListingStates(t *testing.T) {
 	p := &fakePrompt{answer: true}
 	adm, _ := newTestAdmission(t, grantsEdges(t), []string{"flagged/https://flagged.example.com"}, true, p)
@@ -1074,7 +1074,7 @@ func TestGrantsListingStates(t *testing.T) {
 	const (
 		approved = "\n  approved  https://approved.example.com"
 		flagged  = "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n"
-		cleared  = "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again\n"
+		cleared  = "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination\n"
 	)
 
 	before := slash(t, sess, "/grants")
@@ -1096,8 +1096,8 @@ func TestGrantsListingStates(t *testing.T) {
 			t.Errorf("/grants after clear missing %q:\n%s", want, after)
 		}
 	}
-	// Why the cleared line exists: nothing binds until the next goal, not
-	// even the servers the listing still calls allowed.
+	// Why the cleared line exists: nothing binds until the next admission,
+	// not even the servers the listing still calls allowed.
 	for _, b := range [][2]string{{"agent", "llamacpp"}, {"summarize", "flagged"}, {"agent", "approved"}} {
 		if _, err := adm.gate.Bind(context.Background(), b[0], b[1]); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("Bind(%s, %s) after /grants clear = %v, want ErrDestinationDenied", b[0], b[1], err)

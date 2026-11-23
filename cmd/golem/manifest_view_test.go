@@ -35,8 +35,9 @@ func TestPurposeLabelTable(t *testing.T) {
 	if label, md := purposeLabel("chat"); label != "other: chat" || md {
 		t.Errorf("purposeLabel(chat) = (%q, %v)", label, md)
 	}
-	if label, _ := purposeLabel("x\x1b"); strings.Contains(label, "\x1b") {
-		t.Errorf("label carries ESC: %q", label)
+	// An id that is not bare is quoted and escaped, like a provider name.
+	if label, _ := purposeLabel("x\x1b"); strings.Contains(label, "\x1b") || label != `other: "x\x1b"` {
+		t.Errorf("purposeLabel(x ESC) = %q, want %q and no ESC", label, `other: "x\x1b"`)
 	}
 }
 
@@ -44,7 +45,9 @@ func TestDestinationName(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"opencode", "opencode"},
 		{"llama.cpp-2", "llama.cpp-2"},
-		{"alpha and beta", `"alpha and beta"`},
+		// Spaces show as \x20, so no space sits inside a quoted name.
+		{"alpha and beta", `"alpha\x20and\x20beta"`},
+		{`a\x20b`, `"a\\x20b"`},
 		{`a"b\c`, `"a\"b\\c"`},
 		{"n\u00e9v", `"n\u00e9v"`},
 		{"a\u202eb", `"a\u202eb"`},
@@ -172,15 +175,18 @@ func TestConsentQuestion(t *testing.T) {
 		{q("opencode"), "opencode"},
 		{q("opencode", "groq"), "groq and opencode"},
 		{q("e", "d", "c", "b", "a"), "a, b, c, d and e"},
-		{q("alpha and beta", "gamma"), `"alpha and beta" and gamma`},
+		{q("alpha and beta", "gamma"), `"alpha\x20and\x20beta" and gamma`},
+		{q("alpha and beta"), `"alpha\x20and\x20beta"`},
+		{q("alpha", "beta"), "alpha and beta"},
 		{q("beta", "alpha"), "alpha and beta"},
 	} {
 		if want := pre + c.names + post; c.got != want {
 			t.Errorf("got %q, want %q", c.got, want)
 		}
 	}
-	if q("alpha and beta", "gamma") == q("alpha", "beta") {
-		t.Error("ambiguous names produce identical questions")
+	// One server named "alpha and beta" is not two servers alpha and beta.
+	if q("alpha and beta") == q("alpha", "beta") {
+		t.Error("one server named \"alpha and beta\" and the servers alpha and beta produce identical questions")
 	}
 	if strings.Contains(q("a"), "\x1b") {
 		t.Error("question carries ESC")
@@ -300,7 +306,7 @@ func TestRenderManifestCleared(t *testing.T) {
 	m, remote := dailyManifest(t)
 	got := renderString(m, nil, map[provider.Destination]remoteState{remote: remoteNotAllowed},
 		manifestOpts{style: consoleStyle{false, 80}, cleared: true})
-	const line = "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again\n"
+	const line = "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination\n"
 	if n := strings.Count(got, line); n != 1 {
 		t.Errorf("cleared line appears %d times:\n%s", n, got)
 	}
@@ -336,6 +342,35 @@ func TestRenderManifestModels(t *testing.T) {
 	}
 }
 
+// At the 40-column floor a subtitle too long for the rule moves to its own
+// line under a title-only rule, so golem index and golem source stay
+// distinguishable; one wider than the line (the 42-column session subtitle at
+// 40) is dropped.
+func TestRenderManifestNarrowSubtitle(t *testing.T) {
+	m, remote := dailyManifest(t)
+	states := map[provider.Destination]remoteState{remote: remoteRefused}
+	for _, c := range []struct {
+		op    string
+		width int
+		sub   string // "" when dropped
+	}{
+		{"index", 40, "where golem index sends model requests"},
+		{"source", 40, "where golem source sends model requests"},
+		{"", 42, "where this session's model requests can go"},
+		{"", 40, ""},
+	} {
+		got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, c.width}, operation: c.op})
+		want := "\u2500\u2500 model servers " + strings.Repeat("\u2500", c.width-17) + "\n"
+		if c.sub != "" {
+			want += c.sub + "\n"
+		}
+		want += "On this machine (allowed automatically)\n"
+		if !strings.HasPrefix(got, want) {
+			t.Errorf("op %q at %d columns:\n%s\nwant it to start:\n%s", c.op, c.width, got, want)
+		}
+	}
+}
+
 func TestRenderManifestUnknownPurposesDistinct(t *testing.T) {
 	local := admDest(t, "llamacpp", "http://localhost:8090")
 	m := testManifest(t,
@@ -345,6 +380,86 @@ func TestRenderManifestUnknownPurposesDistinct(t *testing.T) {
 	if got := renderString(m, nil, nil, plain80); !strings.Contains(got, "            used for  chat, other: chat\n") {
 		t.Errorf("purposes merged:\n%s", got)
 	}
+
+	// A primary purpose named "custom (fallback)" is quoted, so the fallback
+	// mark appended outside the quotes cannot make it read as a fallback
+	// "custom" on the same remote.
+	r := admDest(t, "r", "https://r.example.com")
+	used := func(e provider.DestinationEdge) string {
+		got := renderString(testManifest(t, e), nil, map[provider.Destination]remoteState{r: remoteNeedsOK}, plain80)
+		for _, l := range strings.Split(got, "\n") {
+			if strings.HasPrefix(l, "     used for  ") {
+				return l
+			}
+		}
+		t.Fatalf("no used for row:\n%s", got)
+		return ""
+	}
+	primary := used(provider.DestinationEdge{Purpose: "custom (fallback)", Destination: r})
+	fallback := used(provider.DestinationEdge{Purpose: "custom", Destination: r, IsFallback: true})
+	if want := `     used for  other: "custom\x20(fallback)"`; primary != want {
+		t.Errorf("primary %q: used for = %q, want %q", "custom (fallback)", primary, want)
+	}
+	if want := "     used for  other: custom (fallback)"; fallback != want {
+		t.Errorf("fallback %q: used for = %q, want %q", "custom", fallback, want)
+	}
+	if primary == fallback {
+		t.Errorf("primary %q and fallback %q both read %q", "custom (fallback)", "custom", primary)
+	}
+}
+
+// A provider name padded with spaces cannot draw a state on a physical line
+// of its own: every space in a quoted name shows as \x20, so no logical line,
+// and no 80-column row a terminal soft-wraps one into, carries "allowed by
+// -allow-destination" except the row that really has that state.
+func TestRenderManifestNameCannotForgeState(t *testing.T) {
+	label := remoteAllowedByFlag.text()
+	pad := strings.Repeat(" ", 60)
+	hostile, err := provider.NewDestination("x"+pad+label+pad+"y", "https://hostile.example.com")
+	if err != nil {
+		t.Fatalf("NewDestination refuses the padded name, so this case proves nothing: %v", err)
+	}
+	flagged := admDest(t, "flagged", "https://flagged.example.com")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: hostile},
+		provider.DestinationEdge{Purpose: "agent", Destination: flagged},
+	)
+	got := renderString(m, nil, map[provider.Destination]remoteState{hostile: remoteNeedsOK, flagged: remoteAllowedByFlag}, plain80) +
+		consentQuestion([]provider.Destination{hostile})
+	flagRow := fmt.Sprintf("  %-16s  https://flagged.example.com  %s", "flagged", label)
+	n := 0
+	for _, l := range strings.Split(got, "\n") {
+		if l == flagRow {
+			n++
+			continue
+		}
+		for _, row := range append([]string{l}, physicalRows(l, 80)...) {
+			if strings.Contains(row, label) {
+				t.Errorf("%q outside the flagged row: %q\nin:\n%s", label, row, got)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("the flagged row %q appears %d times, want 1:\n%s", flagRow, n, got)
+	}
+}
+
+// physicalRows splits one logical line into the rows a terminal width columns
+// wide soft-wraps it into.
+func physicalRows(l string, width int) []string {
+	var rows []string
+	var b strings.Builder
+	cols := 0
+	for _, r := range l {
+		if c := runeCols(r); cols+c > width {
+			rows = append(rows, b.String())
+			b.Reset()
+			cols = 0
+		}
+		b.WriteRune(r)
+		cols += runeCols(r)
+	}
+	return append(rows, b.String())
 }
 
 func TestRenderManifestHostileFields(t *testing.T) {
@@ -360,18 +475,20 @@ func TestRenderManifestHostileFields(t *testing.T) {
 	if strings.Contains(got, "\u202e") || strings.Contains(got, "\x1b") {
 		t.Errorf("raw bidi or ESC in output: %q", got)
 	}
+	// The quoted name (22 columns with its spaces escaped) is wider than the
+	// name column, so it sits alone above its URL.
 	for _, want := range []string{
-		"\n  \"alpha and beta\"  https://a\\u202eb.example.com  needs your OK\n",
-		"\n                    used for  chat, other: evil\\x1b[31m\\npurpose\n",
+		"\n  \"alpha\\x20and\\x20beta\"\n                    https://a\\u202eb.example.com  needs your OK\n",
+		"\n                    used for  chat, other: \"evil\\x1b[31m\\npurpose\"\n",
 		"\n                    sends api_key from $A\\nB\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	// rule, heading, header, uses, key line, then the empty line.
-	if n := strings.Count(got, "\n"); n != 6 {
-		t.Errorf("rendered %d newlines, want 6:\n%s", n, got)
+	// rule, heading, name, URL, uses, key line, then the empty line.
+	if n := strings.Count(got, "\n"); n != 7 {
+		t.Errorf("rendered %d newlines, want 7:\n%s", n, got)
 	}
 
 	// Blank-rendering graphic runes in a host (an ideographic space, a

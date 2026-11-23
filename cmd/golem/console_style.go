@@ -59,18 +59,25 @@ func (s consoleStyle) paint(sgr, text string) string {
 
 // rule draws a section rule: a bold title, an optional dim subtitle, and dashes
 // to the line width (at least three). A subtitle that would leave fewer than
-// three dashes within the width is dropped, so the rule does not wrap.
+// three dashes within the width moves to its own dim line under a title-only
+// rule, so the rule does not wrap and a narrow terminal still shows it (it is
+// what tells golem index from golem source); a subtitle wider than the width
+// on its own is dropped. There is no trailing newline.
 // ponytail: each box-drawing dash counts as one column; ambiguous-width
 // terminals (CJK) can wrap it.
 func (s consoleStyle) rule(title, subtitle string) string {
 	const dashes = "\u2500\u2500 "
 	cols := func(t string) int { return displayCols(strings.ReplaceAll(t, "\u2500", "-")) }
-	head, tail := dashes+title+" ", ""
-	if subtitle != "" && cols(head+dashes+subtitle+" ")+3 <= s.width {
+	head, tail, below := dashes+title+" ", "", ""
+	switch {
+	case subtitle == "":
+	case cols(head+dashes+subtitle+" ")+3 <= s.width:
 		tail = dashes + subtitle + " "
+	case displayCols(subtitle) <= s.width:
+		below = "\n" + s.paint(sgrDim, subtitle)
 	}
 	fill := strings.Repeat("\u2500", max(3, s.width-cols(head+tail)))
-	return s.paint(sgrDim, dashes) + s.paint(sgrBold, title) + " " + s.paint(sgrDim, tail+fill)
+	return s.paint(sgrDim, dashes) + s.paint(sgrBold, title) + " " + s.paint(sgrDim, tail+fill) + below
 }
 
 // wrapList joins items with ", " under firstPrefix, breaking only between

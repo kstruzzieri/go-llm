@@ -573,6 +573,111 @@ func TestModelSetSectionPaintedOnTerminal(t *testing.T) {
 	}
 }
 
+// TestModelSetSectionPipedStdoutTerminalStderr is the reverse orientation: stderr is
+// the terminal and stdout a pipe, so the scanner reads goals and prints its
+// prompts on stdout. The startup section is painted on the terminal by
+// default (the positive control: stderr is the styled path), while the /model
+// set section and its question are drawn on stdout with no SGR, and no remote
+// row reaches the terminal: neither the writer nor its style is inherited
+// from startup. The answer is no, so nothing is sent.
+func TestModelSetSectionPipedStdoutTerminalStderr(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("NO_COLOR", "")
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	const question = "Send data to cloud (remote) during this session? [y/N] "
+	const cloudRow = "\n  cloud    https://model-switch.invalid/v1  needs your OK\n"
+	for _, tc := range noColorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openPTY(t)
+			seen := drainMaster(p)
+			inR, inW, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			outR, outW, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = inR.Close(); _ = inW.Close(); _ = outR.Close(); _ = outW.Close() })
+			stdout := &lockedBuffer{}
+			copied := make(chan struct{})
+			go func() { _, _ = io.Copy(stdout, outR); close(copied) }()
+			done := make(chan error, 1)
+			go func() { done <- run(append(replArgs(fx.configPath, t.TempDir()), tc.flags...), inR, outW, p.slave) }()
+
+			// The scanner prints each prompt on stdout before it reads: the
+			// barrier before each line typed.
+			wait := func(what string, cond func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(20 * time.Second)
+				for !cond() {
+					select {
+					case err := <-done:
+						t.Fatalf("golem exited before %s: %v\nstdout: %q\nterminal: %q", what, err, stdout.String(), seen.String())
+					default:
+					}
+					if time.Now().After(deadline) {
+						p.close()
+						_ = inW.Close()
+						t.Fatalf("timed out waiting for %s\nstdout: %q\nterminal: %q", what, stdout.String(), seen.String())
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			send := func(line string) {
+				t.Helper()
+				if _, err := inW.WriteString(line); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wait("the first prompt", func() bool { return strings.Contains(stdout.String(), promptText) })
+			send("/model set cloudrole\n")
+			wait("the consent question", func() bool { return strings.Contains(stdout.String(), question) })
+			send("n\n")
+			wait("the prompt after the refusal", func() bool { return strings.Count(stdout.String(), promptText) >= 2 })
+			send("/exit\n")
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("run = %v\nstdout:\n%s", err, stdout.String())
+				}
+			case <-time.After(10 * time.Second):
+				p.close()
+				_ = inW.Close()
+				t.Fatal("golem did not exit after /exit")
+			}
+			_ = outW.Close()
+			<-copied
+
+			out := stdout.String()
+			s, q := strings.Index(out, "model servers"), strings.Index(out, question)
+			if s < 0 || s > q {
+				t.Fatalf("section not on stdout before the question:\n%s", out)
+			}
+			section := out[strings.LastIndex(out[:s], "\n")+1 : q+len(question)]
+			if m := sgr.FindString(section); m != "" {
+				t.Errorf("SGR %q in the stdout section or question: %q", m, section)
+			}
+			if !strings.Contains(section, cloudRow) {
+				t.Errorf("the remote's row is not in the stdout section: %q", section)
+			}
+			// The startup section names only the local server, so the whole
+			// terminal text, startup included, must carry no remote row text.
+			term := flushPTY(t, p, seen)
+			checkPainted(t, term, tc.painted)
+			leaks := []string{"cloud", "model-switch.invalid", "Remote", question}
+			for _, st := range []remoteState{remoteNeedsOK, remoteAllowedByFlag, remoteAllowedEarlier, remoteNotAllowed, remoteRefused} {
+				leaks = append(leaks, st.text())
+			}
+			for _, leak := range leaks {
+				if strings.Contains(term, leak) {
+					t.Errorf("the terminal (stderr) carries %q of the /model set section:\n%q", leak, term)
+				}
+			}
+		})
+	}
+}
+
 // TestStartupConsentTypeahead types "y\nhello\n" before golem reads anything:
 // the startup consent answers yes, the typeahead after it survives into the
 // line editor, and the first goal is "hello". It does not prove byte-at-a-time
