@@ -228,7 +228,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	if err != nil {
 		return err
 	}
-	routes := []providerbootstrap.PlannedRoute{{UseCase: "embedding", Chain: embChain}}
+	routes := []providerbootstrap.PlannedRoute{{UseCase: embeddingUseCase, Chain: embChain}}
 	var summarizeChain []string
 	if progressive {
 		summarizeRoute, serr := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
