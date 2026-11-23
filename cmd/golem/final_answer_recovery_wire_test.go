@@ -235,7 +235,6 @@ type traceRecord struct {
 		RecoverThinkingOnlyAnswer bool                   `json:"recover_thinking_only_answer"`
 		History                   []provider.ChatMessage `json:"history"`
 	} `json:"request"`
-	// Decode only the fields read here.
 	Result struct {
 		Messages []provider.ChatMessage
 		Events   []agent.EventRecord

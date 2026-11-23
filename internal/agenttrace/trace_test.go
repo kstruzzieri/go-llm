@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -364,9 +365,10 @@ func TestTraceRecordDecodesFutureStatusTag(t *testing.T) {
 	if err := json.Unmarshal(raw, &rec); err != nil {
 		t.Fatalf("a future status tag must decode: %v", err)
 	}
-	got := rec.Result.Steps[0].RouteOutcome.Attempts
-	if got[0].Status != provider.AttemptStatusUnknown || got[1] != step[1] {
-		t.Fatalf("step attempts = %+v, want first Unknown, second unchanged", got)
+	want := slices.Clone(step)
+	want[0].Status = provider.AttemptStatusUnknown
+	if got := rec.Result.Steps[0].RouteOutcome.Attempts; !reflect.DeepEqual(got, want) {
+		t.Fatalf("step attempts = %+v, want %+v (only the first status becomes Unknown)", got, want)
 	}
 	if !reflect.DeepEqual(rec.Result.ToolCalls[0].RouteOutcome.Attempts, delegate) {
 		t.Fatalf("delegate attempts changed: %+v", rec.Result.ToolCalls[0].RouteOutcome.Attempts)

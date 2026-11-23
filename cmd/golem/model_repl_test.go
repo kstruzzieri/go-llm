@@ -1321,7 +1321,7 @@ func TestModelSetRebindsTheOrchestratorAndTraceBudget(t *testing.T) {
 			}
 		}
 		if attempts == 0 {
-			t.Fatalf("trace records no route attempts: %s", raw)
+			t.Fatalf("trace records no route attempts across %d steps", len(rec.Result.Steps))
 		}
 	})
 }
