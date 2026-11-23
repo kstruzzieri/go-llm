@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 )
 
 // gitContextEnv is the environment of the read-only Git snapshot capture
@@ -69,17 +68,7 @@ type gitState struct {
 // escaped with strconv.QuoteToGraphic's convention, and both injected-context
 // fence sentinels are neutralized. Ordinary Unicode stays readable.
 func gitContextText(s string) string {
-	s = strings.ToValidUTF8(s, "�")
-	var b strings.Builder
-	for _, r := range s {
-		if unicode.IsGraphic(r) {
-			b.WriteRune(r)
-			continue
-		}
-		q := strconv.QuoteToGraphic(string(r))
-		b.WriteString(q[1 : len(q)-1])
-	}
-	return neutralizeFence(b.String())
+	return neutralizeFence(escapeNonGraphic(s))
 }
 
 // gitOmissionLine reports records that did not fit; "" when nothing was omitted.
