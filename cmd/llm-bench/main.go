@@ -1140,7 +1140,7 @@ func main() {
 		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
 	}
 	if anyRecallTrace(traces) {
-		log.Fatalf("llm-bench: recall traces require -calibrate-capture with -registration, then -recall-report")
+		log.Fatalf("llm-bench: recall traces cannot be replayed by this build yet")
 	}
 
 	var corpusData *corpusReportData

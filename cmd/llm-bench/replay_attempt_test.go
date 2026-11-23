@@ -1447,7 +1447,7 @@ func TestReplayAttemptRefusesRecallTrace(t *testing.T) {
 	if len(srv.Received()) != 0 {
 		t.Fatal("nothing may reach the wire")
 	}
-	if want := "llm-bench: replay-attempt: recall traces are not supported by -replay-attempt; use -calibrate-capture\n"; stderr != want {
+	if want := "llm-bench: replay-attempt: recall traces are not supported by -replay-attempt\n"; stderr != want {
 		t.Fatalf("stderr %q, want %q", stderr, want)
 	}
 }

@@ -1179,6 +1179,12 @@ func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
 }
 
 func TestMainRecallRequiresRegisteredCaptureFlow(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
 	dir := t.TempDir()
 	tracePath := filepath.Join(dir, "recall.json")
 	raw, err := json.Marshal(validRecallTrace())
@@ -1189,13 +1195,16 @@ func TestMainRecallRequiresRegisteredCaptureFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	reportPath := filepath.Join(dir, "report.md")
-	cmd := exec.Command(os.Args[0], "-traces", tracePath, "-models", "fake", "-scorer", "exact-match", "-report", reportPath)
+	cmd := exec.Command(os.Args[0], "-traces", tracePath, "-models", "fake", "-scorer", "exact-match", "-ollama-url", server.URL, "-report", reportPath)
 	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
 	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "recall traces require -calibrate-capture with -registration, then -recall-report") {
+	if err == nil || !strings.Contains(string(out), "recall traces cannot be replayed by this build yet") {
 		t.Fatalf("ordinary recall run did not fail with capture guidance: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
 		t.Fatalf("report created before refusing: %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("candidate server saw %d request(s) before the refusal", n)
 	}
 }

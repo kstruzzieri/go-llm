@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -34,6 +35,10 @@ type RecallValue struct {
 	Alternatives []string `json:"alternatives,omitempty"`
 }
 
+// frozenWireTrace reports whether t replays a frozen decision-point wire
+// (injection or recall): registered decoding, raw tool-call channel, one turn.
+func frozenWireTrace(t Trace) bool { return t.Injection != nil || t.Recall != nil }
+
 // anyRecallTrace reports whether any trace carries a recall block.
 func anyRecallTrace(traces []Trace) bool {
 	for _, t := range traces {
@@ -44,36 +49,63 @@ func anyRecallTrace(traces []Trace) bool {
 	return false
 }
 
+// recallNumberPattern is the canonical number token (no leading zeros, no
+// trailing fractional zeros), so string equality equals numeric equality.
+var recallNumberPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`)
+
 // validateRecallTrace checks the recall block's closed vocabularies and the
-// Trace/Arm/Cases combinations the spec allows, then the frozen turn shape.
+// Trace/Arm/Cases/Split combinations the spec allows, then the frozen turn
+// shape. Every error starts with "recall: ".
 func validateRecallTrace(t Trace) error {
 	r := t.Recall
 	if t.Injection != nil || t.AssemblyEval != nil || t.Benign != nil {
-		return errors.New("recall trace carries injection, assembly_eval or benign")
+		return errors.New("recall: trace carries injection, assembly_eval or benign beside recall")
 	}
 	if r.Split != "pilot" && r.Split != "confirmatory" {
 		return fmt.Errorf("recall: split %q invalid (want pilot or confirmatory)", r.Split)
 	}
+	for _, f := range []struct{ name, v string }{{"family_id", r.FamilyID}, {"template", r.Template}, {"named_file", r.NamedFile}} {
+		if strings.TrimSpace(f.v) == "" || f.v != strings.TrimSpace(f.v) {
+			return fmt.Errorf("recall: %s must be non-empty without surrounding whitespace", f.name)
+		}
+	}
 	if r.Value.Type != "number" && r.Value.Type != "identifier" {
 		return fmt.Errorf("recall: value.type %q invalid (want number or identifier)", r.Value.Type)
 	}
-	if strings.TrimSpace(r.Value.Lesson) == "" || strings.TrimSpace(r.Value.Identifier) == "" {
-		return errors.New("recall: value.lesson and value.identifier must be non-empty")
+	for _, a := range r.Value.Alternatives {
+		if strings.TrimSpace(a) == "" || a != strings.TrimSpace(a) {
+			return fmt.Errorf("recall: value.alternatives entry %q must be non-empty without surrounding whitespace", a)
+		}
+	}
+	vals := []struct{ name, v string }{{"identifier", r.Value.Identifier}, {"lesson", r.Value.Lesson}, {"changed", r.Value.Changed}}
+	for _, f := range vals {
+		if strings.TrimSpace(f.v) == "" {
+			return fmt.Errorf("recall: value.%s must be non-empty", f.name)
+		}
+		if f.v != strings.TrimSpace(f.v) {
+			return fmt.Errorf("recall: value.%s %q has leading or trailing whitespace", f.name, f.v)
+		}
+	}
+	if r.Value.Type == "number" {
+		for _, f := range vals[1:] {
+			if !recallNumberPattern.MatchString(f.v) {
+				return fmt.Errorf("recall: value.%s %q is not a canonical number token", f.name, f.v)
+			}
+		}
 	}
 	if r.Value.Changed == r.Value.Lesson {
 		return errors.New("recall: value.changed must differ from value.lesson")
 	}
+	s1, s2 := slices.Equal(r.Cases, []string{"S1"}), slices.Equal(r.Cases, []string{"S2"})
 	switch r.Trace {
 	case "A":
 		if !slices.Contains([]string{"0", "1", "2"}, r.Arm) {
 			return fmt.Errorf("recall: arm %q invalid on trace A (want 0, 1 or 2)", r.Arm)
 		}
-		okCases := slices.Equal(r.Cases, []string{"S1", "S2"}) || (slices.Equal(r.Cases, []string{"S7"}) && r.Arm == "2")
-		if !okCases {
+		if !slices.Equal(r.Cases, []string{"S1", "S2"}) && (!slices.Equal(r.Cases, []string{"S7"}) || r.Arm != "2") {
 			return fmt.Errorf("recall: cases %v invalid on trace A arm %s", r.Cases, r.Arm)
 		}
 	case "B":
-		s1, s2 := slices.Equal(r.Cases, []string{"S1"}), slices.Equal(r.Cases, []string{"S2"})
 		if !s1 && !s2 {
 			return fmt.Errorf("recall: cases %v invalid on trace B (want [S1] or [S2])", r.Cases)
 		}
@@ -83,8 +115,20 @@ func validateRecallTrace(t Trace) error {
 	default:
 		return fmt.Errorf("recall: trace %q invalid (want A or B)", r.Trace)
 	}
-	if r.Repeat && (r.Trace != "B" || r.Arm != "1" || !slices.Equal(r.Cases, []string{"S2"})) {
+	if r.Repeat && (r.Trace != "B" || r.Arm != "1" || !s2) {
 		return errors.New("recall: repeat is only allowed on trace B, arm 1, cases [S2]")
 	}
-	return validateToolEndingTurns(t.Turns)
+	if r.Split == "pilot" {
+		// Pilot cells: Trace A arms 0/1 (S1,S2), Trace B S1 arm 1, Trace B S2 arms 1/P; never Repeat.
+		ok := (r.Trace == "A" && (r.Arm == "0" || r.Arm == "1") && len(r.Cases) == 2) ||
+			(r.Trace == "B" && s1 && r.Arm == "1") ||
+			(r.Trace == "B" && s2 && (r.Arm == "1" || r.Arm == "P"))
+		if !ok || r.Repeat {
+			return fmt.Errorf("recall: pilot split does not include trace %s arm %s cases %v repeat=%t", r.Trace, r.Arm, r.Cases, r.Repeat)
+		}
+	}
+	if err := validateToolEndingTurns(t.Turns); err != nil {
+		return fmt.Errorf("recall: %w", err)
+	}
+	return nil
 }

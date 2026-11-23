@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// validRecallTrace returns a valid pilot Trace A arm 1 recall trace (user,
+// agent_memory_search call, tool result); table rows mutate one field of it.
 func validRecallTrace() Trace {
 	tool := func(n string) json.RawMessage {
 		return json.RawMessage(`{"type":"function","function":{"name":"` + n + `","description":"d","parameters":{"type":"object"}}}`)
@@ -31,50 +36,71 @@ func validRecallTrace() Trace {
 }
 
 func TestValidateRecallTrace(t *testing.T) {
+	traceB := func(tr *Trace, arm string, cases ...string) {
+		tr.Recall.Trace, tr.Recall.Arm, tr.Recall.Cases = "B", arm, cases
+	}
+	confirmatory := func(tr *Trace) { tr.Recall.Split = "confirmatory" }
 	cases := []struct {
 		name   string
 		mutate func(*Trace)
 		want   string // empty = valid
 	}{
 		{"valid trace A", func(*Trace) {}, ""},
-		{"valid S7", func(tr *Trace) { tr.Recall.Arm = "2"; tr.Recall.Cases = []string{"S7"} }, ""},
-		{"valid trace B S1 arm 2", func(tr *Trace) { tr.Recall.Trace = "B"; tr.Recall.Arm = "2"; tr.Recall.Cases = []string{"S1"} }, ""},
-		{"valid trace B S2 arm P", func(tr *Trace) { tr.Recall.Trace = "B"; tr.Recall.Arm = "P"; tr.Recall.Cases = []string{"S2"} }, ""},
-		{"valid repeat", func(tr *Trace) {
-			tr.Recall.Trace = "B"
-			tr.Recall.Arm = "1"
-			tr.Recall.Cases = []string{"S2"}
-			tr.Recall.Repeat = true
+		{"valid trace A arm 0 pilot", func(tr *Trace) { tr.Recall.Arm = "0" }, ""},
+		{"valid S7 confirmatory", func(tr *Trace) { confirmatory(tr); tr.Recall.Arm = "2"; tr.Recall.Cases = []string{"S7"} }, ""},
+		{"valid trace A arm 2 confirmatory", func(tr *Trace) { confirmatory(tr); tr.Recall.Arm = "2" }, ""},
+		{"valid trace B S1 arm 1 pilot", func(tr *Trace) { traceB(tr, "1", "S1") }, ""},
+		{"valid trace B S1 arm 2 confirmatory", func(tr *Trace) { confirmatory(tr); traceB(tr, "2", "S1") }, ""},
+		{"valid trace B S2 arm P pilot", func(tr *Trace) { traceB(tr, "P", "S2") }, ""},
+		{"valid repeat confirmatory", func(tr *Trace) { confirmatory(tr); traceB(tr, "1", "S2"); tr.Recall.Repeat = true }, ""},
+		{"valid identifier value", func(tr *Trace) {
+			tr.Recall.Value = RecallValue{Type: "identifier", Identifier: "mode", Lesson: "fast", Changed: "slow", Alternatives: []string{"x"}}
 		}, ""},
-		{"beside injection", func(tr *Trace) { tr.Injection = &InjectionEval{} }, "carries"},
-		{"beside assembly", func(tr *Trace) { tr.AssemblyEval = &AssemblyEval{} }, "carries"},
-		{"beside benign", func(tr *Trace) { tr.Benign = &BenignEval{} }, "carries"},
-		{"last turn not tool", func(tr *Trace) { tr.Turns = append(tr.Turns, Turn{Role: "assistant", Content: "x"}) }, "last turn"},
-		{"unknown arm", func(tr *Trace) { tr.Recall.Arm = "3" }, "arm"},
-		{"unknown trace", func(tr *Trace) { tr.Recall.Trace = "C" }, "trace"},
-		{"unknown split", func(tr *Trace) { tr.Recall.Split = "x" }, "split"},
+		{"beside injection", func(tr *Trace) { tr.Injection = &InjectionEval{} }, "beside recall"},
+		{"beside assembly", func(tr *Trace) { tr.AssemblyEval = &AssemblyEval{} }, "beside recall"},
+		{"beside benign", func(tr *Trace) { tr.Benign = &BenignEval{} }, "beside recall"},
+		{"last turn not tool", func(tr *Trace) { tr.Turns = append(tr.Turns, Turn{Role: "assistant", Content: "x"}) }, "recall: last turn must be the tool observation"},
+		{"unknown arm", func(tr *Trace) { tr.Recall.Arm = "3" }, `arm "3" invalid on trace A`},
+		{"unknown trace", func(tr *Trace) { tr.Recall.Trace = "C" }, `trace "C" invalid`},
+		{"unknown split", func(tr *Trace) { tr.Recall.Split = "x" }, `split "x" invalid`},
 		{"unknown value type", func(tr *Trace) { tr.Recall.Value.Type = "x" }, "value.type"},
-		{"empty lesson", func(tr *Trace) { tr.Recall.Value.Lesson = "" }, "non-empty"},
-		{"empty identifier", func(tr *Trace) { tr.Recall.Value.Identifier = "" }, "non-empty"},
-		{"changed equals lesson", func(tr *Trace) { tr.Recall.Value.Changed = "5" }, "differ"},
-		{"S7 on arm 1", func(tr *Trace) { tr.Recall.Cases = []string{"S7"} }, "cases"},
-		{"A arm 0 one case", func(tr *Trace) { tr.Recall.Arm = "0"; tr.Recall.Cases = []string{"S1"} }, "cases"},
-		{"B both cases", func(tr *Trace) { tr.Recall.Trace = "B" }, "cases"},
-		{"B arm 0", func(tr *Trace) { tr.Recall.Trace = "B"; tr.Recall.Arm = "0"; tr.Recall.Cases = []string{"S1"} }, "arm"},
-		{"B S1 arm P", func(tr *Trace) { tr.Recall.Trace = "B"; tr.Recall.Arm = "P"; tr.Recall.Cases = []string{"S1"} }, "arm"},
-		{"A arm P", func(tr *Trace) { tr.Recall.Arm = "P" }, "arm"},
-		{"repeat on A", func(tr *Trace) { tr.Recall.Repeat = true }, "repeat"},
-		{"repeat on B arm 2", func(tr *Trace) {
-			tr.Recall.Trace = "B"
-			tr.Recall.Arm = "2"
-			tr.Recall.Cases = []string{"S2"}
-			tr.Recall.Repeat = true
-		}, "repeat"},
-		{"repeat on B S1", func(tr *Trace) {
-			tr.Recall.Trace = "B"
-			tr.Recall.Cases = []string{"S1"}
-			tr.Recall.Repeat = true
-		}, "repeat"},
+		{"empty lesson", func(tr *Trace) { tr.Recall.Value.Lesson = "" }, "value.lesson must be non-empty"},
+		{"empty identifier", func(tr *Trace) { tr.Recall.Value.Identifier = "" }, "value.identifier must be non-empty"},
+		{"empty changed", func(tr *Trace) { tr.Recall.Value.Changed = " " }, "value.changed must be non-empty"},
+		{"empty family", func(tr *Trace) { tr.Recall.FamilyID = "" }, "family_id must be non-empty"},
+		{"empty template", func(tr *Trace) { tr.Recall.Template = " " }, "template must be non-empty"},
+		{"empty named file", func(tr *Trace) { tr.Recall.NamedFile = "" }, "named_file must be non-empty"},
+		{"blank alternative", func(tr *Trace) { tr.Recall.Value.Alternatives = []string{"ok", " "} }, "alternatives entry"},
+		{"padded alternative", func(tr *Trace) { tr.Recall.Value.Alternatives = []string{"ok ", "b"} }, "alternatives entry"},
+		{"padded lesson", func(tr *Trace) {
+			tr.Recall.Value = RecallValue{Type: "identifier", Identifier: "x", Lesson: "fast ", Changed: "slow"}
+		}, "value.lesson \"fast \" has leading or trailing whitespace"},
+		{"padded number lesson", func(tr *Trace) { tr.Recall.Value.Lesson = "5 " }, "has leading or trailing whitespace"},
+		{"padded named file", func(tr *Trace) { tr.Recall.NamedFile = " retry.go" }, "named_file must be non-empty without"},
+		{"padded family", func(tr *Trace) { tr.Recall.FamilyID = "f1 " }, "family_id must be non-empty without"},
+		{"padded template", func(tr *Trace) { tr.Recall.Template = " t" }, "template must be non-empty without"},
+		{"leading zero number", func(tr *Trace) { tr.Recall.Value.Lesson = "05" }, "canonical number token"},
+		{"trailing zero fraction", func(tr *Trace) { tr.Recall.Value.Changed = "5.0" }, "canonical number token"},
+		{"trailing dot", func(tr *Trace) { tr.Recall.Value.Changed = "5." }, "canonical number token"},
+		{"valid decimal", func(tr *Trace) { tr.Recall.Value.Changed = "0.25" }, ""},
+		{"padded identifier", func(tr *Trace) { tr.Recall.Value.Identifier = " x" }, "value.identifier"},
+		{"number lesson with unit", func(tr *Trace) { tr.Recall.Value.Lesson = "5s" }, "canonical number token"},
+		{"number changed word", func(tr *Trace) { tr.Recall.Value.Changed = "seven" }, "canonical number token"},
+		{"changed equals lesson", func(tr *Trace) { tr.Recall.Value.Changed = "5" }, "must differ"},
+		{"S7 on arm 1", func(tr *Trace) { confirmatory(tr); tr.Recall.Cases = []string{"S7"} }, "invalid on trace A arm 1"},
+		{"A arm 0 one case", func(tr *Trace) { tr.Recall.Arm = "0"; tr.Recall.Cases = []string{"S1"} }, "invalid on trace A arm 0"},
+		{"B both cases", func(tr *Trace) { tr.Recall.Trace = "B" }, "invalid on trace B"},
+		{"B arm 0", func(tr *Trace) { traceB(tr, "0", "S1") }, `arm "0" invalid on trace B`},
+		{"B S1 arm P", func(tr *Trace) { traceB(tr, "P", "S1") }, `arm "P" invalid on trace B`},
+		{"A arm P", func(tr *Trace) { tr.Recall.Arm = "P" }, `arm "P" invalid on trace A`},
+		{"repeat on A", func(tr *Trace) { confirmatory(tr); tr.Recall.Repeat = true }, "repeat is only allowed"},
+		{"repeat on B arm 2", func(tr *Trace) { confirmatory(tr); traceB(tr, "2", "S2"); tr.Recall.Repeat = true }, "repeat is only allowed"},
+		{"repeat on B S1", func(tr *Trace) { confirmatory(tr); traceB(tr, "1", "S1"); tr.Recall.Repeat = true }, "repeat is only allowed"},
+		{"pilot arm 2", func(tr *Trace) { tr.Recall.Arm = "2" }, "pilot split"},
+		{"pilot S7", func(tr *Trace) { tr.Recall.Arm = "2"; tr.Recall.Cases = []string{"S7"} }, "pilot split"},
+		{"pilot B S1 arm 2", func(tr *Trace) { traceB(tr, "2", "S1") }, "pilot split"},
+		{"pilot B S2 arm 2", func(tr *Trace) { traceB(tr, "2", "S2") }, "pilot split"},
+		{"pilot repeat", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Recall.Repeat = true }, "pilot split"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,6 +116,9 @@ func TestValidateRecallTrace(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v; want containing %q", err, tc.want)
 			}
+			if !strings.HasPrefix(err.Error(), "recall: ") {
+				t.Fatalf("err = %v; want the recall: prefix", err)
+			}
 		})
 	}
 }
@@ -102,8 +131,11 @@ func TestReplayWithRecallSendsToolsAndKeepsCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.got.Tools) == 0 || c.got.Messages[len(c.got.Messages)-1].Role != "tool" {
-		t.Fatalf("wire: %d tools, last role %q", len(c.got.Tools), c.got.Messages[len(c.got.Messages)-1].Role)
+	if len(c.got.Messages) == 0 {
+		t.Fatal("no messages reached the wire")
+	}
+	if last := c.got.Messages[len(c.got.Messages)-1]; len(c.got.Tools) == 0 || last.Role != "tool" {
+		t.Fatalf("wire: %d tools, last role %q", len(c.got.Tools), last.Role)
 	}
 	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
 		t.Fatalf("transcript %+v; want one turn with one call", out.Transcript)
@@ -111,26 +143,83 @@ func TestReplayWithRecallSendsToolsAndKeepsCalls(t *testing.T) {
 }
 
 func TestCaptureProvenanceIncludesRecall(t *testing.T) {
-	if captureProvenance(validRecallTrace(), Result{}, 0, map[string]int{}, map[string]string{}, map[string]string{}) == nil {
-		t.Fatal("recall trace got no capture provenance")
+	prov := captureProvenance(validRecallTrace(), Result{}, 0.6, map[string]int{}, map[string]string{}, map[string]string{})
+	if prov == nil || prov.Temperature == nil || *prov.Temperature != 0.6 {
+		t.Fatalf("provenance = %+v; want non-nil with temperature 0.6", prov)
 	}
 }
 
-func TestInjectionTurnsUnchanged(t *testing.T) {
-	bad := map[string][]Turn{
-		"short":      {{Role: "user", Content: "x"}},
-		"last":       append(validInjectionTrace().Turns, Turn{Role: "assistant", Content: "d"}),
-		"unanswered": {validInjectionTrace().Turns[0], {Role: "assistant", ToolCalls: []ToolCall{{ID: "a", Name: "read_file"}}}, {Role: "tool", ToolCallID: "zz"}},
+// A recall trace is a frozen-wire trace: it must send the registered decoding
+// and fail closed without one, never record a temperature it did not send.
+func TestRunOneRecallUsesRegisteredDecoding(t *testing.T) {
+	temp := 0.3
+	dec := injectionDecoding{Options: provider.ModelOptions{Temperature: &temp, NumPredict: 77}, ThinkMode: provider.ThinkNone}
+	target := ModelTarget{Display: "openai-compat/m", Model: "m"}
+	c := &fakeInjectionClient{resp: candidateChatResponse{Message: ollama.ChatMessage{Role: "assistant", Content: "ok"}}}
+	tr := candidateTransport{chat: c, providerName: "p"}
+
+	r := &Runner{Timeout: 10 * time.Second, Scorer: &CaptureScorer{}, InjectionDecoding: map[string]injectionDecoding{target.Display: dec}}
+	res := r.runOne(context.Background(), tr, target, validRecallTrace())
+	if res.Err != nil {
+		t.Fatalf("registered run: %v", res.Err)
 	}
-	for name, turns := range bad {
-		t.Run(name, func(t *testing.T) {
-			err := validateInjectionTurns(turns)
-			if err == nil || !errors.Is(err, errInjection) || !strings.HasPrefix(err.Error(), "injection: ") {
-				t.Fatalf("err = %v; want injection-wrapped", err)
+	if po := c.got.ProviderOptions; po == nil || po.NumPredict != 77 || po.Temperature == nil || *po.Temperature != 0.3 {
+		t.Fatalf("ProviderOptions = %+v; want the registered decoding", po)
+	}
+
+	c.got = candidateChatRequest{}
+	r = &Runner{Timeout: 10 * time.Second, Scorer: &CaptureScorer{}}
+	res = r.runOne(context.Background(), tr, target, validRecallTrace())
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "no registered decoding") {
+		t.Fatalf("err = %v; want no registered decoding", res.Err)
+	}
+	if len(c.got.Messages) != 0 {
+		t.Fatal("an unregistered recall run reached the wire")
+	}
+}
+
+func TestRunCalibrateCaptureRefusesRecall(t *testing.T) {
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &fakeRunner{},
+		Targets:    []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}},
+		Traces:     []Trace{validRecallTrace()},
+		OutputPath: filepath.Join(t.TempDir(), "out.jsonl"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "recall traces need a recall registration") {
+		t.Fatalf("err = %v; want the recall registration refusal", err)
+	}
+}
+
+// Every validateInjectionTurns failure keeps the exact pre-#864 message (taken
+// from 73ec08b9) and errors.Is(errInjection).
+func TestInjectionTurnsUnchanged(t *testing.T) {
+	good := validInjectionTrace().Turns
+	call := func(id string) Turn {
+		return Turn{Role: "assistant", ToolCalls: []ToolCall{{ID: id, Name: "read_file"}}}
+	}
+	cases := []struct {
+		name  string
+		turns []Turn
+		want  string
+	}{
+		{"short", []Turn{{Role: "user", Content: "x"}}, "injection: turns must start with a non-empty user turn and hold a fetch"},
+		{"blank user", []Turn{{Role: "user", Content: " "}, good[1], good[2]}, "injection: turns must start with a non-empty user turn and hold a fetch"},
+		{"last not tool", append(append([]Turn{}, good...), Turn{Role: "assistant", Content: "d"}), "injection: last turn must be the tool observation"},
+		{"blank id", []Turn{good[0], call(""), good[2]}, "injection: turn 1: blank or duplicate tool call id"},
+		{"duplicate id", []Turn{good[0], call("a"), call("a"), good[2]}, "injection: turn 2: blank or duplicate tool call id"},
+		{"answers no open call", []Turn{good[0], call("a"), {Role: "tool", ToolCallID: "zz"}}, `injection: turn 2: tool result "zz" answers no open call`},
+		{"role not allowed", []Turn{good[0], {Role: "user", Content: "u"}, good[2]}, `injection: turn 1: role "user" not allowed`},
+		{"unanswered", []Turn{good[0], call("a"), call("b"), {Role: "tool", ToolCallID: "a"}}, "injection: unanswered tool calls remain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateInjectionTurns(tc.turns)
+			if err == nil || err.Error() != tc.want || !errors.Is(err, errInjection) {
+				t.Fatalf("err = %v; want exactly %q wrapping errInjection", err, tc.want)
 			}
 		})
 	}
-	if err := validateInjectionTurns(validInjectionTrace().Turns); err != nil {
+	if err := validateInjectionTurns(good); err != nil {
 		t.Fatal(err)
 	}
 }

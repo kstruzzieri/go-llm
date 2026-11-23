@@ -1099,6 +1099,10 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 		seenTargets[key] = struct{}{}
 	}
+	if anyRecallTrace(opts.Traces) {
+		// Task 6 replaces this refusal with the recall registration binding.
+		return errors.New("calibrate-capture: recall traces need a recall registration, which this build does not load yet")
+	}
 	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
 	injectionCapture := anyInjectionTrace(opts.Traces)
 	if injectionCapture {
@@ -1584,15 +1588,16 @@ func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
 }
 
 // captureProvenance builds the controlled-capture provenance for one
-// result, or nil for non-assembly traces so their artifacts stay
-// byte-identical to the pre-3c shape. Prompt/gen tokens come from the
-// replay usage carried on Result.Score; capturedOrders is the label map the
-// actual capture order was derived from (counterbalanceCaptureTraces), the
-// single source for CapturedOrder. temp is the temperature the request was
-// sent with: assemblyCaptureTemperature, or the model's registered injection
-// temperature.
+// result, or nil for traces that are neither prefilled assembly nor
+// frozen-wire (injection, recall) so their artifacts stay byte-identical to
+// the pre-3c shape. Prompt/gen tokens come from the replay usage carried on
+// Result.Score; capturedOrders is the label map the actual capture order was
+// derived from (counterbalanceCaptureTraces), the single source for
+// CapturedOrder. temp is the temperature the request was sent with:
+// assemblyCaptureTemperature for assembly traces, or the model's registered
+// temperature for frozen-wire traces.
 func captureProvenance(trace Trace, r Result, temp float64, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
-	if !prefilledAssemblyMode(trace) && trace.Injection == nil && trace.Recall == nil {
+	if !prefilledAssemblyMode(trace) && !frozenWireTrace(trace) {
 		return nil
 	}
 	prov := &CaptureProvenance{

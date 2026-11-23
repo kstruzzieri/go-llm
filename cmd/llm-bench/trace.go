@@ -36,7 +36,7 @@ type Trace struct {
 	// exclusive with AssemblyEval.
 	Injection *InjectionEval `json:"injection,omitempty"`
 	// Benign marks a #517 benign task trace (spec §6.3). Mutually exclusive
-	// with Injection and AssemblyEval.
+	// with Injection, AssemblyEval and Recall.
 	Benign *BenignEval `json:"benign,omitempty"`
 	// Recall marks a #864 recalled-memory label trace. Mutually exclusive with
 	// Injection, AssemblyEval and Benign.

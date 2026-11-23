@@ -315,7 +315,7 @@ func loadAttemptInputs(opts replayAttemptOptions, rec *attemptRecord) (Trace, Mo
 		return Trace{}, ModelTarget{}, fmt.Errorf("injection traces are not supported by -replay-attempt; use -calibrate-capture")
 	}
 	if trace.Recall != nil {
-		return Trace{}, ModelTarget{}, fmt.Errorf("recall traces are not supported by -replay-attempt; use -calibrate-capture")
+		return Trace{}, ModelTarget{}, fmt.Errorf("recall traces are not supported by -replay-attempt")
 	}
 	kind := "scripted"
 	if prefilledAssemblyMode(trace) {

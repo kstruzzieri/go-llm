@@ -41,6 +41,7 @@ docs/llm/traces/first-accepted-run/*
 
 # llm-bench harness — local artifacts
 /llm-bench
+/cmd/llm-bench/llm-bench
 docs/llm/calibration/*.jsonl
 docs/llm/calibration/*.json
 docs/llm/calibration/*.txt
