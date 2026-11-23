@@ -69,12 +69,17 @@ func TestRemoteStates(t *testing.T) {
 		t.Fatal(err)
 	}
 	flags := provider.NewDestinationPolicy(flagged)
-	baseline := provider.NewDestinationPolicy(granted)
+	// Runtime shape: the baseline always includes the flag grants, so only
+	// the switch order makes a flagged remote read "by flag".
+	baseline := provider.NewDestinationPolicy(flagged, granted)
 	for _, c := range []struct {
 		mode  renderMode
 		fresh remoteState
 	}{{renderAsking, remoteNeedsOK}, {renderRefusing, remoteRefused}, {renderListing, remoteNotAllowed}} {
 		got := remoteStates(m, flags, baseline, c.mode)
+		if len(got) != 3 {
+			t.Errorf("mode %d: %d entries, want the 3 remotes: %v", c.mode, len(got), got)
+		}
 		if _, ok := got[lo]; ok {
 			t.Errorf("mode %d: local destination present", c.mode)
 		}
@@ -104,7 +109,8 @@ func TestUncoveredAll(t *testing.T) {
 	a := admDest(t, "a", "https://a.example.com/v1")
 	b := admDest(t, "b", "https://b.example.com/v1")
 	c := admDest(t, "c", "https://c.example.com/v1")
-	got := uncoveredAll([]provider.Destination{c, a, b}, provider.NewDestinationPolicy(a))
+	lo := admDest(t, "lo", "http://127.0.0.1:8080")
+	got := uncoveredAll([]provider.Destination{c, lo, a, b}, provider.NewDestinationPolicy(a))
 	if len(got) != 2 || got[0] != c || got[1] != b {
 		t.Errorf("uncoveredAll = %v", got)
 	}

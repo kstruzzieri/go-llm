@@ -97,7 +97,10 @@ func (s remoteState) text() string {
 		return "allowed earlier this session"
 	case remoteNotAllowed:
 		return "not allowed (cleared; the next goal asks again)"
+	case remoteRefused:
+		return "not allowed (needs -allow-destination)"
 	default:
+		// Unknown values read as the safe, refusing copy.
 		return "not allowed (needs -allow-destination)"
 	}
 }
@@ -150,7 +153,8 @@ func uncoveredAll(dests []provider.Destination, p provider.DestinationPolicy) []
 }
 
 // consentQuestion is the one-line session consent prompt for the uncovered
-// remotes, sorted by String() (the row order). It carries no SGR.
+// remotes, sorted by String() (the row order). uncovered must be non-empty.
+// It carries no SGR.
 func consentQuestion(uncovered []provider.Destination) string {
 	sorted := append([]provider.Destination(nil), uncovered...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].String() < sorted[j].String() })
@@ -162,7 +166,7 @@ func consentQuestion(uncovered []provider.Destination) string {
 	if n := len(names); n > 1 {
 		list = strings.Join(names[:n-1], ", ") + " and " + names[n-1]
 	} else {
-		list = strings.Join(names, "")
+		list = names[0]
 	}
 	return "Send data to " + list + " (remote) during this session? [y/N] "
 }
