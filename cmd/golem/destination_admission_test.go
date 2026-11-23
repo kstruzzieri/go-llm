@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -339,6 +340,153 @@ func TestAdmissionPartialAllowlistStillFails(t *testing.T) {
 	}
 }
 
+// R3-8: across a session the question names exactly the remotes a yes would
+// admit: never a flag-covered one, never one granted earlier in the
+// generation, and after a revoke every remote the user withdrew, sorted.
+func TestConsentSequenceAsksForExactlyUncovered(t *testing.T) {
+	ctx := context.Background()
+	flagged := admDest(t, "flagged", "https://flagged.example.com")
+	startup := []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "summarize", Destination: flagged},
+		{Purpose: "planning", Destination: admDest(t, "granted", "https://granted.example.com")},
+	}
+	fresh := []provider.DestinationEdge{{Purpose: "verify", Destination: admDest(t, "fresh", "https://fresh.example.com")}}
+	newer := []provider.DestinationEdge{{Purpose: "extract", Destination: admDest(t, "newer", "https://newer.example.com")}}
+
+	adm, _ := newTestAdmission(t, startup, []string{flagged.String()}, true, &fakePrompt{})
+	var asked []string
+	adm.setPrompt(func(_ context.Context, q string) (bool, error) {
+		asked = append(asked, q)
+		return true, nil
+	})
+	// check compares every question asked so far, then binds every edge the
+	// session has admitted.
+	check := func(step string, wantAsked []string, admitted []provider.DestinationEdge) {
+		t.Helper()
+		if !slices.Equal(asked, wantAsked) {
+			t.Fatalf("after %s the questions were\n%q\nwant\n%q", step, asked, wantAsked)
+		}
+		for _, e := range admitted {
+			if _, err := adm.gate.Bind(ctx, e.Purpose, e.Destination.Provider()); err != nil {
+				t.Errorf("after %s, %q -> %s not admitted: %v", step, e.Purpose, e.Destination, err)
+			}
+		}
+	}
+
+	q1 := "Send data to granted (remote) during this session? [y/N] "
+	q2 := "Send data to fresh (remote) during this session? [y/N] "
+	q3 := "Send data to fresh, granted and newer (remote) during this session? [y/N] "
+
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("ensure", []string{q1}, startup)
+
+	if _, err := adm.extend(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	all := append(slices.Clone(startup), fresh...)
+	check("extend", []string{q1, q2}, all)
+
+	adm.revoke()
+	for _, e := range all {
+		if _, err := adm.gate.Bind(ctx, e.Purpose, e.Destination.Provider()); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("after revoke, %q -> %s still binds: %v", e.Purpose, e.Destination, err)
+		}
+	}
+
+	if _, err := adm.extend(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	check("revoke then extend", []string{q1, q2, q3}, append(all, newer...))
+}
+
+// R3-8: pinning replaces a provider's destination with the discovered
+// loopback one, so from then on it is local: after a revoke the re-admission
+// never asks about it, and the section shows only the pinned URL, not the
+// remote it replaced.
+func TestConsentPinnedLoopbackNeverAsked(t *testing.T) {
+	ctx := context.Background()
+	configured := admDest(t, "llamacpp", "https://llamacpp.example.com")
+	pinned := admDest(t, "llamacpp", "http://127.0.0.1:8091")
+	p := &fakePrompt{answer: true}
+	adm, out := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: configured},
+		{Purpose: provider.DestinationPurposeModelRefresh, Destination: configured},
+		{Purpose: "summarize", Destination: admDest(t, "other", "https://other.example.com")},
+	}, nil, true, p)
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Send data to llamacpp and other (remote) during this session? [y/N] "; p.seen != want {
+		t.Fatalf("startup question = %q, want %q", p.seen, want)
+	}
+	if err := adm.pinLoopback("llamacpp", pinned); err != nil {
+		t.Fatal(err)
+	}
+
+	adm.revoke()
+	start := out.Len()
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Send data to other (remote) during this session? [y/N] "; p.calls != 2 || p.seen != want {
+		t.Errorf("re-admission asked %d question(s), last %q; want 2 in all, last %q", p.calls, p.seen, want)
+	}
+	section := out.String()[start:]
+	if !strings.Contains(section, pinned.BaseURL()) || strings.Contains(section, configured.BaseURL()) {
+		t.Errorf("re-admission section must show only the pinned URL %s, never %s:\n%s", pinned.BaseURL(), configured.BaseURL(), section)
+	}
+	for _, purpose := range []string{"agent", provider.DestinationPurposeModelRefresh} {
+		if _, err := adm.gate.Bind(ctx, purpose, "llamacpp"); err != nil {
+			t.Errorf("pinned edge %q not re-admitted: %v", purpose, err)
+		}
+	}
+}
+
+// The pin receipt names the provider and URL through the section's
+// formatters, so a key outside [A-Za-z0-9._-] is quoted, never raw.
+func TestPinLoopbackReceiptQuotesTheName(t *testing.T) {
+	key := "n\u00e9v"
+	adm, out := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, key, "http://127.0.0.1:8090")},
+	}, nil, false, &fakePrompt{})
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.pinLoopback(key, admDest(t, key, "http://127.0.0.1:8091")); err != nil {
+		t.Fatal(err)
+	}
+	if want := `destination pinned: "n\u00e9v" -> http://127.0.0.1:8091 (discovered)` + "\n"; !strings.HasSuffix(out.String(), want) {
+		t.Errorf("pin receipt: want suffix %q, got:\n%s", want, out.String())
+	}
+}
+
+// The noninteractive denial keeps its exact bytes: it names the FIRST
+// uncovered remote in manifest order (zeta, reached by "agent"), not the
+// first in the question's sorted order (alpha), and never reads an answer.
+func TestConsentNoninteractiveErrorUnchanged(t *testing.T) {
+	p := &fakePrompt{answer: true} // must not be consulted
+	adm, _ := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "agent", Destination: admDest(t, "zeta", "https://zeta.example.com"), IsFallback: true},
+		{Purpose: "summarize", Destination: admDest(t, "alpha", "https://alpha.example.com")},
+	}, nil, false, p)
+
+	err := adm.ensure(context.Background())
+	const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
+	if err == nil || err.Error() != want {
+		t.Fatalf("denial = %v\nwant     %s", err, want)
+	}
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Errorf("denial %v does not match ErrDestinationDenied", err)
+	}
+	if p.calls != 0 {
+		t.Errorf("noninteractive denial consulted the prompt %d times", p.calls)
+	}
+}
+
 // A malformed -allow-destination flag is a construction error naming the
 // flag, not a silent no-grant.
 func TestAdmissionRejectsMalformedAllowFlag(t *testing.T) {
@@ -624,9 +772,9 @@ func TestAdmissionExtendAdmitsNewRemoteWithOneConsent(t *testing.T) {
 		t.Errorf("extend consulted the prompt %d times, want exactly 1 (one decision for the complete proposal)", p.calls)
 	}
 
-	// The question says "the remote destinations listed above", so the
-	// surface extend wrote must be the PROPOSED manifest: approving a grant
-	// for a destination the user was never shown is consent to nothing.
+	// The question names the remotes a yes admits, so the surface extend
+	// wrote must be the PROPOSED manifest: approving a grant for a
+	// destination the user was never shown is consent to nothing.
 	proposed := out.String()[startupRender:]
 	for _, want := range []string{"cloud", "https://cloud.example.com", "\nRemote\n", "chat (fallback)", "model list"} {
 		if !strings.Contains(proposed, want) {

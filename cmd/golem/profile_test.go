@@ -691,7 +691,7 @@ func TestInspectStartupCapabilities(t *testing.T) {
 		t.Fatal("session was not captured")
 	}
 	errOut := readRunTestFile(t, stderr)
-	if strings.Contains(errOut, "Allow this session") || strings.Contains(errOut, "embeddings.invalid") {
+	if strings.Contains(errOut, "Send data to") || strings.Contains(errOut, "embeddings.invalid") {
 		t.Fatalf("inspect startup asked about the embedding destination:\n%s", errOut)
 	}
 	if perms.Profile != golemruntime.ProfileInspect || sess.profile != golemruntime.ProfileInspect {

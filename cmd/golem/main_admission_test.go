@@ -224,7 +224,7 @@ func TestRunLocalOnlyRemainsPromptFree(t *testing.T) {
 		t.Fatalf("local-only run: %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
 	}
 	errOut := readRunTestFile(t, stderr)
-	if strings.Contains(errOut, "Allow this session") {
+	if strings.Contains(errOut, "Send data to") {
 		t.Errorf("local-only run prompted for consent:\n%s", errOut)
 	}
 	if !strings.Contains(errOut, "\u2500\u2500 model servers") {
@@ -681,9 +681,15 @@ func TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo(t *testing.T
 		t.Fatalf("machine-mode denial must write exactly one stdout line, got %d:\n%s", len(lines), out)
 	}
 	m := decodeResult(t, lines[0])
-	var recErr struct{ Code string }
+	var recErr struct{ Code, Message string }
 	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "destination_denied" {
 		t.Errorf("error = %s, want code destination_denied", m["error"])
+	}
+	// The machine message keeps its exact bytes (#857): the first uncovered
+	// remote in manifest order, the use case reaching it, and the flag.
+	const wantMsg = `provider: destination opencode/https://opencode.invalid/zen/go not admitted for agent; pass -allow-destination "opencode/https://opencode.invalid/zen/go" to permit it`
+	if recErr.Message != wantMsg {
+		t.Errorf("error.message = %q\nwant            %q", recErr.Message, wantMsg)
 	}
 }
 

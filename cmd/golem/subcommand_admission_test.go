@@ -110,7 +110,7 @@ func TestRunIndexLocalEmbeddingProceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local index: %v\nstdout:\n%s\nstderr:\n%s", err, out.String(), errOut.String())
 	}
-	if strings.Contains(errOut.String(), "Allow this session") {
+	if strings.Contains(errOut.String(), "Send data to") {
 		t.Errorf("local index prompted:\n%s", errOut.String())
 	}
 	if counter.Load() == 0 {

@@ -117,17 +117,12 @@ func keySourceLines(cfg *config.Config) map[string]string {
 	return lines
 }
 
-// destinationConsentPrompt is the one batch consent question, asked from the
-// single consent path both ensure and extend go through, because both consent
-// to the complete manifest rendered immediately above it.
-const destinationConsentPrompt = "Allow this session to send data to the remote destinations listed above? [y/N] "
-
 // ensure admits the manifest if it is not already admitted this generation:
 // render the manifest, auto-admit when every destination is local or covered
-// by the exact allowlist, otherwise collect the one interactive batch
-// decision — or fail closed noninteractively, naming an uncovered
-// destination, a use case that reaches it, and the exact flag that would
-// cover it (I6). A reader that answers on a cancelled context installs
+// by the exact allowlist, otherwise ask the one interactive batch question
+// naming every uncovered remote, or fail closed noninteractively, naming an
+// uncovered destination, a use case that reaches it, and the exact flag that
+// would cover it (I6). A reader that answers on a cancelled context installs
 // nothing. Idempotent after success; revoke re-arms it.
 func (a *destinationAdmission) ensure(ctx context.Context) error {
 	a.mu.Lock()
@@ -176,31 +171,36 @@ func (a *destinationAdmission) revoke() {
 // consent is THE destination-consent decision, shared by ensure and extend so
 // the discipline cannot drift between the startup admission and a model
 // switch: at most one question for the complete manifest, judged against
-// baseline. It reports the policy to publish with and whether approval added
-// a remote the baseline did not already permit.
+// baseline, naming exactly the remotes baseline does not permit: the set a
+// yes admits. It reports the policy to publish with and whether approval
+// added a remote the baseline did not already permit.
 //
-// Callers hold a.mu and render m before calling, because the question refers
-// to the manifest listed above it.
+// Callers hold a.mu and render m before calling, so the user sees what each
+// remote the question names is used for.
 func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy) (provider.DestinationPolicy, bool, error) {
 	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
-	// literal loopback, so firstUncovered can only ever surface a remote —
-	// a separate filter would be a second copy of that rule.
+	// literal loopback, so uncoveredAll can only ever surface remotes; a
+	// separate filter would be a second copy of that rule.
 	dests := m.Destinations()
-	uncovered := firstUncovered(dests, baseline)
-	if uncovered == nil {
+	uncovered := uncoveredAll(dests, baseline)
+	if len(uncovered) == 0 {
 		return baseline, false, nil
 	}
+	// The diagnostic names the first uncovered remote in manifest order, so
+	// its bytes do not depend on how the question sorts.
 	denied := &provider.DestinationDeniedError{
-		Destination: *uncovered,
-		Purpose:     purposeReaching(m, *uncovered),
+		Destination: uncovered[0],
+		Purpose:     purposeReaching(m, uncovered[0]),
 	}
 	// Fail closed without reading anything: noninteractive modes do not ask
 	// for consent, they name the destination, a use case that reaches it,
-	// and the exact flag that would cover it (I6).
-	if !a.interactive || a.promptYN == nil {
-		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered.String())
+	// and the exact flag that would cover it (I6). consentMode is the same
+	// test the rendering used for "needs your OK", so the screen and the
+	// decision cannot disagree.
+	if a.consentMode() != renderAsking {
+		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered[0].String())
 	}
-	ok, err := a.promptYN(ctx, destinationConsentPrompt)
+	ok, err := a.promptYN(ctx, consentQuestion(uncovered))
 	if err != nil {
 		return baseline, false, err
 	}
@@ -258,8 +258,8 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 		baseline = a.granted
 	}
 
-	// Rendered before the decision: the question refers to "the remote
-	// destinations listed above", and it asks about the PROPOSED manifest.
+	// Rendered before the decision: the question names the remotes of the
+	// PROPOSED manifest that need a yes, and the rendering shows their uses.
 	renderManifest(a.out, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
 		manifestOpts{style: styleFor(a.out, false)})
 
@@ -355,7 +355,7 @@ func (a *destinationAdmission) pinLoopback(providerKey string, d provider.Destin
 	}
 	a.manifest = m
 	a.edges = edges
-	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", providerKey, d.BaseURL())
+	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), displayField(d.BaseURL()))
 	return nil
 }
 
@@ -371,18 +371,6 @@ func purposeReaching(m *provider.DestinationManifest, d provider.Destination) st
 		}
 	}
 	return ""
-}
-
-// firstUncovered returns the first destination the policy does not permit,
-// in the manifest's deterministic order. Loopback destinations always pass
-// Permits, so only remotes can surface here.
-func firstUncovered(dests []provider.Destination, policy provider.DestinationPolicy) *provider.Destination {
-	for _, d := range dests {
-		if !policy.Permits(d) {
-			return &d
-		}
-	}
-	return nil
 }
 
 // render writes the /grants listing of the session's manifest: every remote
