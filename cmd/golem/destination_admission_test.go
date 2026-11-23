@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -553,6 +555,187 @@ func TestConsentNoninteractiveErrorUnchanged(t *testing.T) {
 	if p.calls != 0 {
 		t.Errorf("noninteractive denial consulted the prompt %d times", p.calls)
 	}
+}
+
+// failWriter refuses every write, as a closed or broken stream does.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("section write failed") }
+
+// A section that fails to print is never followed by the question: the
+// admission refuses (ErrDestinationDenied, saying why) without reading an
+// answer and installs nothing. ensure and extend share the rule. Where no
+// question would be asked, a failed write changes nothing: nothing uncovered
+// admits as before, and a refusal keeps its exact bytes.
+func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
+	newAdm := func(t *testing.T, edges []provider.DestinationEdge, interactive bool, p *fakePrompt) *destinationAdmission {
+		t.Helper()
+		adm, err := newDestinationAdmission(destinationAdmissionConfig{
+			Gate: provider.NewDestinationGate(), Edges: edges,
+			Interactive: interactive, PromptYN: p.ask, Out: failWriter{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return adm
+	}
+	checkRefused := func(t *testing.T, err error, p *fakePrompt) {
+		t.Helper()
+		if !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Fatalf("err = %v, want ErrDestinationDenied", err)
+		}
+		for _, want := range []string{"model-server section could not be shown", "section write failed"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err %q does not say %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "\n") {
+			t.Errorf("err is not one line: %q", err)
+		}
+		if p.calls != 0 {
+			t.Errorf("prompt asked %d times after the section failed to print", p.calls)
+		}
+	}
+
+	t.Run("ensure asking", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, admEdges(t), true, p)
+		checkRefused(t, adm.ensure(context.Background()), p)
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("gate installed after a refused admission: Bind = %v", err)
+		}
+	})
+
+	t.Run("extend asking", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		local := admDest(t, "llamacpp", "http://127.0.0.1:8090")
+		adm := newAdm(t, []provider.DestinationEdge{{Purpose: "agent", Destination: local}}, true, p)
+		// Nothing uncovered: the failed write does not stop a local admission.
+		if err := adm.ensure(context.Background()); err != nil {
+			t.Fatalf("local-only ensure with a failing writer: %v", err)
+		}
+		remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
+		_, err := adm.extend(context.Background(), []provider.DestinationEdge{{Purpose: "summarize", Destination: remote}})
+		checkRefused(t, err, p)
+		if _, err := adm.gate.Bind(context.Background(), "summarize", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("remote admitted after a refused extension: Bind = %v", err)
+		}
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); err != nil {
+			t.Errorf("the refused extension dropped the installed generation: %v", err)
+		}
+	})
+
+	t.Run("refusing keeps the denial bytes", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, []provider.DestinationEdge{
+			{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+			{Purpose: "agent", Destination: admDest(t, "zeta", "https://zeta.example.com"), IsFallback: true},
+			{Purpose: "summarize", Destination: admDest(t, "alpha", "https://alpha.example.com")},
+		}, false, p)
+		err := adm.ensure(context.Background())
+		const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
+		if err == nil || err.Error() != want {
+			t.Fatalf("denial = %v\nwant     %s", err, want)
+		}
+		if p.calls != 0 {
+			t.Errorf("refusing path asked %d times", p.calls)
+		}
+	})
+}
+
+// After setReplOut, a re-admission (the next goal after /grants clear) draws
+// its section on the REPL writer, before the question is asked, and nothing
+// more reaches the startup writer.
+func TestReadmissionSectionOnReplWriter(t *testing.T) {
+	var errBuf, replBuf strings.Builder
+	var atPrompt []string
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate: provider.NewDestinationGate(), Edges: admEdges(t), Interactive: true, Out: &errBuf,
+		PromptYN: func(_ context.Context, _ string) (bool, error) {
+			atPrompt = append(atPrompt, replBuf.String())
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errBuf.String(), "\u2500\u2500 model servers") {
+		t.Fatalf("startup section not on Out:\n%s", errBuf.String())
+	}
+	startup := errBuf.String()
+
+	adm.setReplOut(&replBuf)
+	adm.revoke()
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(atPrompt) != 2 {
+		t.Fatalf("asked %d times, want 2", len(atPrompt))
+	}
+	const row = "\n  opencode  https://opencode.ai/zen/go  needs your OK\n"
+	if s := atPrompt[1]; !strings.Contains(s, "\u2500\u2500 model servers") || !strings.Contains(s, row) {
+		t.Errorf("re-admission section not on the REPL writer before the question:\n%s", s)
+	}
+	if got := errBuf.String(); got != startup {
+		t.Errorf("the startup writer got more after setReplOut:\n%s", got[len(startup):])
+	}
+}
+
+// oneByteReader serves r one byte per Read and fails the test if asked for
+// more: a larger buffer is read-ahead the line editor would lose.
+type oneByteReader struct {
+	t *testing.T
+	r *strings.Reader
+}
+
+func (o oneByteReader) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		o.t.Errorf("Read asked for %d bytes, want 1", len(p))
+	}
+	return o.r.Read(p[:min(1, len(p))])
+}
+
+func TestStartupPromptYN(t *testing.T) {
+	question := consentQuestion([]provider.Destination{admDest(t, "opencode", "https://opencode.ai/zen/go")})
+	for _, tc := range []struct {
+		in, rest string
+		want     bool
+		wantErr  bool
+	}{
+		{in: "y\nhello\n", rest: "hello\n", want: true},
+		{in: "yes\n", want: true},
+		{in: "Y\n", want: true},
+		{in: "n\n", want: false},
+		{in: "y", want: false, wantErr: true},
+	} {
+		t.Run(strconv.Quote(tc.in), func(t *testing.T) {
+			in := strings.NewReader(tc.in)
+			var out strings.Builder
+			got, err := startupPromptYN(oneByteReader{t, in}, &out)(context.Background(), question)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("answer %q = %v, %v; want %v, error %v", tc.in, got, err, tc.want, tc.wantErr)
+			}
+			if out.String() != question {
+				t.Errorf("prompt written %q, want %q", out.String(), question)
+			}
+			if rest, _ := io.ReadAll(in); string(rest) != tc.rest {
+				t.Errorf("left %q unread, want %q", rest, tc.rest)
+			}
+		})
+	}
+	t.Run("prompt write fails", func(t *testing.T) {
+		in := strings.NewReader("y\n")
+		got, err := startupPromptYN(oneByteReader{t, in}, failWriter{})(context.Background(), question)
+		if got || err == nil {
+			t.Errorf("= %v, %v; want false and the write error", got, err)
+		}
+		if in.Len() != 2 {
+			t.Errorf("read %d bytes after the prompt failed to print", 2-in.Len())
+		}
+	})
 }
 
 // A malformed -allow-destination flag is a construction error naming the

@@ -94,6 +94,19 @@ func TestRule(t *testing.T) {
 	if got := (consoleStyle{false, 10}).rule("model servers", "x"); !strings.HasSuffix(got, " \u2500\u2500\u2500") {
 		t.Fatalf("narrow: %q", got)
 	}
+	// The session prefix is 63 columns, so at the 40-column floor the
+	// subtitle is dropped and the title-only rule fills exactly the width.
+	narrow := (consoleStyle{false, 40}).rule("model servers", "where this session's model requests can go")
+	if want := "\u2500\u2500 model servers " + strings.Repeat("\u2500", 23); narrow != want {
+		t.Fatalf("width 40: %q, want %q", narrow, want)
+	}
+	// 63 + 3 = 66 columns is the narrowest width that keeps the subtitle.
+	if got := (consoleStyle{false, 66}).rule("model servers", "where this session's model requests can go"); !strings.HasSuffix(got, "go \u2500\u2500\u2500") {
+		t.Fatalf("width 66 dropped the subtitle: %q", got)
+	}
+	if got := (consoleStyle{false, 65}).rule("model servers", "where this session's model requests can go"); strings.Contains(got, "where") || len([]rune(got)) != 65 {
+		t.Fatalf("width 65 kept the subtitle or missed the width: %q", got)
+	}
 	if got, want := s.rule("t", ""), "\u2500\u2500 t "+strings.Repeat("\u2500", 75); got != want {
 		t.Fatalf("no subtitle: %q, want %q", got, want)
 	}

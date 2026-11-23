@@ -524,6 +524,55 @@ func TestGrantsNoColorHonored(t *testing.T) {
 	}
 }
 
+// TestModelSetSectionPaintedOnTerminal runs /model set to an uncovered remote
+// with the REPL on a terminal and stderr in a file: the section is drawn on the
+// terminal, where the question is asked, with the terminal's style (painted by
+// default, no SGR with -no-color), and none of it reaches stderr. The answer is
+// no, so nothing is sent.
+func TestModelSetSectionPaintedOnTerminal(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("NO_COLOR", "")
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	const question = "Send data to cloud (remote) during this session? [y/N] "
+	for _, tc := range noColorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openPTY(t)
+			seen := drainMaster(p)
+			_, _, stderr := runTestFiles(t)
+			done := startRun(p, append(replArgs(fx.configPath, t.TempDir()), tc.flags...), stderr)
+			awaitPrompt(t, p, seen)
+			writeMaster(t, p, "/model set cloudrole\r")
+			// The question is the answer read's prompt, drawn once its raw
+			// window is open: the barrier before typing the answer.
+			awaitRun(t, p, seen, done, stderr, "the consent question", func() bool {
+				return strings.Contains(seen.String(), question)
+			})
+			writeMaster(t, p, "n\r")
+			awaitRun(t, p, seen, done, stderr, "the prompt after the refusal", func() bool {
+				return strings.Count(seen.String(), promptText) >= 2
+			})
+			exitRun(t, p, done, stderr)
+
+			out := seen.String()
+			s, q := strings.Index(out, "model servers"), strings.Index(out, question)
+			if s < 0 || s > q {
+				t.Fatalf("section not on the terminal before the question: %q", out)
+			}
+			section := out[strings.LastIndex(out[:s], "\n")+1 : q]
+			checkPainted(t, section, tc.painted)
+			if !strings.Contains(section, "model-switch.invalid") {
+				t.Errorf("the remote's row is not in the terminal section: %q", section)
+			}
+			errText := readRunTestFile(t, stderr)
+			for _, leak := range []string{"model-switch.invalid", "needs your OK", "\nRemote\n", question} {
+				if strings.Contains(errText, leak) {
+					t.Errorf("stderr carries %q of the /model set section:\n%s", leak, errText)
+				}
+			}
+		})
+	}
+}
+
 // TestStartupConsentTypeahead types "y\nhello\n" before golem reads anything:
 // the startup consent answers yes, the typeahead after it survives into the
 // line editor, and the first goal is "hello". It does not prove byte-at-a-time

@@ -149,9 +149,9 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 	// At startup the baseline is only the exact allow flags (plus the
 	// loopback rule inside Permits): nothing has been granted yet.
 	flags := provider.NewDestinationPolicy(a.allowed...)
-	a.renderForConsent(a.manifest, flags, flags)
+	renderErr := a.renderForConsent(a.manifest, flags, flags)
 
-	policy, _, err := a.consent(ctx, a.manifest, flags)
+	policy, _, err := a.consent(ctx, a.manifest, flags, renderErr)
 	if err != nil {
 		return err
 	}
@@ -190,8 +190,9 @@ func (a *destinationAdmission) revoke() {
 // added a remote the baseline did not already permit.
 //
 // Callers hold a.mu and render m before calling, so the user sees what each
-// remote the question names is used for.
-func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy) (provider.DestinationPolicy, bool, error) {
+// remote the question names is used for, and pass renderErr, the error that
+// rendering returned: a question whose section failed to print is never asked.
+func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy, renderErr error) (provider.DestinationPolicy, bool, error) {
 	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
 	// literal loopback, so uncoveredAll can only ever surface remotes; a
 	// separate filter would be a second copy of that rule.
@@ -213,6 +214,11 @@ func (a *destinationAdmission) consent(ctx context.Context, m *provider.Destinat
 	// decision cannot disagree.
 	if a.consentMode() != renderAsking {
 		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered[0].String())
+	}
+	// Fail closed when the section did not print: the user has not seen what
+	// a yes admits, and a typed-ahead "y" must not answer for them.
+	if renderErr != nil {
+		return baseline, false, fmt.Errorf("%w; the model-server section could not be shown: %w", denied, renderErr)
 	}
 	ok, err := a.promptYN(ctx, consentQuestion(uncovered))
 	if err != nil {
@@ -274,9 +280,9 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 
 	// Rendered before the decision: the question names the remotes of the
 	// PROPOSED manifest that need a yes, and the rendering shows their uses.
-	a.renderForConsent(m, flags, baseline)
+	renderErr := a.renderForConsent(m, flags, baseline)
 
-	policy, newGrant, err := a.consent(ctx, m, baseline)
+	policy, newGrant, err := a.consent(ctx, m, baseline, renderErr)
 	if err != nil {
 		return false, err
 	}
@@ -345,13 +351,14 @@ func (a *destinationAdmission) setReplOut(out io.Writer) {
 
 // renderForConsent draws m before the consent decision on the writer the
 // question is asked on (replOut once bound, else Out), asking when a question
-// can be asked and refusing otherwise. Callers hold a.mu.
-func (a *destinationAdmission) renderForConsent(m *provider.DestinationManifest, flags, baseline provider.DestinationPolicy) {
+// can be asked and refusing otherwise, and returns the write error for consent.
+// Callers hold a.mu.
+func (a *destinationAdmission) renderForConsent(m *provider.DestinationManifest, flags, baseline provider.DestinationPolicy) error {
 	w := a.out
 	if a.replOut != nil {
 		w = a.replOut
 	}
-	renderManifest(w, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
+	return renderManifest(w, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
 		manifestOpts{style: styleFor(w, a.noColor), operation: a.operation})
 }
 
@@ -392,7 +399,7 @@ func (a *destinationAdmission) pinLoopback(providerKey string, d provider.Destin
 	}
 	a.manifest = m
 	a.edges = edges
-	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), displayField(d.BaseURL()))
+	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), displayURL(d.BaseURL()))
 	return nil
 }
 
@@ -425,7 +432,9 @@ func (a *destinationAdmission) render(w io.Writer, style consoleStyle) {
 	if a.admitted {
 		baseline = a.granted
 	}
-	renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
+	// A listing asks nothing, so a failed write admits nothing; like the rest
+	// of the slash command's output, it is not reported.
+	_ = renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
 		manifestOpts{style: style, cleared: !a.admitted})
 }
 
@@ -440,10 +449,14 @@ func (a *destinationAdmission) consentMode() renderMode {
 
 // startupPromptYN is the pre-REPL consent reader: one line from stdin, read
 // byte-at-a-time so no buffered read-ahead can steal bytes from the line
-// editor that takes over the same descriptor moments later.
+// editor that takes over the same descriptor moments later. A prompt that
+// fails to print is an error, and nothing is read: a typed-ahead answer must
+// not reply to a question the user never saw.
 func startupPromptYN(in io.Reader, out io.Writer) func(context.Context, string) (bool, error) {
 	return func(_ context.Context, prompt string) (bool, error) {
-		_, _ = fmt.Fprint(out, prompt)
+		if _, err := fmt.Fprint(out, prompt); err != nil {
+			return false, err
+		}
 		var line []byte
 		buf := make([]byte, 1)
 		for {

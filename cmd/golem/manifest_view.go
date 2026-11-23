@@ -72,6 +72,17 @@ func destinationName(name string) string {
 	return strconv.QuoteToASCII(name)
 }
 
+// displayURL is the one formatter for a server URL (row and pin receipt). The
+// URL is an identity, like the provider name, so it is shown as exact code
+// points: every non-ASCII rune is escaped with strconv.QuoteToASCII's
+// convention, minus the quotes. Escaping only blank-rendering runes would mean
+// enumerating them (U+3000 and U+00A0 are graphic, and so is U+3164), and a
+// missed one lets a hostile base_url draw a fake state on its own row.
+func displayURL(u string) string {
+	q := strconv.QuoteToASCII(u)
+	return q[1 : len(q)-1]
+}
+
 // remoteState is the consent state of one remote destination.
 type remoteState int
 
@@ -177,13 +188,15 @@ const rowLabelCols = 10
 // servers on this machine and the remote ones, one block per destination with
 // its name, URL, consent state (remotes only), the purposes it serves, the
 // metadata checks it gets, and where its key comes from. Untrusted fields go
-// through displayField and destinationName; layout is measured on the
-// uncolored text. states must hold every remote: a missing entry panics
-// rather than defaulting to a state. An empty manifest writes nothing.
-func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string, states map[provider.Destination]remoteState, opt manifestOpts) {
+// through displayField, destinationName and displayURL; layout is measured on
+// the uncolored text. states must hold every remote: a missing entry panics
+// rather than defaulting to a state. An empty manifest writes nothing. The
+// section is written in one call, and its error is returned so a caller about
+// to ask the consent question can refuse instead.
+func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string, states map[provider.Destination]remoteState, opt manifestOpts) error {
 	dests := m.Destinations()
 	if len(dests) == 0 {
-		return
+		return nil
 	}
 	sort.SliceStable(dests, func(i, j int) bool {
 		if dests[i].IsLocal() != dests[j].IsLocal() {
@@ -257,7 +270,7 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 			line(s.paint(sgrYellowBold, "Remote"))
 		}
 		// The URL is never wrapped or cut: it is the identity being granted.
-		name, url := destinationName(d.Provider()), displayField(d.BaseURL())
+		name, url := destinationName(d.Provider()), displayURL(d.BaseURL())
 		head := "  " + name + strings.Repeat(" ", max(0, nameCol-displayCols(name))) + "  " + url
 		if displayCols(name) > nameCol {
 			line("  " + name)
@@ -291,7 +304,8 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 	if asking {
 		b.WriteByte('\n')
 	}
-	_, _ = io.WriteString(w, b.String())
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // consentQuestion is the one-line session consent prompt for the uncovered

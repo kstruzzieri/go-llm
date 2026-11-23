@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -159,7 +160,7 @@ func testManifest(t *testing.T, edges ...provider.DestinationEdge) *provider.Des
 // renderString is renderManifest into a string.
 func renderString(m *provider.DestinationManifest, keys map[string]string, states map[provider.Destination]remoteState, opt manifestOpts) string {
 	var b strings.Builder
-	renderManifest(&b, m, keys, states, opt)
+	_ = renderManifest(&b, m, keys, states, opt) // a strings.Builder never fails
 	return b.String()
 }
 
@@ -332,6 +333,36 @@ func TestRenderManifestHostileFields(t *testing.T) {
 	if n := strings.Count(got, "\n"); n != 6 {
 		t.Errorf("rendered %d newlines, want 6:\n%s", n, got)
 	}
+
+	// Blank-rendering graphic runes in a host (an ideographic space, a
+	// no-break space, a Hangul filler) would draw a fake state on the row.
+	// The URL is an identity, so every non-ASCII rune shows as its escape and
+	// the only state on screen is a real one: the flagged row's.
+	flagged := admDest(t, "flagged", "https://flagged.example.com")
+	for _, r := range []rune{'\u3000', '\u00a0', '\u3164'} {
+		blank := string(r)
+		hostile, err := provider.NewDestination("cloud", "https://evil.example"+blank+blank+"allowed"+blank+"by"+blank+"-allow-destination")
+		if err != nil {
+			t.Fatalf("NewDestination with %U: %v", r, err)
+		}
+		got := renderString(testManifest(t,
+			provider.DestinationEdge{Purpose: "agent", Destination: hostile},
+			provider.DestinationEdge{Purpose: "agent", Destination: flagged},
+		), nil, map[provider.Destination]remoteState{hostile: remoteNeedsOK, flagged: remoteAllowedByFlag},
+			manifestOpts{style: consoleStyle{false, 120}})
+		esc := fmt.Sprintf(`\u%04x`, r)
+		header := "\n  cloud    https://evil.example" + esc + esc + "allowed" + esc + "by" + esc + "-allow-destination  needs your OK\n"
+		if !strings.Contains(got, header) {
+			t.Errorf("%U: header missing %q in:\n%s", r, header, got)
+		}
+		if strings.ContainsRune(got, r) {
+			t.Errorf("%U: raw rune on screen:\n%q", r, got)
+		}
+		if n := strings.Count(got, "  "+remoteAllowedByFlag.text()); n != 1 ||
+			!strings.Contains(got, "\n  flagged  https://flagged.example.com  "+remoteAllowedByFlag.text()+"\n") {
+			t.Errorf("%U: %q appears %d times, want once, on the flagged row:\n%s", r, remoteAllowedByFlag.text(), n, got)
+		}
+	}
 }
 
 func TestRenderManifestNarrowAndWide(t *testing.T) {
@@ -430,19 +461,21 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 	}
 }
 
-// A URL with wide characters (an IDN host survives canonicalization raw) is
-// longer in bytes than in columns, so the state placement must measure
-// columns: at the width where the header and its state exactly fill the
-// line, the state stays inline; one column narrower it moves to its own line.
+// An IDN host survives canonicalization raw, and the row shows it escaped
+// (the URL is an identity). The state placement must measure the escaped
+// text, which is what is printed: at the width where the header and its state
+// exactly fill the line, the state stays inline; one column narrower it moves
+// to its own line. Measuring the raw URL (8 columns of wide runes, against
+// 24 escaped) would keep it inline there and overflow.
 func TestRenderManifestWideURLStatePlacement(t *testing.T) {
 	d := admDest(t, "wide2", "https://\u4f8b\u4f8b\u4f8b\u4f8b.jp")
 	m := testManifest(t, provider.DestinationEdge{Purpose: "agent", Destination: d})
 	states := map[provider.Destination]remoteState{d: remoteNeedsOK}
-	head := "  wide2  " + d.BaseURL()
+	head := `  wide2  https://\u4f8b\u4f8b\u4f8b\u4f8b.jp`
 	text := remoteNeedsOK.text()
-	cols := displayCols(head) + 2 + displayCols(text)
-	if len(head)+2+len(text) <= cols {
-		t.Fatalf("fixture does not separate bytes (%d) from columns (%d)", len(head)+2+len(text), cols)
+	cols := len(head) + 2 + len(text)
+	if raw := displayCols("  wide2  "+d.BaseURL()) + 2 + len(text); raw >= cols {
+		t.Fatalf("fixture does not separate raw (%d) from escaped (%d) columns", raw, cols)
 	}
 	indent := strings.Repeat(" ", 2+len("wide2")+2)
 

@@ -58,19 +58,18 @@ func (s consoleStyle) paint(sgr, text string) string {
 }
 
 // rule draws a section rule: a bold title, an optional dim subtitle, and dashes
-// to the line width (at least three).
+// to the line width (at least three). A subtitle that would leave fewer than
+// three dashes within the width is dropped, so the rule does not wrap.
 // ponytail: each box-drawing dash counts as one column; ambiguous-width
 // terminals (CJK) can wrap it.
 func (s consoleStyle) rule(title, subtitle string) string {
 	const dashes = "\u2500\u2500 "
-	tail := ""
-	plain := dashes + title + " "
-	if subtitle != "" {
+	cols := func(t string) int { return displayCols(strings.ReplaceAll(t, "\u2500", "-")) }
+	head, tail := dashes+title+" ", ""
+	if subtitle != "" && cols(head+dashes+subtitle+" ")+3 <= s.width {
 		tail = dashes + subtitle + " "
-		plain += tail
 	}
-	cols := displayCols(strings.ReplaceAll(plain, "\u2500", "-"))
-	fill := strings.Repeat("\u2500", max(3, s.width-cols))
+	fill := strings.Repeat("\u2500", max(3, s.width-cols(head+tail)))
 	return s.paint(sgrDim, dashes) + s.paint(sgrBold, title) + " " + s.paint(sgrDim, tail+fill)
 }
 
