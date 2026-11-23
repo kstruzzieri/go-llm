@@ -763,10 +763,10 @@ question (its output fails to write), it never uses an answer to it: it prints
 one line on stderr naming what it could not show and ends the session with exit
 status 1 (a closed output pipe can end it by SIGPIPE instead; nothing is
 admitted either way), so the line typed for the question is never read as a
-goal. Input already typed in the terminal is discarded as Golem exits, so the
-shell does not run it (if the discard fails, the stderr line says so); text
-typed after Golem exits, or when a closed output pipe ends it by SIGPIPE first,
-still reaches the shell. A tool approval whose question cannot be
+goal. On Linux, macOS, the BSDs and the Windows console, Golem then discards
+the input already queued in the terminal, so the shell does not run it (if the
+discard fails, the stderr line says so); text typed after that point, or when a
+closed output pipe ends Golem by SIGPIPE first, still reaches the shell. A tool approval whose question cannot be
 shown ends the session the same way. Where no consent prompt is bound at all —
 the headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
 `/model`, and startup admission outside a terminal — an uncovered remote fails
