@@ -198,7 +198,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.BoolVar(&full, "full", false, "clean rebuild (drop the existing index first)")
 	fs.BoolVar(&progressive, "progressive", false, "generate opt-in L0/L1 progressive source summaries")
-	noColor := fs.Bool("no-color", false, "disable ANSI color in the model-server section and summary footers")
+	noColor := fs.Bool("no-color", false, "disable ANSI color in the model-server section")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := parseQuietly(fs, args, errOut); err != nil {

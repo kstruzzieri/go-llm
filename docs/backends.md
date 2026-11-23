@@ -136,8 +136,8 @@ Send data to opencode (remote) during this session? [y/N]
 
 A remote not covered by `-allow-destination` waits for a yes. Color follows
 `NO_COLOR`, `TERM=dumb`, `-no-color` and whether the output is a terminal.
-For scripts and one-shot runs, pre-admit exact
-destinations with the repeatable flag:
+For scripts and one-shot runs, pre-admit exact destinations with the
+repeatable flag:
 
 ```bash
 golem -p "..." -allow-destination "openai/https://api.openai.com"

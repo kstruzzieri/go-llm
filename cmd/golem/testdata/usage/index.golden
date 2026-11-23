@@ -6,7 +6,7 @@ Usage of golem index:
   -full
     	clean rebuild (drop the existing index first)
   -no-color
-    	disable ANSI color in the model-server section and summary footers
+    	disable ANSI color in the model-server section
   -ollama-url string
     	override Ollama base URL
   -progressive
