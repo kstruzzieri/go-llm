@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -324,6 +325,59 @@ func TestPTYRawModeIsActuallyEntered(t *testing.T) {
 // runtime in CI only.
 var _ io.Writer = (*lockedBuffer)(nil)
 
+// sgr matches a Select Graphic Rendition sequence (color or weight), not the
+// editor's cursor and bracketed-paste controls, which also start with ESC.
+var sgr = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// noColorCases is the -no-color matrix: painted by default (the positive
+// control proving the terminal path colors at all), and plain with the flag.
+var noColorCases = []struct {
+	name    string
+	flags   []string
+	painted bool
+}{
+	{"default", nil, true},
+	{"-no-color", []string{"-no-color"}, false},
+}
+
+// checkPainted asserts the model-server section in text is painted (its bold
+// title) or carries no SGR at all.
+func checkPainted(t *testing.T, text string, painted bool) {
+	t.Helper()
+	if !strings.Contains(text, "model servers") {
+		t.Fatalf("section not drawn on the terminal: %q", text)
+	}
+	if painted && !strings.Contains(text, "\x1b[1mmodel servers\x1b[0m") {
+		t.Errorf("section not painted without -no-color: %q", text)
+	}
+	if m := sgr.FindString(text); !painted && m != "" {
+		t.Errorf("SGR %q with -no-color: %q", m, text)
+	}
+}
+
+// flushPTY writes a marker to the slave and waits for the master to read it,
+// so everything written before the call is in seen; it returns the text
+// before the marker.
+func flushPTY(t *testing.T, p *ptyPair, seen *lockedBuffer) string {
+	t.Helper()
+	const end = "END-OF-PTY-OUTPUT"
+	if _, err := p.slave.WriteString(end); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s := seen.String()
+		if i := strings.Index(s, end); i >= 0 {
+			return s[:i]
+		}
+		if time.Now().After(deadline) {
+			p.close()
+			t.Fatalf("the marker never reached the master: %q", s)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestIndexNoColorHonored runs golem index with a real terminal as stderr:
 // the model-server section is colored by default, and -no-color leaves no
 // escape sequence. The remote embedding is refused, so nothing is sent.
@@ -331,14 +385,7 @@ func TestIndexNoColorHonored(t *testing.T) {
 	t.Setenv("TERM", "xterm")
 	t.Setenv("NO_COLOR", "")
 	configPath, _ := subcommandHarness(t, "remote")
-	for _, tc := range []struct {
-		name    string
-		flags   []string
-		wantESC bool
-	}{
-		{"default", nil, true},
-		{"-no-color", []string{"-no-color"}, false},
-	} {
+	for _, tc := range noColorCases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := openPTY(t)
 			seen := drainMaster(p)
@@ -346,34 +393,142 @@ func TestIndexNoColorHonored(t *testing.T) {
 			if err := runIndex(context.Background(), args, io.Discard, p.slave); err == nil {
 				t.Fatal("index with an uncovered remote embedding succeeded")
 			}
-			// Everything index wrote reaches the master before this marker.
-			const end = "END-OF-INDEX-OUTPUT"
-			if _, err := p.slave.WriteString(end); err != nil {
-				t.Fatal(err)
-			}
-			deadline := time.Now().Add(10 * time.Second)
-			for !strings.Contains(seen.String(), end) {
-				if time.Now().After(deadline) {
-					p.close()
-					t.Fatalf("the marker never reached the master: %q", seen.String())
-				}
-				time.Sleep(time.Millisecond)
-			}
-			got := seen.String()
-			if !strings.Contains(got, "model servers") {
-				t.Fatalf("section not drawn on the terminal: %q", got)
-			}
-			if has := strings.Contains(got, "\x1b"); has != tc.wantESC {
-				t.Errorf("escape sequences present = %v, want %v: %q", has, tc.wantESC, got)
+			got := flushPTY(t, p, seen)
+			checkPainted(t, got, tc.painted)
+			if has := strings.Contains(got, "\x1b"); has != tc.painted {
+				t.Errorf("escape sequences present = %v, want %v: %q", has, tc.painted, got)
 			}
 		})
 	}
 }
 
-// TestStartupConsentTypeahead types "y\nhello\n" before golem reads anything.
-// The startup consent reads its answer a byte at a time from the terminal, so
-// it takes only "y\n", and the line editor that takes the descriptor next
-// reads "hello" as the first goal.
+// TestStartupNoColorHonored draws the startup consent section on a terminal
+// stderr: painted by default, no SGR with -no-color. -grounding makes the
+// remote reachable in one-shot, so the run is refused before any request.
+func TestStartupNoColorHonored(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("NO_COLOR", "")
+	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
+	for _, tc := range noColorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openPTY(t)
+			seen := drainMaster(p)
+			stdin, stdout, _ := runTestFiles(t)
+			args := append(append(admissionArgs(configPath, root), "-grounding"), tc.flags...)
+			if err := run(args, stdin, stdout, p.slave); err == nil {
+				t.Fatal("startup with an uncovered remote was admitted")
+			}
+			checkPainted(t, flushPTY(t, p, seen), tc.painted)
+		})
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("refused startups sent %d requests, want 0", got)
+	}
+}
+
+// replArgs runs the REPL with nothing outside the test's control.
+func replArgs(configPath, root string) []string {
+	return []string{"-config", configPath, "-root", root,
+		"-no-probe", "-no-cap-probe", "-no-memory", "-no-rag", "-no-project-context",
+		"-no-git-context", "-no-auto-index", "-no-session"}
+}
+
+// startRun runs golem with the pair as stdin and stdout (so the line editor
+// is selected) and stderr as given, returning run's result.
+func startRun(p *ptyPair, args []string, stderr *os.File) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- run(args, p.slave, p.slave, stderr) }()
+	return done
+}
+
+// awaitRun polls cond while run is live: it fails at once if run returns
+// first, and closes the pair on timeout so nothing stays blocked.
+func awaitRun(t *testing.T, p *ptyPair, seen *lockedBuffer, done <-chan error, stderr *os.File, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !cond() {
+		select {
+		case err := <-done:
+			t.Fatalf("golem exited before %s: %v\nstderr:\n%s\nterminal: %q", what, err, readRunTestFile(t, stderr), seen.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			p.close()
+			t.Fatalf("timed out waiting for %s\nstderr:\n%s\nterminal: %q", what, readRunTestFile(t, stderr), seen.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// exitRun types /exit (the caller has seen a prompt, so the raw window is
+// open) and waits for a clean return.
+func exitRun(t *testing.T, p *ptyPair, done <-chan error, stderr *os.File) {
+	t.Helper()
+	writeMaster(t, p, "/exit\r")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+		}
+	case <-time.After(10 * time.Second):
+		p.close()
+		t.Fatal("golem did not exit after /exit")
+	}
+}
+
+// TestGrantsNoColorHonored types /grants into the REPL on a terminal stdout:
+// the listing is painted by default and carries no SGR with -no-color. The
+// config is local-only, so startup asks nothing.
+func TestGrantsNoColorHonored(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	local := newModelBackend(t, "local", "agent-model")
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {"local": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"}},
+  "models": {"agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+    "capabilities": ["chat", "generate", "stream", "tool_call"]}},
+  "defaults": {"agent": "agent"}
+}`, local.url)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range noColorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openPTY(t)
+			seen := drainMaster(p)
+			_, _, stderr := runTestFiles(t)
+			done := startRun(p, append(replArgs(configPath, t.TempDir()), tc.flags...), stderr)
+			awaitPrompt(t, p, seen)
+			writeMaster(t, p, "/grants\r")
+			// The editor draws one prompt per read: the second follows the
+			// listing and opens the raw window /exit needs.
+			awaitRun(t, p, seen, done, stderr, "the prompt after /grants", func() bool {
+				return strings.Count(seen.String(), promptText) >= 2
+			})
+			exitRun(t, p, done, stderr)
+			out := seen.String()
+			i := strings.Index(out, "session grants:")
+			if i < 0 {
+				t.Fatalf("/grants printed nothing: %q", out)
+			}
+			listing := out[i:]
+			if j := strings.Index(listing, promptText); j >= 0 {
+				listing = listing[:j]
+			}
+			checkPainted(t, listing, tc.painted)
+		})
+	}
+}
+
+// TestStartupConsentTypeahead types "y\nhello\n" before golem reads anything:
+// the startup consent answers yes, the typeahead after it survives into the
+// line editor, and the first goal is "hello". It does not prove byte-at-a-time
+// reading: in canonical mode one read(2) returns at most a line, so a single
+// buffered read of the answer would pass too.
 func TestStartupConsentTypeahead(t *testing.T) {
 	t.Setenv("TERM", "xterm")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -404,43 +559,15 @@ func TestStartupConsentTypeahead(t *testing.T) {
 	// Typed before run starts: the line discipline holds it for whoever
 	// reads first.
 	writeMaster(t, p, "y\nhello\n")
-	done := make(chan error, 1)
-	go func() {
-		done <- run([]string{"-config", configPath, "-root", t.TempDir(),
-			"-no-probe", "-no-cap-probe", "-no-memory", "-no-rag", "-no-project-context",
-			"-no-git-context", "-no-auto-index", "-no-session"}, p.slave, p.slave, stderr)
-	}()
-	wait := func(what string, cond func() bool) {
-		t.Helper()
-		deadline := time.Now().Add(20 * time.Second)
-		for !cond() {
-			select {
-			case err := <-done:
-				t.Fatalf("golem exited before %s: %v\nstderr:\n%s\nterminal: %q", what, err, readRunTestFile(t, stderr), seen.String())
-			default:
-			}
-			if time.Now().After(deadline) {
-				p.close()
-				t.Fatalf("timed out waiting for %s\nstderr:\n%s\nterminal: %q", what, readRunTestFile(t, stderr), seen.String())
-			}
-			time.Sleep(time.Millisecond)
-		}
-	}
-	wait("the first goal", func() bool { return local.chats.Load() >= 1 })
+	done := startRun(p, replArgs(configPath, t.TempDir()), stderr)
+	awaitRun(t, p, seen, done, stderr, "the first goal", func() bool { return local.chats.Load() >= 1 })
 	// The editor draws one prompt per read, so a second one on screen means
 	// the raw window is open again (the awaitPrompt barrier) and /exit
 	// reaches it.
-	wait("the next prompt", func() bool { return strings.Count(seen.String(), promptText) >= 2 })
-	writeMaster(t, p, "/exit\r")
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
-		}
-	case <-time.After(10 * time.Second):
-		p.close()
-		t.Fatal("golem did not exit after /exit")
-	}
+	awaitRun(t, p, seen, done, stderr, "the next prompt", func() bool {
+		return strings.Count(seen.String(), promptText) >= 2
+	})
+	exitRun(t, p, done, stderr)
 
 	if bodies := local.chatBodies(); len(bodies) != 1 || !strings.Contains(bodies[0], "hello") {
 		t.Errorf("chat requests = %q, want exactly one carrying the goal \"hello\"", bodies)

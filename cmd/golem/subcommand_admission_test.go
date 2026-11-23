@@ -74,10 +74,20 @@ func opsConfig(t *testing.T, models, defaults string) string {
 }
 
 const (
-	opsLocalChat  = `"agent": {"name": "m1", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]`
-	opsCloudChat  = `"cloudchat": {"name": "c1", "provider": "cloud", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]}`
-	opsCloudEmbed = `"embedding": {"name": "e1", "provider": "cloud", "type": "embedding", "context_window": 8192}`
+	opsLocalChat         = `"agent": {"name": "m1", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]}`
+	opsLocalChatFallback = `"agent": {"name": "m1", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"], "fallbacks": ["cloudchat"]}`
+	opsCloudChat         = `"cloudchat": {"name": "c1", "provider": "cloud", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]}`
+	opsCloudEmbed        = `"embedding": {"name": "e1", "provider": "cloud", "type": "embedding", "context_window": 8192}`
+	// opsCloudRow is the refused cloud header line; each case's row follows it.
+	opsCloudRow = "\n  cloud  https://ops.invalid/api  not allowed (needs -allow-destination)\n"
 )
+
+// opsDenial is the unchanged noninteractive denial naming the cloud and the
+// first purpose (in manifest order) that reaches it.
+func opsDenial(purpose string) string {
+	return `provider: destination cloud/https://ops.invalid/api not admitted for ` + purpose +
+		`; pass -allow-destination "cloud/https://ops.invalid/api" to permit it`
+}
 
 // golem models with an uncovered remote on its route draws the refused row
 // under the models subtitle and fails with the unchanged denial.
@@ -85,14 +95,13 @@ func TestSubcommandRefusedRow(t *testing.T) {
 	configPath := opsConfig(t, opsCloudChat, `"agent": "cloudchat"`)
 	var out, errOut strings.Builder
 	err := runModels(context.Background(), []string{"-config", configPath}, &out, &errOut)
-	const want = `provider: destination cloud/https://ops.invalid/api not admitted for agent; pass -allow-destination "cloud/https://ops.invalid/api" to permit it`
-	if err == nil || err.Error() != want {
+	if want := opsDenial("agent"); err == nil || err.Error() != want {
 		t.Fatalf("denial = %v\nwant     %s", err, want)
 	}
 	got := errOut.String()
 	for _, w := range []string{
 		"\u2500\u2500 model servers \u2500\u2500 servers golem models lists and checks ",
-		"\n  cloud  https://ops.invalid/api  not allowed (needs -allow-destination)\n         in route  chat\n",
+		opsCloudRow + "         in route  chat\n",
 	} {
 		if !strings.Contains(got, w) {
 			t.Errorf("models section missing %q:\n%s", w, got)
@@ -104,35 +113,36 @@ func TestSubcommandRefusedRow(t *testing.T) {
 // models says "in route" where the others say "used for". Every case is
 // refused, so none sends a request.
 func TestSubcommandOperations(t *testing.T) {
-	withFallback := opsConfig(t, opsLocalChat+`, "fallbacks": ["cloudchat"]}, `+opsCloudChat, `"agent": "agent"`)
-	everyRoute := opsConfig(t, opsLocalChat+`}, `+opsCloudChat+`, `+opsCloudEmbed,
+	withFallback := opsConfig(t, opsLocalChatFallback+", "+opsCloudChat, `"agent": "agent"`)
+	everyRoute := opsConfig(t, opsLocalChat+", "+opsCloudChat+", "+opsCloudEmbed,
 		`"agent": "agent", "embedding": "embedding", "summarize": "cloudchat"`)
 	for _, tc := range []struct {
-		name string
-		run  func(errOut io.Writer) error
-		want []string
+		name, want, subtitle, row string
+		run                       func(errOut io.Writer) error
 	}{
-		{"models", func(errOut io.Writer) error {
+		{"models", opsDenial("agent"), "servers golem models lists and checks", "in route  chat (fallback)", func(errOut io.Writer) error {
 			return runModels(context.Background(), []string{"-config", withFallback}, io.Discard, errOut)
-		}, []string{"\u2500\u2500 servers golem models lists and checks ", "\n         in route  chat (fallback)\n"}},
-		{"models -json", func(errOut io.Writer) error {
+		}},
+		{"models -json", opsDenial("agent"), "servers golem models lists and checks", "in route  chat", func(errOut io.Writer) error {
 			return runModels(context.Background(), []string{"-config", everyRoute, "-json"}, io.Discard, errOut)
-		}, []string{"\u2500\u2500 servers golem models lists and checks ", "\n         in route  chat\n"}},
-		{"index -progressive", func(errOut io.Writer) error {
+		}},
+		// runIndex joins its failure sentinel onto the unchanged denial.
+		{"index -progressive", errIndexFailed.Error() + "\n" + opsDenial("embedding"), "where golem index sends model requests", "used for  embeddings, summaries", func(errOut io.Writer) error {
 			return runIndex(context.Background(), []string{"-config", everyRoute, "-root", t.TempDir(), "-progressive"}, io.Discard, errOut)
-		}, []string{"\u2500\u2500 where golem index sends model requests ", "\n         used for  embeddings, summaries\n"}},
-		{"source add", func(errOut io.Writer) error {
+		}},
+		{"source add", opsDenial("embedding"), "where golem source sends model requests", "used for  embeddings", func(errOut io.Writer) error {
 			return runSource(context.Background(),
 				[]string{"add", "-config", everyRoute, "-root", t.TempDir(), "-text", "-name", "doc"},
 				strings.NewReader("hello world"), io.Discard, errOut)
-		}, []string{"\u2500\u2500 where golem source sends model requests ", "\n         used for  embeddings\n"}},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var errOut strings.Builder
-			if err := tc.run(&errOut); err == nil || !strings.Contains(err.Error()+errOut.String(), "-allow-destination") {
-				t.Fatalf("%s with an uncovered remote = %v, want the denial\nstderr:\n%s", tc.name, err, errOut.String())
+			if err := tc.run(&errOut); err == nil || err.Error() != tc.want {
+				t.Fatalf("denial = %v\nwant     %s\nstderr:\n%s", err, tc.want, errOut.String())
 			}
-			for _, w := range tc.want {
+			// Anchored to the cloud block: its header line, then this row.
+			for _, w := range []string{"\u2500\u2500 " + tc.subtitle + " ", opsCloudRow + "         " + tc.row + "\n"} {
 				if !strings.Contains(errOut.String(), w) {
 					t.Errorf("section missing %q:\n%s", w, errOut.String())
 				}
