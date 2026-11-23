@@ -1074,7 +1074,7 @@ func TestGrantsListingStates(t *testing.T) {
 	const (
 		approved = "\n  approved  https://approved.example.com"
 		flagged  = "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n"
-		cleared  = "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination\n"
+		cleared  = "access cleared by /grants clear; the next admission asks about every remote\n-allow-destination does not cover\n"
 	)
 
 	before := slash(t, sess, "/grants")

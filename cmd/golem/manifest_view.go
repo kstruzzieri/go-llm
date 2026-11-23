@@ -191,6 +191,9 @@ type manifestOpts struct {
 	cleared bool
 }
 
+// clearedNote heads a /grants listing after /grants clear.
+const clearedNote = "access cleared by /grants clear; the next admission asks about every remote -allow-destination does not cover"
+
 // manifestNameMax caps the shared name column; a longer name sits alone on
 // its header line.
 const manifestNameMax = 16
@@ -269,7 +272,11 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 	}
 	line(s.rule("model servers", sub))
 	if opt.cleared {
-		line(s.paint(sgrDim, "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination"))
+		// Word-wrapped, so a terminal never soft-wraps a fragment of it onto
+		// a row of its own where it could read like a state.
+		for _, l := range wrapWords(clearedNote, s.width) {
+			line(s.paint(sgrDim, l))
+		}
 	}
 
 	asking := false

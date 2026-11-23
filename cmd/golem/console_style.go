@@ -105,6 +105,25 @@ func wrapList(items []string, firstPrefix, contPrefix string, width int) []strin
 	return append(lines, cur)
 }
 
+// wrapWords breaks text at spaces into lines of at most width columns, never
+// inside a word; every line starts at column 0, and a word wider than width
+// stands alone, whole. Runs of whitespace collapse to one space.
+func wrapWords(text string, width int) []string {
+	var lines []string
+	cur := ""
+	for _, w := range strings.Fields(text) {
+		if cur != "" && displayCols(cur)+1+displayCols(w) > width {
+			lines = append(lines, cur)
+			cur = ""
+		}
+		if cur != "" {
+			cur += " "
+		}
+		cur += w
+	}
+	return append(lines, cur)
+}
+
 // escapeNonGraphic turns invalid UTF-8 into U+FFFD and visibly escapes every
 // non-graphic rune (C0, DEL, C1, bidi and format controls, tab, LF) with
 // strconv.QuoteToGraphic's convention.

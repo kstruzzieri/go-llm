@@ -302,19 +302,55 @@ func TestRenderManifestStates(t *testing.T) {
 	}
 }
 
+// After /grants clear the note sits right under the rule, word-wrapped at the
+// writer width with no indent and each line dim on its own, so no line of it,
+// and no 80-column row a terminal could wrap one into, reads like a state.
 func TestRenderManifestCleared(t *testing.T) {
 	m, remote := dailyManifest(t)
-	got := renderString(m, nil, map[provider.Destination]remoteState{remote: remoteNotAllowed},
-		manifestOpts{style: consoleStyle{false, 80}, cleared: true})
-	const line = "access cleared by /grants clear; the next admission asks about every remote not allowed by -allow-destination\n"
-	if n := strings.Count(got, line); n != 1 {
-		t.Errorf("cleared line appears %d times:\n%s", n, got)
+	states := map[provider.Destination]remoteState{remote: remoteNotAllowed}
+	for _, c := range []struct {
+		width int
+		note  []string
+	}{
+		{80, []string{
+			"access cleared by /grants clear; the next admission asks about every remote",
+			"-allow-destination does not cover",
+		}},
+		{40, []string{
+			"access cleared by /grants clear; the",
+			"next admission asks about every remote",
+			"-allow-destination does not cover",
+		}},
+	} {
+		got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, c.width}, cleared: true})
+		// The rule is one line at both widths (the session subtitle is
+		// dropped at 40), and the machine group follows the note.
+		lines := strings.Split(got, "\n")
+		end := slices.Index(lines, "On this machine (allowed automatically)")
+		if end < 1 || !slices.Equal(lines[1:end], c.note) {
+			t.Errorf("width %d: note under the rule = %q, want %q:\n%s", c.width, lines[1:max(1, end)], c.note, got)
+		}
+		for _, l := range lines[1:max(1, end)] {
+			for _, row := range append([]string{l}, physicalRows(l, 80)...) {
+				for _, bad := range []string{remoteAllowedByFlag.text(), "not allowed"} {
+					if strings.Contains(row, bad) {
+						t.Errorf("width %d: cleared note row %q contains %q", c.width, row, bad)
+					}
+				}
+			}
+		}
+		on := renderString(m, nil, states, manifestOpts{style: consoleStyle{true, c.width}, cleared: true})
+		if stripped := sgrPattern.ReplaceAllString(on, ""); stripped != got {
+			t.Errorf("width %d: color output strips to\n%q\nwant\n%q", c.width, stripped, got)
+		}
+		for _, l := range c.note {
+			if want := "\n\x1b[2m" + l + "\x1b[0m\n"; !strings.Contains(on, want) {
+				t.Errorf("width %d: note line not dim on its own: %q in\n%q", c.width, want, on)
+			}
+		}
 	}
-	if strings.Index(got, line) != strings.Index(got, "\n")+1 {
-		t.Errorf("cleared line is not right under the rule:\n%s", got)
-	}
-	if strings.Contains(renderString(m, nil, map[provider.Destination]remoteState{remote: remoteNotAllowed}, plain80), "access cleared") {
-		t.Error("cleared line shown without cleared")
+	if strings.Contains(renderString(m, nil, states, plain80), "access cleared") {
+		t.Error("cleared note shown without cleared")
 	}
 }
 

@@ -152,6 +152,24 @@ func TestWrapList(t *testing.T) {
 	}
 }
 
+func TestWrapWords(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		width int
+		want  []string
+	}{
+		{"aa bb", 5, []string{"aa bb"}},                     // exactly the width: one line
+		{"aa bb", 4, []string{"aa", "bb"}},                  // one under: breaks at the space
+		{"a  b\tc", 80, []string{"a b c"}},                  // whitespace runs collapse
+		{"a xxxxxxxx b", 4, []string{"a", "xxxxxxxx", "b"}}, // an over-long word stands alone, whole
+		{"xxxxxxxx", 4, []string{"xxxxxxxx"}},
+	} {
+		if got := wrapWords(tc.text, tc.width); strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("wrapWords(%q, %d) = %q, want %q", tc.text, tc.width, got, tc.want)
+		}
+	}
+}
+
 func TestDisplayFieldExact(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"a\nb", `a\nb`},
