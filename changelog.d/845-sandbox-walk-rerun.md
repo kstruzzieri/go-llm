@@ -1,0 +1,3 @@
+### Fixed — A file deleted while the sandbox checks the workspace no longer refuses the command (#845)
+
+Before running a sandboxed command, Golem checks the workspace for git metadata and files hard-linked outside it. A file disappearing during that check, for example when git pruned loose objects, could cause an unnecessary refusal. Golem now checks each listed entry's current metadata and restarts the walk when it detects a change. This also handles a hard link moved into an already-visited directory: a fresh walk can find both names inside the workspace. Two consecutive walks with the same missing link count still refuse the command as linked outside the workspace. Golem makes at most three passes and asks the user to retry if the workspace keeps changing.
