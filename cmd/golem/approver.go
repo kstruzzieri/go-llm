@@ -136,8 +136,18 @@ func exposureSource(e agent.Exposure) (foreign bool, label string) {
 // lines print after beforeWrite and before the preview; harness adds the #725
 // notice after a diff.
 func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport, harness bool, notice []string) (agent.ApprovalDecision, error) {
+	scope := grantScope(call.Function.Name)
+	grantable := key != "" && a.grants != nil && scope != ""
+	// Decided before anything prints, so a failed flush knows whether a
+	// question would have followed.
+	covered := grantable && a.grants.granted(scope, key)
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
+			if covered {
+				// No question: the tool does not run, the turn aborts, and
+				// the session goes on.
+				return agent.ApprovalDecision{}, err
+			}
 			// The question will not be asked, so it ends the REPL rather
 			// than leave the line typed for it to be read as a goal.
 			return agent.ApprovalDecision{}, questionNotShown(err)
@@ -152,8 +162,6 @@ func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview,
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
 	isPlan := call.Function.Name == submitPlanToolName
 	isVerify := call.Function.Name == verifyToolName
-	scope := grantScope(call.Function.Name)
-	grantable := key != "" && a.grants != nil && scope != ""
 	preview = sanitizeApprovalPreview(preview)
 	// The preview still renders here; only the question moves, because the
 	// source owns prompt printing and the editor repaints its prompt on every
@@ -219,7 +227,7 @@ func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview,
 	if line := riskLine(risk); line != "" {
 		_, _ = fmt.Fprintln(a.out, line)
 	}
-	if grantable && a.grants.granted(scope, key) {
+	if covered {
 		_, _ = fmt.Fprintln(a.out, "auto-approved (session grant)")
 		return agent.ApprovalDecision{Approved: true, ViaGrant: true}, nil
 	}
