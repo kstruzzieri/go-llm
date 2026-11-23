@@ -12,8 +12,8 @@ issues and the consumer compile check.
 - Golem's own git calls refuse a planted bare repository (#803). Parallel task
   mode now needs git 2.38 or later, a `git` inside the workspace is refused, a
   repository whose local config includes other files loses its git context
-  block, and hooks and filters run by Golem's git no longer find programs in
-  workspace directories.
+  block, and Golem strips workspace directories from the `PATH` it passes
+  to git.
 - Your own git, your editor's and your scripts' are not covered: with git 2.38
   or later, set `safe.bareRepository=explicit` (#803).
 - Bubblewrap still cannot refuse git metadata created during a run; #802 moved
