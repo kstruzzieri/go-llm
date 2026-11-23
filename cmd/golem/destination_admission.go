@@ -191,11 +191,13 @@ func (a *destinationAdmission) revoke() {
 //
 // Callers hold a.mu and render m before calling, so the user sees what each
 // remote the question names is used for, and pass renderErr, the error that
-// rendering returned: a question whose section failed to print is never asked.
-// The write error counts only where golem would ask about an uncovered
-// remote: a manifest the baseline covers (local and flag-covered servers) is
-// admitted even if its section failed to print, as before, and a
-// noninteractive refusal keeps its exact bytes.
+// rendering returned: a question whose section failed to print is never asked,
+// and the refusal wraps both provider.ErrDestinationDenied and
+// errConsentNotShown. The write error counts only where golem would ask about
+// an uncovered remote: a manifest the baseline covers in full (local and
+// flag-covered servers, or an earlier grant) is admitted even if its section
+// failed to print, as before, and a noninteractive refusal keeps its exact
+// bytes.
 func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy, renderErr error) (provider.DestinationPolicy, bool, error) {
 	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
 	// literal loopback, so uncoveredAll can only ever surface remotes; a
@@ -221,18 +223,11 @@ func (a *destinationAdmission) consent(ctx context.Context, m *provider.Destinat
 	}
 	// Fail closed when the section did not print and golem would ask about an
 	// uncovered remote: the user has not seen what a yes admits, and a
-	// typed-ahead "y" must not answer for them. In the
-	// REPL (replOut is bound only there, beside the line-source prompt) the
-	// line typed after the command is still its answer, never a goal, so one
-	// line is read and dropped through the same seam; no question is shown and
-	// whatever it returns is ignored. At startup and in the subcommands a
-	// refusal ends the run and no goal is read, so a discard read there could
-	// only wait on stdin with nothing on screen.
+	// typed-ahead "y" must not answer for them. Nothing is read, so the line
+	// typed for the question stays unread: the REPL ends on errConsentNotShown
+	// rather than read it as a goal, and at startup the refusal ends the run.
 	if renderErr != nil {
-		if a.replOut != nil {
-			_, _ = a.promptYN(ctx, "")
-		}
-		return baseline, false, fmt.Errorf("%w; the model-server section could not be shown: %w", denied, renderErr)
+		return baseline, false, fmt.Errorf("%w; the model-server section %w: %w", denied, errConsentNotShown, renderErr)
 	}
 	ok, err := a.promptYN(ctx, consentQuestion(uncovered))
 	if err != nil {

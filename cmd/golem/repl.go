@@ -193,6 +193,11 @@ type replSession struct {
 	control    *replControl
 	interrupts <-chan struct{}
 
+	// consentNotShown is set by a slash command whose consent section or
+	// question could not be shown (errConsentNotShown); runREPL then ends the
+	// session with it before reading another goal.
+	consentNotShown error
+
 	// goalEditor backs /edit. nil outside the default REPL and in narrow
 	// tests that never dispatch it; nil renders the unavailable message.
 	goalEditor goalEditor
@@ -200,7 +205,9 @@ type replSession struct {
 
 // runREPL reads lines from in, dispatching slash commands and running every
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
-// without ending the loop. EOF (Ctrl-D) returns nil.
+// without ending the loop. EOF (Ctrl-D) returns nil. A consent section or
+// question that could not be shown returns its errConsentNotShown error
+// without reading another goal.
 func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
 	sess.interrupts = interrupts
 	for {
@@ -231,6 +238,9 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		if strings.HasPrefix(line, "/") {
 			forced, exit := dispatchSlash(ctx, out, sess, line)
 			hint, sess.recipeHint = sess.recipeHint, nil
+			if err := sess.consentNotShown; err != nil {
+				return err
+			}
 			if exit {
 				return nil
 			}
@@ -256,10 +266,14 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		// Pre-turn boundary (#477 D12): a /grants clear leaves ensure
 		// re-armed, and the SAME batch gate re-runs here — before the goal,
 		// never mid-turn. Denial (or decline) keeps the session usable for
-		// slash commands but runs no goal.
+		// slash commands but runs no goal; a section that could not be shown
+		// ends the session.
 		if sess.destAdmission != nil {
 			if err := sess.destAdmission.ensure(ctx); err != nil {
 				_, _ = fmt.Fprintf(out, "destination admission: %v\n", err)
+				if errors.Is(err, errConsentNotShown) {
+					return err
+				}
 				continue
 			}
 		}
@@ -275,6 +289,11 @@ func runREPL(ctx context.Context, src lineSource, out io.Writer, interrupts <-ch
 		}
 		if errors.Is(runErr, errModelRestoreFailed) {
 			_, _ = fmt.Fprintln(out, "recipes: model restoration failed; REPL stopped")
+			return runErr
+		}
+		// A tool approval or a recipe hint's destination question that could
+		// not be shown: no answer was read, so none may be read as a goal.
+		if errors.Is(runErr, errConsentNotShown) {
 			return runErr
 		}
 	}
@@ -905,7 +924,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			sess.grants.clear()
 			if sess.destAdmission != nil {
 				sess.destAdmission.revoke()
-				_, _ = fmt.Fprintln(out, "session grants cleared (destination grants revoked; re-approval before the next goal)")
+				_, _ = fmt.Fprintln(out, "session grants cleared (destination grants revoked)")
 			} else {
 				_, _ = fmt.Fprintln(out, "session grants cleared")
 			}

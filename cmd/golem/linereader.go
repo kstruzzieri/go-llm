@@ -134,10 +134,10 @@ func (s *scannerSource) ReadGoal(ctx context.Context, prompt string) (string, bo
 }
 
 // ReadAnswer never answers a question that failed to print: a typed-ahead
-// answer must not reply to a question the user never saw. As in the editor,
-// the line typed for it is still consumed as the answer (the docs promise a
-// line after the command is never kept as a goal) and then discarded, and the
-// write error is returned.
+// answer must not reply to a question the user never saw. It reads nothing
+// then and returns errConsentNotShown at once, leaving the line typed for the
+// question unread; the REPL ends on that error rather than read the line as
+// a goal.
 func (s *scannerSource) ReadAnswer(ctx context.Context, prompt string) (string, bool, error) {
 	return s.read(ctx, prompt, true)
 }
@@ -153,10 +153,7 @@ func (s *scannerSource) read(ctx context.Context, prompt string, answer bool) (s
 	if answer && werr != nil {
 		s.readActive = false
 		s.mu.Unlock()
-		// Read and drop the answer line. EOF and cancellation end the read
-		// as they would any other; either way the answer is an error.
-		_, _, _ = s.lr.ReadLine(ctx)
-		return "", false, fmt.Errorf("golem: the question could not be shown, so its answer was discarded: %w", werr)
+		return "", false, fmt.Errorf("the question %w: %w", errConsentNotShown, werr)
 	}
 	s.mu.Unlock()
 

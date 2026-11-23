@@ -458,6 +458,14 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 				return "", false, errSegmentFlagMissing
 			}
 			if !compose {
+				// A question this window failed to draw is never answered,
+				// typed or pasted. The segment already read cannot be
+				// un-read, so it is discarded; the rest of a paste stays
+				// unread, because the REPL ends on errConsentNotShown and
+				// reads nothing after it.
+				if werr := e.rw.writeErr.Load(); werr != nil {
+					return "", false, fmt.Errorf("the question %w, so its answer was discarded: %w", errConsentNotShown, *werr)
+				}
 				if inPaste {
 					// Spec 8.3: an approval answer whose terminator arrived
 					// inside a paste is invalid. Drain the remaining paste
@@ -482,12 +490,6 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 					default:
 						return "", false, derr
 					}
-				}
-				// The only answer path that returns what was typed (every
-				// other one denies), so the check sits here: a question this
-				// window failed to draw is never answered.
-				if werr := e.rw.writeErr.Load(); werr != nil {
-					return "", false, fmt.Errorf("golem: the question could not be shown, so its answer was discarded: %w", *werr)
 				}
 				return seg, true, nil
 			}

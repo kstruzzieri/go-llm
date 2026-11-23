@@ -120,29 +120,46 @@ func (f flakyWriter) Write(p []byte) (int, error) {
 	return f.w.Write(p)
 }
 
+// countingReader counts Read calls on the stream under a line source, so a
+// test can prove a source read nothing.
+type countingReader struct {
+	r     io.Reader
+	reads atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.r.Read(p)
+}
+
 // A REPL question that fails to print is never answered, in either line
-// source: the typed-ahead "y" yields false and an error, never consent. The
-// line typed for it is consumed and discarded (never kept as a goal), and
-// goal reads are unchanged, so the next goal still reads.
+// source: the typed-ahead "y" yields false and errConsentNotShown, never
+// consent. The scanner reads nothing for it (no discard read exists for a
+// Ctrl-C to park), so the line typed for it stays unread; the editor has
+// already consumed that line and discards it. The REPL ends on the error.
 func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 	check := func(t *testing.T, src lineSource) {
 		t.Helper()
 		got, err := lineSourcePromptYN(src)(context.Background(), "allow? ")
-		if got || err == nil {
-			t.Fatalf("lineSourcePromptYN with a failing writer = %v, %v; want false and an error", got, err)
+		if got || !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("lineSourcePromptYN with a failing writer = %v, %v; want false and errConsentNotShown", got, err)
 		}
-		if !strings.Contains(err.Error(), "could not be shown") || !strings.Contains(err.Error(), "section write failed") {
+		if !strings.Contains(err.Error(), "the question could not be shown") || !strings.Contains(err.Error(), "section write failed") {
 			t.Errorf("error does not say the question was not shown: %v", err)
 		}
 	}
 	t.Run("scanner", func(t *testing.T) {
-		src := newScannerSource(strings.NewReader("y\nhello\n"), failWriter{})
+		in := &countingReader{r: strings.NewReader("y\nhello\n")}
+		src := newScannerSource(in, failWriter{})
 		check(t, src)
-		// The answer line was consumed and dropped: the next read sees the
-		// line after it, never the "y" as a goal.
+		if n := in.reads.Load(); n != 0 {
+			t.Errorf("stdin reads after the failed prompt = %d, want 0", n)
+		}
+		// The answer line was left unread: whoever reads next gets it. In
+		// the REPL nothing does, because the session ends.
 		line, ok, err := src.ReadGoal(context.Background(), promptText)
-		if line != "hello" || !ok || err != nil {
-			t.Errorf("next read = %q, %v, %v; want \"hello\"", line, ok, err)
+		if line != "y" || !ok || err != nil {
+			t.Errorf("next read = %q, %v, %v; want the unread \"y\"", line, ok, err)
 		}
 	})
 	t.Run("scanner EOF", func(t *testing.T) {
@@ -157,6 +174,12 @@ func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 		if line != "hello" || !ok || err != nil {
 			t.Errorf("goal read after the refused answer = %q, %v, %v; want \"hello\"", line, ok, err)
 		}
+	})
+	t.Run("editor pasted answer", func(t *testing.T) {
+		// A pasted answer to a question that did not print is not a plain
+		// denial either: the session must end, so the error comes back.
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + "y\nmore" + pasteOff + "\r"), out: failWriter{}})
+		check(t, f.src)
 	})
 	t.Run("editor recovers", func(t *testing.T) {
 		// One transient failure fails only its own question: each read
@@ -639,10 +662,9 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("section write failed") }
 
 // A section that fails to print is never followed by the question: the
-// admission refuses (ErrDestinationDenied, saying why) and installs nothing.
-// In the REPL it first drops the one line typed for the question unanswered
-// (even a "yes"); at startup, where the refusal is fatal, it reads nothing.
-// ensure (the re-admission after /grants clear) and extend share the rule.
+// admission refuses (ErrDestinationDenied and errConsentNotShown, saying why),
+// reads nothing in the REPL or at startup, and installs nothing. ensure (the
+// re-admission after /grants clear) and extend share the rule.
 // Where no question would be asked, a failed write changes nothing: nothing
 // uncovered admits as before, and a refusal keeps its exact bytes.
 func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
@@ -662,10 +684,10 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		}
 		return adm
 	}
-	checkRefused := func(t *testing.T, err error, p *fakePrompt, reads int) {
+	checkRefused := func(t *testing.T, err error, p *fakePrompt) {
 		t.Helper()
-		if !errors.Is(err, provider.ErrDestinationDenied) {
-			t.Fatalf("err = %v, want ErrDestinationDenied", err)
+		if !errors.Is(err, provider.ErrDestinationDenied) || !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("err = %v, want ErrDestinationDenied and errConsentNotShown", err)
 		}
 		for _, want := range []string{"model-server section could not be shown", "section write failed"} {
 			if !strings.Contains(err.Error(), want) {
@@ -675,29 +697,27 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		if strings.Contains(err.Error(), "\n") {
 			t.Errorf("err is not one line: %q", err)
 		}
-		// In the REPL, exactly one read with no question shown: the line typed
-		// for the question is dropped, never left for a goal, and its "yes"
-		// admits nothing. At startup, none.
-		if p.calls != reads || p.seen != "" {
-			t.Errorf("after the section failed to print: %d reads, last prompt %q; want %d, with no prompt", p.calls, p.seen, reads)
+		// Nothing is read: no discard read waits on a question nobody saw.
+		if p.calls != 0 {
+			t.Errorf("after the section failed to print: %d reads, want 0", p.calls)
 		}
 	}
 
 	t.Run("ensure asking", func(t *testing.T) {
 		p := &fakePrompt{answer: true}
 		adm := newAdm(t, admEdges(t), true, true, p)
-		checkRefused(t, adm.ensure(context.Background()), p, 1)
+		checkRefused(t, adm.ensure(context.Background()), p)
 		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("gate installed after a refused admission: Bind = %v", err)
 		}
 	})
 
 	t.Run("startup asking", func(t *testing.T) {
-		// No REPL writer bound: the refusal is fatal and no goal is read, so
-		// nothing waits on stdin for an answer to a question never shown.
+		// No REPL writer bound: the startup writer failed, and the refusal is
+		// fatal.
 		p := &fakePrompt{answer: true}
 		adm := newAdm(t, admEdges(t), true, false, p)
-		checkRefused(t, adm.ensure(context.Background()), p, 0)
+		checkRefused(t, adm.ensure(context.Background()), p)
 		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("gate installed after a refused startup admission: Bind = %v", err)
 		}
@@ -713,7 +733,7 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		}
 		remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
 		_, err := adm.extend(context.Background(), []provider.DestinationEdge{{Purpose: "summarize", Destination: remote}})
-		checkRefused(t, err, p, 1)
+		checkRefused(t, err, p)
 		if _, err := adm.gate.Bind(context.Background(), "summarize", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("remote admitted after a refused extension: Bind = %v", err)
 		}
@@ -733,6 +753,9 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
 		if err == nil || err.Error() != want {
 			t.Fatalf("denial = %v\nwant     %s", err, want)
+		}
+		if errors.Is(err, errConsentNotShown) {
+			t.Error("a refusal that asks nothing reads as a question not shown")
 		}
 		if p.calls != 0 {
 			t.Errorf("refusing path asked %d times", p.calls)
@@ -1020,8 +1043,8 @@ func TestReplGrantsClearRevokesDestinations(t *testing.T) {
 	if _, err := adm.gate.Bind(context.Background(), "agent", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
 		t.Error("/grants clear left destination authority in place")
 	}
-	if !strings.Contains(out.String(), "destination") {
-		t.Errorf("/grants clear output does not mention destination grants: %s", out.String())
+	if got, want := out.String(), "session grants cleared (destination grants revoked)\n"; got != want {
+		t.Errorf("/grants clear output = %q, want %q", got, want)
 	}
 
 	// /new and /clear do NOT revoke destination authority (D12): re-admit,
@@ -1089,9 +1112,7 @@ func TestGrantsListingStates(t *testing.T) {
 
 	slash(t, sess, "/grants clear")
 	after := slash(t, sess, "/grants")
-	// The longer state does not fit beside the URL at 80 columns, so it sits
-	// on its own line at the value column.
-	for _, want := range []string{cleared, approved + "\n            not allowed (cleared; the next goal asks again)\n", flagged} {
+	for _, want := range []string{cleared, approved + "  not allowed (cleared)\n", flagged} {
 		if !strings.Contains(after, want) {
 			t.Errorf("/grants after clear missing %q:\n%s", want, after)
 		}

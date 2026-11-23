@@ -120,9 +120,8 @@ key, the section adds `sends api_key from $NAME` (several: `$A, $B`) or
 you see which secret goes where; this extends the #477 consent field set. Each
 remote carries its own state: `needs your OK`, `allowed by -allow-destination`,
 `allowed earlier this session`, `not allowed (needs -allow-destination)`
-where Golem cannot ask, or `not allowed (cleared; the next goal asks again)`,
-which `/grants` shows after `/grants clear`. The question names exactly the
-remotes a yes admits:
+where Golem cannot ask, or `not allowed (cleared)`, which `/grants` shows
+after `/grants clear`. The question names exactly the remotes a yes admits:
 
 ```text
 ── model servers ── where this session's model requests can go ─────────────────

@@ -140,7 +140,7 @@ func TestRemoteStateText(t *testing.T) {
 		"needs your OK",
 		"allowed by -allow-destination",
 		"allowed earlier this session",
-		"not allowed (cleared; the next goal asks again)",
+		"not allowed (cleared)",
 		"not allowed (needs -allow-destination)",
 	}
 	got := []remoteState{remoteNeedsOK, remoteAllowedByFlag, remoteAllowedEarlier, remoteNotAllowed, remoteRefused}

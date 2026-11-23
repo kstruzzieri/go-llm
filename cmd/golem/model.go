@@ -326,6 +326,9 @@ func handleModelSet(ctx context.Context, out io.Writer, sess *replSession, arg s
 		if newGrantAdmitted {
 			_, _ = fmt.Fprintln(out, destinationGrantRetainedNotice)
 		}
+		if errors.Is(err, errConsentNotShown) {
+			sess.consentNotShown = err // runREPL ends the session
+		}
 		return
 	}
 	// Infallible CLI bookkeeping, in the synchronous handler, before the next

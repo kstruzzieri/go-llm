@@ -118,7 +118,7 @@ func (s remoteState) text() string {
 	case remoteAllowedEarlier:
 		return "allowed earlier this session"
 	case remoteNotAllowed:
-		return "not allowed (cleared; the next goal asks again)"
+		return "not allowed (cleared)"
 	case remoteRefused:
 		return "not allowed (needs -allow-destination)"
 	default:

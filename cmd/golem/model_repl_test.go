@@ -274,6 +274,9 @@ func newModelSwitchFixture(t *testing.T, remoteURL string) modelSwitchFixture {
 	// developer's real config out of the run.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// An inherited GO_LLM_BASE_URL would replace the fixture's local primary
+	// at startup; set to "" it still counts as an override, so unset it.
+	unsetenvForTest(t, sourceEnvBaseURL)
 	primary := newModelBackend(t, "primary", "agent-model", "agent-model-b", "weak-model")
 	alt := newModelBackend(t, "alt", "alt-model")
 	providers := fmt.Sprintf(`"primary": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},
@@ -615,6 +618,25 @@ func (c *countingModelSource) goals() []string {
 	return append([]string(nil), c.recorded...)
 }
 
+// checkREPLEndedUnshown asserts runREPL ended on errConsentNotShown with exit
+// status 1 after reading one goal line and the given number of answers, and
+// that the line typed for the question is still the next unread line.
+func checkREPLEndedUnshown(t *testing.T, err error, src *countingModelSource, answers int64, unread string) {
+	t.Helper()
+	if !errors.Is(err, errConsentNotShown) || exitCodeFor(err) != 1 {
+		t.Fatalf("runREPL = %v (exit %d), want errConsentNotShown and exit 1", err, exitCodeFor(err))
+	}
+	if n := src.goalReads.Load(); n != 1 {
+		t.Errorf("ReadGoal calls = %d, want 1: nothing is read after the failure", n)
+	}
+	if n := src.answers.Load(); n != answers {
+		t.Errorf("ReadAnswer calls = %d, want %d", n, answers)
+	}
+	if line, _, _ := src.inner.ReadGoal(context.Background(), ""); line != unread {
+		t.Errorf("next unread line = %q, want %q: no answer is read or discarded", line, unread)
+	}
+}
+
 // newCountingSource wires a scripted scanner behind the counting seam and
 // points destination consent at it, exactly as run() does for the real REPL.
 func newCountingSource(sess *replSession, script string) *countingModelSource {
@@ -717,35 +739,63 @@ func TestModelSetScriptedRemoteConsentConsumesExactlyOneLine(t *testing.T) {
 	})
 }
 
-// TestModelSetSectionWriteFailureDropsTheAnswerLine is the scripted consent
-// sequence with a REPL writer that refuses every write: the section cannot be
-// shown, so the switch is refused, and the "yes" typed for the question is
-// still read as its answer and dropped. It is never run as a goal on the old
-// model; only "test prompt" is.
-func TestModelSetSectionWriteFailureDropsTheAnswerLine(t *testing.T) {
+// TestModelSetSectionWriteFailureEndsTheREPL is the scripted consent sequence
+// with a REPL writer that refuses every write: the section cannot be shown, so
+// the REPL ends (exit 1) without reading an answer or another goal. Neither
+// "yes" nor "test prompt" runs as a goal, nothing is switched or admitted,
+// and the "yes" typed for the question is still unread.
+func TestModelSetSectionWriteFailureEndsTheREPL(t *testing.T) {
 	fx := newModelSwitchFixture(t, remoteModelURL)
 	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
 		src := newCountingSource(sess, "/model set cloudrole\nyes\ntest prompt\n")
 		sess.destAdmission.setReplOut(failWriter{})
-		primaryBefore := fx.primary.chats.Load()
-		var out strings.Builder
-		if err := runREPL(t.Context(), src, &out, nil, sess); err != nil {
-			t.Fatalf("runREPL: %v", err)
+		before := snapshotModelTuple(sess).withoutTurnState()
+		altBefore, primaryBefore := fx.alt.chats.Load(), fx.primary.chats.Load()
+		err := runREPL(t.Context(), src, io.Discard, nil, sess)
+		checkREPLEndedUnshown(t, err, src, 0, "yes")
+		if !errors.Is(err, provider.ErrDestinationDenied) || !strings.Contains(err.Error(), "model-server section could not be shown") {
+			t.Errorf("err = %v, want the denial saying the section could not be shown", err)
 		}
-		if got := src.goals(); !reflect.DeepEqual(got, []string{"test prompt"}) {
-			t.Errorf("recorded goals = %q, want exactly [test prompt]", got)
+		if len(src.goals()) != 0 {
+			t.Errorf("recorded goals = %q, want none", src.goals())
 		}
-		if n := src.answers.Load(); n != 1 {
-			t.Errorf("ReadAnswer calls = %d, want exactly 1 (the dropped answer line)", n)
+		if fx.primary.chats.Load() != primaryBefore || fx.alt.chats.Load() != altBefore {
+			t.Errorf("chat requests after the failure: primary %d, alt %d; want none", fx.primary.chats.Load()-primaryBefore, fx.alt.chats.Load()-altBefore)
 		}
-		if !strings.Contains(out.String(), "model unchanged:") || !strings.Contains(out.String(), "model-server section could not be shown") {
-			t.Fatalf("want the switch refused because the section could not be shown:\n%s", out.String())
+		if after := snapshotModelTuple(sess).withoutTurnState(); !reflect.DeepEqual(before, after) {
+			t.Errorf("the refused switch changed the model:\nbefore %+v\nafter  %+v", before, after)
 		}
-		if strings.Contains(out.String(), destinationGrantRetainedNotice) {
-			t.Errorf("a grant was reported after the refusal:\n%s", out.String())
+		if _, err := sess.destAdmission.gate.Bind(context.Background(), modelSetUseCase, "cloud"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("cloud admitted after the refused switch: Bind = %v", err)
 		}
-		if got, want := fx.primary.chats.Load(), primaryBefore+1; got != want {
-			t.Errorf("primary chat requests = %d, want %d (the one goal, on the old model)", got, want)
+	})
+}
+
+// TestModelSetQuestionWriteFailureEndsTheREPL: the section prints, but the
+// question's prompt, which the line source prints, does not. The REPL ends the
+// same way: the answer read returns at once, reading nothing.
+func TestModelSetQuestionWriteFailureEndsTheREPL(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		// No REPL writer is bound here, so the section goes to the startup
+		// writer, which works; only the line source's output fails.
+		src := &countingModelSource{inner: newScannerSource(strings.NewReader("/model set cloudrole\nyes\ntest prompt\n"), failWriter{})}
+		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
+		before := snapshotModelTuple(sess).withoutTurnState()
+		altBefore, primaryBefore := fx.alt.chats.Load(), fx.primary.chats.Load()
+		err := runREPL(t.Context(), src, io.Discard, nil, sess)
+		checkREPLEndedUnshown(t, err, src, 1, "yes")
+		if !strings.Contains(err.Error(), "the question could not be shown") {
+			t.Errorf("err = %v, want it to say the question could not be shown", err)
+		}
+		if len(src.goals()) != 0 {
+			t.Errorf("recorded goals = %q, want none", src.goals())
+		}
+		if fx.primary.chats.Load() != primaryBefore || fx.alt.chats.Load() != altBefore {
+			t.Errorf("chat requests after the failure: primary %d, alt %d; want none", fx.primary.chats.Load()-primaryBefore, fx.alt.chats.Load()-altBefore)
+		}
+		if after := snapshotModelTuple(sess).withoutTurnState(); !reflect.DeepEqual(before, after) {
+			t.Errorf("the refused switch changed the model:\nbefore %+v\nafter  %+v", before, after)
 		}
 		if _, err := sess.destAdmission.gate.Bind(context.Background(), modelSetUseCase, "cloud"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("cloud admitted after the refused switch: Bind = %v", err)

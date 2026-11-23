@@ -37,6 +37,9 @@ func handleCompact(ctx context.Context, out io.Writer, sess *replSession, fields
 		report, err = sess.runtime.CompactThread(opCtx, sess.session.id)
 	}
 	if err != nil {
+		if errors.Is(err, errConsentNotShown) {
+			sess.consentNotShown = err // runREPL ends the session
+		}
 		switch {
 		case errors.Is(err, golemruntime.ErrCompressionUnavailable):
 			_, _ = fmt.Fprintln(out, "compact: compression unavailable")
