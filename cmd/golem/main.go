@@ -886,14 +886,31 @@ func main() {
 
 // cliFailureLine is the text of main's stderr line for err. A question that
 // could not be shown promises one line, but errors.Join (a runtime
-// cancellation, an editor restore failure) can add causes on lines of their
-// own, so those are joined with "; ". Only the text changes, never err.
+// cancellation, an editor restore failure, a failed discard of typed-ahead
+// input) can add causes on lines of their own, so those are joined with "; ".
+// Only the text changes, never err.
 func cliFailureLine(err error) string {
 	msg := runFailureMessage("", err)
 	if errors.Is(err, errConsentNotShown) {
 		msg = strings.ReplaceAll(msg, "\n", "; ")
 	}
 	return msg
+}
+
+// discardIfConsentNotShown is run's last step when a consent surface could not
+// be shown (errConsentNotShown): golem is about to exit without reading what
+// the user typed or pasted for it, and the shell it exits to would run that
+// input. On a terminal stdin it discards the queued input; on any other error,
+// or a stdin that is not a terminal, it does nothing. A failed discard is
+// joined into runErr, so the user learns the input may reach the shell.
+func discardIfConsentNotShown(runErr error, stdin *os.File, isTerminal func(int) bool, discard func(*os.File) error) error {
+	if !errors.Is(runErr, errConsentNotShown) || stdin == nil || !isTerminal(int(stdin.Fd())) {
+		return runErr
+	}
+	if err := discard(stdin); err != nil {
+		return errors.Join(runErr, fmt.Errorf("typed-ahead input could not be discarded and may reach the shell: %w", err))
+	}
+	return runErr
 }
 
 func colorEnabled(out *os.File, noColor bool) bool {
@@ -951,6 +968,11 @@ func formatFeedbackReport(report feedbackReport) string {
 }
 
 func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) (runErr error) {
+	// Registered first so it runs last: withLineSource has closed the line
+	// source, so the terminal is cooked again, before queued input is dropped.
+	defer func() {
+		runErr = discardIfConsentNotShown(runErr, stdin, realTermOps{}.IsTerminal, discardTypedAhead)
+	}()
 	var hooks runHooks
 	if len(testHooks) > 0 {
 		hooks = testHooks[0]

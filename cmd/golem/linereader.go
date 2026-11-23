@@ -137,7 +137,7 @@ func (s *scannerSource) ReadGoal(ctx context.Context, prompt string) (string, bo
 // answer must not reply to a question the user never saw. It reads nothing
 // then and returns errConsentNotShown at once, leaving the line typed for the
 // question unread; the REPL ends on that error rather than read the line as
-// a goal.
+// a goal, and run discards it from the terminal as golem exits.
 func (s *scannerSource) ReadAnswer(ctx context.Context, prompt string) (string, bool, error) {
 	return s.read(ctx, prompt, true)
 }

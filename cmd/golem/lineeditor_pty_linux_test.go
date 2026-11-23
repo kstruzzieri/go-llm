@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -730,4 +731,38 @@ func TestStartupConsentTypeahead(t *testing.T) {
 	if errOut := readRunTestFile(t, stderr); strings.Count(errOut, question) != 1 {
 		t.Errorf("startup consent asked %d times, want once:\n%s", strings.Count(errOut, question), errOut)
 	}
+}
+
+// TestConsentNotShownDiscardsTypedAhead types "/model set" to an uncovered
+// remote and, in the same write, a benign line meant for the shell, with
+// stdin a terminal and stdout /dev/full (writes fail with ENOSPC and, unlike a
+// closed pipe, raise no SIGPIPE). The section cannot be shown, so run returns
+// errConsentNotShown, and the benign line must not be left in the terminal for
+// the shell. stdout is not a terminal, so the scanner reads goals: a cooked
+// read(2) returns one line, so the benign line is still queued when the REPL
+// ends and only run's discard removes it (red with the discard removed).
+func TestConsentNotShownDiscardsTypedAhead(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open /dev/full: %v", err)
+	}
+	t.Cleanup(func() { _ = full.Close() })
+	p := openPTY(t)
+	seen := drainMaster(p)
+	_, _, stderr := runTestFiles(t)
+
+	typeAhead(t, p, seen, "/model set cloudrole\necho benign\n", "benign\r\n")
+	done := make(chan error, 1)
+	go func() { done <- run(replArgs(fx.configPath, t.TempDir()), p.slave, full, stderr) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("run = %v, want errConsentNotShown\nstderr:\n%s", err, readRunTestFile(t, stderr))
+		}
+	case <-time.After(20 * time.Second):
+		p.close()
+		t.Fatalf("golem did not exit\nstderr:\n%s", readRunTestFile(t, stderr))
+	}
+	checkQueueEmpty(t, p)
 }

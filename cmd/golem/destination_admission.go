@@ -223,9 +223,10 @@ func (a *destinationAdmission) consent(ctx context.Context, m *provider.Destinat
 	}
 	// Fail closed when the section did not print and golem would ask about an
 	// uncovered remote: the user has not seen what a yes admits, and a
-	// typed-ahead "y" must not answer for them. Nothing is read, so the line
-	// typed for the question stays unread: the REPL ends on errConsentNotShown
-	// rather than read it as a goal, and at startup the refusal ends the run.
+	// typed-ahead "y" must not answer for them. Nothing is read: the REPL ends
+	// on errConsentNotShown rather than read the line typed for the question
+	// as a goal, at startup the refusal ends the run, and run discards the
+	// line from the terminal as golem exits.
 	if renderErr != nil {
 		return baseline, false, fmt.Errorf("%w; the model-server section %w: %w", denied, errConsentNotShown, renderErr)
 	}
@@ -465,12 +466,12 @@ func (a *destinationAdmission) consentMode() renderMode {
 // startupPromptYN is the pre-REPL consent reader: one line from stdin, read
 // byte-at-a-time so no buffered read-ahead can steal bytes from the line
 // editor that takes over the same descriptor moments later. A prompt that
-// fails to print is an error, and nothing is read: a question whose prompt
-// fails to write is never answered.
+// fails to print is an errConsentNotShown error, and nothing is read: a
+// question whose prompt fails to write is never answered.
 func startupPromptYN(in io.Reader, out io.Writer) func(context.Context, string) (bool, error) {
 	return func(_ context.Context, prompt string) (bool, error) {
 		if _, err := fmt.Fprint(out, prompt); err != nil {
-			return false, err
+			return false, questionNotShown(err)
 		}
 		var line []byte
 		buf := make([]byte, 1)

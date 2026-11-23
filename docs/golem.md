@@ -759,11 +759,14 @@ holds for every REPL, terminal or piped: consent is read through the same
 line source as goals, so a script that switches to an uncovered remote must
 either pass `-allow-destination` or supply `y`/`yes` on the line after the
 command — any other line denies. If Golem cannot show the section or the
-question (its output fails to write), it never uses an answer to it, and input
-it has not read stays in the terminal: it prints one line on stderr naming what
-it could not show and ends the session with exit status 1 (a closed output pipe
-can end it by SIGPIPE instead; nothing is admitted either way), so the line
-typed for the question is never read as a goal. A tool approval whose question cannot be
+question (its output fails to write), it never uses an answer to it: it prints
+one line on stderr naming what it could not show and ends the session with exit
+status 1 (a closed output pipe can end it by SIGPIPE instead; nothing is
+admitted either way), so the line typed for the question is never read as a
+goal. Input already typed in the terminal is discarded as Golem exits, so the
+shell does not run it (if the discard fails, the stderr line says so); text
+typed after Golem exits, or when a closed output pipe ends it by SIGPIPE first,
+still reaches the shell. A tool approval whose question cannot be
 shown ends the session the same way. Where no consent prompt is bound at all —
 the headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
 `/model`, and startup admission outside a terminal — an uncovered remote fails
