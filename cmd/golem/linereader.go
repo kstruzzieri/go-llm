@@ -153,7 +153,7 @@ func (s *scannerSource) read(ctx context.Context, prompt string, answer bool) (s
 	if answer && werr != nil {
 		s.readActive = false
 		s.mu.Unlock()
-		return "", false, fmt.Errorf("the question %w: %w", errConsentNotShown, werr)
+		return "", false, questionNotShown(werr)
 	}
 	s.mu.Unlock()
 

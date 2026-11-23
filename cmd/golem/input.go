@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -53,14 +54,21 @@ type lineSource interface {
 // errConsentNotShown marks a consent surface golem meant the user to answer
 // that failed to print: the prompt of a ReadAnswer question (a tool approval,
 // a destination question) or the model-server section above a destination
-// question. No answer is read for it, so the line typed for that question
-// stays unread; in the REPL the next read would take it as a goal, so runREPL
-// ends the session on this error (exit status 1) instead of reading on. At
-// startup and in the one-shot modes the error already ends the run.
+// question. No answer is used for it. Nothing is read once the failure is
+// known, so a line typed for that question stays unread (the editor discards
+// one it had already read when a later write failed); in the REPL the next
+// read would take it as a goal, so runREPL ends the session on this error
+// (exit status 1) instead of reading on. At startup and in the one-shot modes
+// the error already ends the run.
 //
 // Its text is a fragment the wrapping site completes, as in "the question
 // could not be shown: <write error>".
 var errConsentNotShown = errors.New("could not be shown")
+
+// questionNotShown is the error of a question whose prompt failed to print.
+func questionNotShown(werr error) error {
+	return fmt.Errorf("the question %w: %w", errConsentNotShown, werr)
+}
 
 // lineSourceMode is the final-dispatch decision about whether an interactive
 // read can happen at all, and if so what kind. Keeping it a pure function of

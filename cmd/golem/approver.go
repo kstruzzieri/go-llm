@@ -138,7 +138,9 @@ func exposureSource(e agent.Exposure) (foreign bool, label string) {
 func (a *replApprover) ask(ctx context.Context, call provider.ToolCall, preview, key string, risk agent.RiskReport, harness bool, notice []string) (agent.ApprovalDecision, error) {
 	if a.beforeWrite != nil {
 		if err := a.beforeWrite(); err != nil {
-			return agent.ApprovalDecision{}, err
+			// The question will not be asked, so it ends the REPL rather
+			// than leave the line typed for it to be read as a goal.
+			return agent.ApprovalDecision{}, questionNotShown(err)
 		}
 	}
 	for _, line := range notice {

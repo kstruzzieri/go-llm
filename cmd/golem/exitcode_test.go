@@ -75,6 +75,24 @@ func TestExitCodeTaxonomy(t *testing.T) {
 	}
 }
 
+// main's stderr line for a question that could not be shown is one line even
+// when errors.Join added a cause, and the error keeps its chain. Other errors
+// keep their text.
+func TestCLIFailureLineConsentNotShownIsOneLine(t *testing.T) {
+	err := errors.Join(questionNotShown(errors.New("write /dev/stdout: broken pipe")), context.Canceled)
+	const want = "the question could not be shown: write /dev/stdout: broken pipe; context canceled"
+	if got := cliFailureLine(err); got != want {
+		t.Errorf("cliFailureLine = %q, want %q", got, want)
+	}
+	if !errors.Is(err, errConsentNotShown) || !errors.Is(err, context.Canceled) || exitCodeFor(err) != 1 {
+		t.Errorf("chain or exit code changed: %v (exit %d)", err, exitCodeFor(err))
+	}
+	other := errors.Join(errors.New("a"), errors.New("b"))
+	if got := cliFailureLine(other); got != "a\nb" {
+		t.Errorf("cliFailureLine(other) = %q, want it unchanged", got)
+	}
+}
+
 func TestHeadlessCallerConfigurationFailuresExitTwo(t *testing.T) {
 	configPath, root, _ := admissionHarness(t, "https://opencode.invalid/zen/go")
 	base := admissionArgs(configPath, root)

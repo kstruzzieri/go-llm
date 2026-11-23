@@ -879,9 +879,21 @@ func main() {
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", runFailureMessage("", err))
+		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", cliFailureLine(err))
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// cliFailureLine is the text of main's stderr line for err. A question that
+// could not be shown promises one line, but errors.Join (a runtime
+// cancellation, an editor restore failure) can add causes on lines of their
+// own, so those are joined with "; ". Only the text changes, never err.
+func cliFailureLine(err error) string {
+	msg := runFailureMessage("", err)
+	if errors.Is(err, errConsentNotShown) {
+		msg = strings.ReplaceAll(msg, "\n", "; ")
+	}
+	return msg
 }
 
 func colorEnabled(out *os.File, noColor bool) bool {

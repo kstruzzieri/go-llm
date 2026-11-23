@@ -132,11 +132,37 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
+// readerFunc adapts a function to io.Reader.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// promptThenFail passes writes through until one carries the prompt, then
+// fails every write, so the failure lands in a read already under way.
+type promptThenFail struct {
+	prompt string
+	seen   atomic.Bool
+}
+
+func (w *promptThenFail) Write(p []byte) (int, error) {
+	// x/term flushes an empty buffer before every read; it hides nothing.
+	if w.seen.Load() && len(p) > 0 {
+		return 0, errors.New("section write failed")
+	}
+	if strings.Contains(string(p), w.prompt) {
+		w.seen.Store(true)
+	}
+	return len(p), nil
+}
+
 // A REPL question that fails to print is never answered, in either line
 // source: the typed-ahead "y" yields false and errConsentNotShown, never
-// consent. The scanner reads nothing for it (no discard read exists for a
-// Ctrl-C to park), so the line typed for it stays unread; the editor has
-// already consumed that line and discards it. The REPL ends on the error.
+// consent, and the REPL ends on the error. When the prompt itself fails,
+// neither source reads anything (no read waits on a question nobody saw, and
+// none is left for a Ctrl-C to park), so the typed-ahead line stays unread.
+// When a later write in the editor's answer window fails, every way the
+// window ends returns the error, and a paste already begun is read through
+// its end marker first.
 func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 	check := func(t *testing.T, src lineSource) {
 		t.Helper()
@@ -167,20 +193,62 @@ func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 		// nothing waits for a line that will never arrive.
 		check(t, newScannerSource(strings.NewReader(""), failWriter{}))
 	})
-	t.Run("editor", func(t *testing.T) {
-		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\rhello\r"), out: failWriter{}})
+	// The editor's prompt fails: whatever is typed ahead, nothing is read.
+	for _, tc := range []struct{ name, in string }{
+		{"editor typed answer", "y\rhello\r"},
+		{"editor EOF", ""},
+		{"editor Ctrl-C", "\x03"},
+		{"editor invalid UTF-8", "\xb2\r"},
+		{"editor oversized paste", pasteOn + strings.Repeat("a", maxGoalBytes+2) + pasteOff},
+		{"editor pasted answer", pasteOn + "y\nmore" + pasteOff + "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &countingReader{r: strings.NewReader(tc.in)}
+			f := newEditorFixture(t, editorOpts{in: in, out: failWriter{}})
+			check(t, f.src)
+			if n := in.reads.Load(); n != 0 {
+				t.Errorf("stdin reads after the failed prompt = %d, want 0", n)
+			}
+		})
+	}
+	t.Run("editor no typeahead", func(t *testing.T) {
+		// Nothing typed yet: the editor must not wait on a keystroke for a
+		// question nobody saw.
+		f := newEditorFixture(t, editorOpts{in: readerFunc(func([]byte) (int, error) {
+			t.Error("stdin read for a question that did not print")
+			return 0, io.EOF
+		}), out: failWriter{}})
 		check(t, f.src)
+	})
+	// The prompt printed and a later write in the window failed: the read is
+	// under way when the failure lands.
+	t.Run("editor failure mid-read", func(t *testing.T) {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\rhello\r"), out: &promptThenFail{prompt: "allow? "}})
+		check(t, f.src)
+		// The line read for the question is discarded; the next is not.
 		line, ok, err := f.readGoal(t)
 		if line != "hello" || !ok || err != nil {
 			t.Errorf("goal read after the refused answer = %q, %v, %v; want \"hello\"", line, ok, err)
 		}
 	})
-	t.Run("editor pasted answer", func(t *testing.T) {
-		// A pasted answer to a question that did not print is not a plain
-		// denial either: the session must end, so the error comes back.
-		f := newEditorFixture(t, editorOpts{in: strings.NewReader(pasteOn + "y\nmore" + pasteOff + "\r"), out: failWriter{}})
-		check(t, f.src)
-	})
+	for _, tc := range []struct{ name, in string }{
+		// A long pasted answer: before the drain moved ahead of the check,
+		// most of it stayed in the input queue, and after golem exited the
+		// shell ran it.
+		{"editor paste drained", pasteOn + "y\n" + strings.Repeat("echo PWNED\n", 1000) + pasteOff},
+		{"editor paste then EOF", pasteOn + "y\nmore"},
+		{"editor oversized paste mid-read", pasteOn + strings.Repeat("a", maxGoalBytes+2) + pasteOff},
+		{"editor invalid UTF-8 in paste", pasteOn + "y\n\xb2\n" + pasteOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := strings.NewReader(tc.in)
+			f := newEditorFixture(t, editorOpts{in: in, out: &promptThenFail{prompt: "allow? "}})
+			check(t, f.src)
+			if n := in.Len(); n != 0 {
+				t.Errorf("%d of %d input bytes left unread, want 0", n, len(tc.in))
+			}
+		})
+	}
 	t.Run("editor recovers", func(t *testing.T) {
 		// One transient failure fails only its own question: each read
 		// window starts with no recorded write error.
