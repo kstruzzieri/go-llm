@@ -107,9 +107,23 @@ func TestLineSourcePromptYN(t *testing.T) {
 	}
 }
 
+// flakyWriter fails every write while failing is set, then passes through.
+type flakyWriter struct {
+	failing *atomic.Bool
+	w       io.Writer
+}
+
+func (f flakyWriter) Write(p []byte) (int, error) {
+	if f.failing.Load() {
+		return 0, errors.New("transient write failure")
+	}
+	return f.w.Write(p)
+}
+
 // A REPL question that fails to print is never answered, in either line
-// source: the typed-ahead "y" yields false and an error, never consent. Goal
-// reads are unchanged, so the next goal still reads.
+// source: the typed-ahead "y" yields false and an error, never consent. The
+// line typed for it is consumed and discarded (never kept as a goal), and
+// goal reads are unchanged, so the next goal still reads.
 func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 	check := func(t *testing.T, src lineSource) {
 		t.Helper()
@@ -122,13 +136,19 @@ func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 		}
 	}
 	t.Run("scanner", func(t *testing.T) {
-		src := newScannerSource(strings.NewReader("y\n"), failWriter{})
+		src := newScannerSource(strings.NewReader("y\nhello\n"), failWriter{})
 		check(t, src)
-		// The answer was left unread: the next read sees it.
+		// The answer line was consumed and dropped: the next read sees the
+		// line after it, never the "y" as a goal.
 		line, ok, err := src.ReadGoal(context.Background(), promptText)
-		if line != "y" || !ok || err != nil {
-			t.Errorf("next read = %q, %v, %v; want the unread \"y\"", line, ok, err)
+		if line != "hello" || !ok || err != nil {
+			t.Errorf("next read = %q, %v, %v; want \"hello\"", line, ok, err)
 		}
+	})
+	t.Run("scanner EOF", func(t *testing.T) {
+		// Input ends right after the failed prompt: the error comes back and
+		// nothing waits for a line that will never arrive.
+		check(t, newScannerSource(strings.NewReader(""), failWriter{}))
 	})
 	t.Run("editor", func(t *testing.T) {
 		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\rhello\r"), out: failWriter{}})
@@ -136,6 +156,20 @@ func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
 		line, ok, err := f.readGoal(t)
 		if line != "hello" || !ok || err != nil {
 			t.Errorf("goal read after the refused answer = %q, %v, %v; want \"hello\"", line, ok, err)
+		}
+	})
+	t.Run("editor recovers", func(t *testing.T) {
+		// One transient failure fails only its own question: each read
+		// window starts with no recorded write error.
+		var failing atomic.Bool
+		failing.Store(true)
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\ry\r"), out: flakyWriter{&failing, io.Discard}})
+		if line, ok, err := f.src.ReadAnswer(context.Background(), "allow? "); err == nil {
+			t.Fatalf("answer while the writer fails = %q, %v, nil; want an error", line, ok)
+		}
+		failing.Store(false)
+		if line, ok, err := f.src.ReadAnswer(context.Background(), "allow? "); line != "y" || !ok || err != nil {
+			t.Errorf("answer after the writer recovered = %q, %v, %v; want \"y\", true, nil", line, ok, err)
 		}
 	})
 }

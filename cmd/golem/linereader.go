@@ -133,9 +133,11 @@ func (s *scannerSource) ReadGoal(ctx context.Context, prompt string) (string, bo
 	return s.read(ctx, prompt, false)
 }
 
-// ReadAnswer reads nothing when its question fails to print: a typed-ahead
-// answer must not reply to a question the user never saw, so the write error
-// is returned and the input stays unread.
+// ReadAnswer never answers a question that failed to print: a typed-ahead
+// answer must not reply to a question the user never saw. As in the editor,
+// the line typed for it is still consumed as the answer (the docs promise a
+// line after the command is never kept as a goal) and then discarded, and the
+// write error is returned.
 func (s *scannerSource) ReadAnswer(ctx context.Context, prompt string) (string, bool, error) {
 	return s.read(ctx, prompt, true)
 }
@@ -151,7 +153,10 @@ func (s *scannerSource) read(ctx context.Context, prompt string, answer bool) (s
 	if answer && werr != nil {
 		s.readActive = false
 		s.mu.Unlock()
-		return "", false, fmt.Errorf("golem: the question could not be shown, so no answer was read: %w", werr)
+		// Read and drop the answer line. EOF and cancellation end the read
+		// as they would any other; either way the answer is an error.
+		_, _, _ = s.lr.ReadLine(ctx)
+		return "", false, fmt.Errorf("golem: the question could not be shown, so its answer was discarded: %w", werr)
 	}
 	s.mu.Unlock()
 
