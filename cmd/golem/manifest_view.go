@@ -61,7 +61,7 @@ func purposeLabel(purpose string) (label string, metadata bool) {
 func destinationName(name string) string {
 	bare := name != ""
 	for _, r := range name {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '_' && r != '-' {
 			bare = false
 			break
 		}

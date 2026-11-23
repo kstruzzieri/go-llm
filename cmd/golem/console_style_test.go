@@ -28,8 +28,8 @@ func TestStyleForNonTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
-	defer w.Close()
+	defer func() { _ = r.Close() }()
+	defer func() { _ = w.Close() }()
 	if got := styleFor(w, false); got != (consoleStyle{false, 80}) {
 		t.Fatalf("pipe: %+v", got)
 	}
@@ -40,7 +40,7 @@ func TestStyleForWidthFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	for _, tc := range []struct {
 		name string
 		ops  sizeOps
@@ -62,7 +62,7 @@ func TestStyleForColor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("TERM", "xterm")
 	if got := styleForOps(sizeOps{120, nil}, f, false); got != (consoleStyle{true, 120}) {
