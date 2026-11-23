@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,6 +152,146 @@ func uncoveredAll(dests []provider.Destination, p provider.DestinationPolicy) []
 		}
 	}
 	return out
+}
+
+// manifestOpts frames one rendering of the model-server section.
+type manifestOpts struct {
+	// style is the color and width of the writer rendered to.
+	style consoleStyle
+	// operation is "" for the session view, or the subcommand ("models",
+	// "index", "source") the section describes.
+	operation string
+	// cleared marks a listing after /grants clear.
+	cleared bool
+}
+
+// manifestNameMax caps the shared name column; a longer name sits alone on
+// its header line.
+const manifestNameMax = 16
+
+// rowLabelCols is the width of a row label ("used for  ", "checks    "), so
+// wrapped items line up under the first one.
+const rowLabelCols = 10
+
+// renderManifest writes the model-server section for m: a rule, then the
+// servers on this machine and the remote ones, one block per destination with
+// its name, URL, consent state (remotes only), the purposes it serves, the
+// metadata checks it gets, and where its key comes from. Untrusted fields go
+// through displayField and destinationName; layout is measured on the
+// uncolored text. states must hold every remote: a missing entry panics
+// rather than defaulting to a state. An empty manifest writes nothing.
+func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string, states map[provider.Destination]remoteState, opt manifestOpts) {
+	dests := m.Destinations()
+	if len(dests) == 0 {
+		return
+	}
+	sort.SliceStable(dests, func(i, j int) bool {
+		if dests[i].IsLocal() != dests[j].IsLocal() {
+			return dests[i].IsLocal()
+		}
+		return dests[i].String() < dests[j].String()
+	})
+	// Labels in manifest order; never deduplicated after translation, so a
+	// raw "chat" purpose stays distinct from the "agent" label "chat".
+	uses := map[provider.Destination][]string{}
+	checks := map[provider.Destination][]string{}
+	for _, e := range m.Edges() {
+		label, metadata := purposeLabel(e.Purpose)
+		if e.IsFallback {
+			label += " (fallback)"
+		}
+		if metadata {
+			checks[e.Destination] = append(checks[e.Destination], label)
+		} else {
+			uses[e.Destination] = append(uses[e.Destination], label)
+		}
+	}
+	nameCol := 0
+	for _, d := range dests {
+		nameCol = max(nameCol, displayCols(destinationName(d.Provider())))
+	}
+	nameCol = min(manifestNameMax, nameCol)
+	indent := strings.Repeat(" ", 2+nameCol+2)
+
+	s := opt.style
+	var b strings.Builder
+	line := func(text string) {
+		b.WriteString(text)
+		b.WriteByte('\n')
+	}
+	// row wraps the uncolored items, then paints only the label.
+	row := func(label string, items []string) {
+		if len(items) == 0 {
+			return
+		}
+		first := indent + label + strings.Repeat(" ", rowLabelCols-len(label))
+		for i, l := range wrapList(items, first, indent+strings.Repeat(" ", rowLabelCols), s.width) {
+			if i == 0 {
+				l = indent + s.paint(sgrCyan, label) + l[len(indent)+len(label):]
+			}
+			line(l)
+		}
+	}
+
+	sub := "where this session's model requests can go"
+	usesLabel := "used for"
+	switch opt.operation {
+	case "":
+	case "models":
+		sub = "servers golem models lists and checks"
+		usesLabel = "in route"
+	default:
+		sub = "where golem " + opt.operation + " sends model requests"
+	}
+	line(s.rule("model servers", sub))
+	if opt.cleared {
+		line(s.paint(sgrDim, "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again"))
+	}
+
+	asking := false
+	for i, d := range dests {
+		if i == 0 && d.IsLocal() {
+			line(s.paint(sgrGreen, "On this machine") + " " + s.paint(sgrDim, "(allowed automatically)"))
+		}
+		if !d.IsLocal() && (i == 0 || dests[i-1].IsLocal()) {
+			line(s.paint(sgrYellowBold, "Remote"))
+		}
+		// The URL is never wrapped or cut: it is the identity being granted.
+		name, url := destinationName(d.Provider()), displayField(d.BaseURL())
+		head := "  " + name + strings.Repeat(" ", max(0, nameCol-displayCols(name))) + "  " + url
+		if displayCols(name) > nameCol {
+			line("  " + name)
+			head = indent + url
+		}
+		if d.IsLocal() {
+			line(head)
+		} else {
+			st, ok := states[d]
+			if !ok {
+				panic(fmt.Sprintf("golem: renderManifest: no consent state for remote %q", d.String()))
+			}
+			asking = asking || st == remoteNeedsOK
+			sgr := sgrYellow
+			if st == remoteAllowedByFlag || st == remoteAllowedEarlier {
+				sgr = sgrDim
+			}
+			if text := st.text(); displayCols(head)+2+displayCols(text) > s.width {
+				line(head)
+				line(indent + s.paint(sgr, text))
+			} else {
+				line(head + "  " + s.paint(sgr, text))
+			}
+		}
+		row(usesLabel, uses[d])
+		row("checks", checks[d])
+		if k, ok := keySources[d.Provider()]; ok {
+			line(indent + s.paint(sgrDim, displayField(k)))
+		}
+	}
+	if asking {
+		b.WriteByte('\n')
+	}
+	_, _ = io.WriteString(w, b.String())
 }
 
 // consentQuestion is the one-line session consent prompt for the uncovered

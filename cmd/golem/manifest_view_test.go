@@ -1,6 +1,8 @@
 package main
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -141,5 +143,343 @@ func TestConsentQuestion(t *testing.T) {
 	}
 	if strings.Contains(q("a"), "\x1b") {
 		t.Error("question carries ESC")
+	}
+}
+
+// testManifest builds a manifest from edges or fails the test.
+func testManifest(t *testing.T, edges ...provider.DestinationEdge) *provider.DestinationManifest {
+	t.Helper()
+	m, err := provider.NewDestinationManifest(edges...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// renderString is renderManifest into a string.
+func renderString(m *provider.DestinationManifest, keys map[string]string, states map[provider.Destination]remoteState, opt manifestOpts) string {
+	var b strings.Builder
+	renderManifest(&b, m, keys, states, opt)
+	return b.String()
+}
+
+// plain80 is the color-off, 80-column style most renderer tests use.
+var plain80 = manifestOpts{style: consoleStyle{false, 80}}
+
+// dailyManifest is the daily config: a local llama.cpp server and a keyed
+// remote that is a chat fallback and the summaries server.
+func dailyManifest(t *testing.T) (*provider.DestinationManifest, provider.Destination) {
+	t.Helper()
+	local := admDest(t, "llamacpp", "http://localhost:8090")
+	remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
+	return testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: local},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: local},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeCapabilityProbe, Destination: local},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeSlotProbe, Destination: local},
+		provider.DestinationEdge{Purpose: "agent", Destination: remote, IsFallback: true},
+		provider.DestinationEdge{Purpose: "summarize", Destination: remote},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: remote},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeCapabilityProbe, Destination: remote},
+	), remote
+}
+
+// dailyGolden is the daily config rendered at 80 columns, color off.
+const dailyGolden = "\u2500\u2500 model servers \u2500\u2500 where this session's model requests can go " +
+	"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+	"On this machine (allowed automatically)\n" +
+	"  llamacpp  http://localhost:8090\n" +
+	"            used for  chat\n" +
+	"            checks    capabilities, model list, slot status\n" +
+	"Remote\n" +
+	"  opencode  https://opencode.ai/zen/go  needs your OK\n" +
+	"            used for  chat (fallback), summaries\n" +
+	"            checks    capabilities, model list\n" +
+	"            sends api_key from $OC_GO_API_KEY\n" +
+	"\n"
+
+func TestRenderManifestDailyConfig(t *testing.T) {
+	m, remote := dailyManifest(t)
+	got := renderString(m, map[string]string{"opencode": "sends api_key from $OC_GO_API_KEY"},
+		map[provider.Destination]remoteState{remote: remoteNeedsOK}, plain80)
+	if got != dailyGolden {
+		t.Errorf("got:\n%s\nwant:\n%s\n(%q)", got, dailyGolden, got)
+	}
+	if !strings.HasSuffix(got, "$OC_GO_API_KEY\n\n") {
+		t.Errorf("no trailing empty line after an asking render: %q", got)
+	}
+}
+
+func TestRenderManifestLocalOnly(t *testing.T) {
+	local := admDest(t, "llamacpp", "http://localhost:8090")
+	got := renderString(testManifest(t, provider.DestinationEdge{Purpose: "agent", Destination: local}), nil, nil, plain80)
+	if strings.Contains(got, "Remote") || strings.HasSuffix(got, "\n\n") {
+		t.Errorf("local-only render:\n%q", got)
+	}
+	if !strings.Contains(got, "\nOn this machine (allowed automatically)\n  llamacpp  http://localhost:8090\n") {
+		t.Errorf("local group missing:\n%s", got)
+	}
+}
+
+func TestRenderManifestEmpty(t *testing.T) {
+	if got := renderString(testManifest(t), nil, nil, plain80); got != "" {
+		t.Errorf("empty manifest rendered %q", got)
+	}
+}
+
+func TestRenderManifestStates(t *testing.T) {
+	states := map[provider.Destination]remoteState{}
+	var edges []provider.DestinationEdge
+	for i, st := range []remoteState{remoteAllowedByFlag, remoteAllowedEarlier, remoteNotAllowed, remoteRefused} {
+		d := admDest(t, "r"+strconv.Itoa(i), "https://r"+strconv.Itoa(i)+".example.com")
+		states[d] = st
+		edges = append(edges, provider.DestinationEdge{Purpose: "agent", Destination: d})
+	}
+	got := renderString(testManifest(t, edges...), nil, states, manifestOpts{style: consoleStyle{false, 120}})
+	for d, st := range states {
+		want := "  " + d.Provider() + "  " + d.BaseURL() + "  " + st.text() + "\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.HasSuffix(got, "\n\n") || strings.Contains(got, remoteNeedsOK.text()) {
+		t.Errorf("non-asking render has a trailing empty line or asks:\n%q", got)
+	}
+}
+
+func TestRenderManifestCleared(t *testing.T) {
+	m, remote := dailyManifest(t)
+	got := renderString(m, nil, map[provider.Destination]remoteState{remote: remoteNotAllowed},
+		manifestOpts{style: consoleStyle{false, 80}, cleared: true})
+	const line = "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again\n"
+	if n := strings.Count(got, line); n != 1 {
+		t.Errorf("cleared line appears %d times:\n%s", n, got)
+	}
+	if strings.Index(got, line) != strings.Index(got, "\n")+1 {
+		t.Errorf("cleared line is not right under the rule:\n%s", got)
+	}
+	if strings.Contains(renderString(m, nil, map[provider.Destination]remoteState{remote: remoteNotAllowed}, plain80), "access cleared") {
+		t.Error("cleared line shown without cleared")
+	}
+}
+
+func TestRenderManifestModels(t *testing.T) {
+	m, remote := dailyManifest(t)
+	states := map[provider.Destination]remoteState{remote: remoteRefused}
+	got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, 80}, operation: "models"})
+	for _, want := range []string{
+		"\u2500\u2500 servers golem models lists and checks \u2500",
+		"            in route  chat (fallback), summaries\n",
+		"            checks    capabilities, model list\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("models render missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "used for") {
+		t.Errorf("models render says used for:\n%s", got)
+	}
+	for _, op := range []string{"index", "source"} {
+		got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, 80}, operation: op})
+		if want := "\u2500\u2500 where golem " + op + " sends model requests \u2500"; !strings.Contains(got, want) {
+			t.Errorf("%s subtitle missing %q:\n%s", op, want, got)
+		}
+	}
+}
+
+func TestRenderManifestUnknownPurposesDistinct(t *testing.T) {
+	local := admDest(t, "llamacpp", "http://localhost:8090")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: local},
+		provider.DestinationEdge{Purpose: "chat", Destination: local},
+	)
+	if got := renderString(m, nil, nil, plain80); !strings.Contains(got, "            used for  chat, other: chat\n") {
+		t.Errorf("purposes merged:\n%s", got)
+	}
+}
+
+func TestRenderManifestHostileFields(t *testing.T) {
+	// NewDestination accepts a hostname carrying U+202E, so the hostile URL
+	// arrives through the real constructor.
+	d := admDest(t, "alpha and beta", "https://a\u202eb.example.com")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: d},
+		provider.DestinationEdge{Purpose: "evil\x1b[31m\npurpose", Destination: d},
+	)
+	got := renderString(m, map[string]string{"alpha and beta": "sends api_key from $A\nB"},
+		map[provider.Destination]remoteState{d: remoteNeedsOK}, plain80)
+	if strings.Contains(got, "\u202e") || strings.Contains(got, "\x1b") {
+		t.Errorf("raw bidi or ESC in output: %q", got)
+	}
+	for _, want := range []string{
+		"\n  \"alpha and beta\"  https://a\\u202eb.example.com  needs your OK\n",
+		"\n                    used for  chat, other: evil\\x1b[31m\\npurpose\n",
+		"\n                    sends api_key from $A\\nB\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// rule, heading, header, uses, key line, then the empty line.
+	if n := strings.Count(got, "\n"); n != 6 {
+		t.Errorf("rendered %d newlines, want 6:\n%s", n, got)
+	}
+}
+
+func TestRenderManifestNarrowAndWide(t *testing.T) {
+	local := admDest(t, "llamacpp", "http://localhost:8090")
+	remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
+	longURL := "https://" + strings.Repeat("w", 108) + ".com"
+	wide := admDest(t, "wide", longURL)
+	longName := admDest(t, "abcdefghijklmnopqrst", "https://long.example.com")
+	var edges []provider.DestinationEdge
+	for _, p := range []string{"agent", "planning", "summarize", "embedding", "route", "verify"} {
+		edges = append(edges, provider.DestinationEdge{Purpose: p, Destination: local})
+	}
+	edges = append(edges,
+		provider.DestinationEdge{Purpose: "agent", Destination: remote, IsFallback: true},
+		provider.DestinationEdge{Purpose: "agent", Destination: wide, IsFallback: true},
+		provider.DestinationEdge{Purpose: "agent", Destination: longName, IsFallback: true},
+	)
+	m := testManifest(t, edges...)
+	states := map[provider.Destination]remoteState{remote: remoteNeedsOK, wide: remoteRefused, longName: remoteAllowedByFlag}
+	const value = 20 // 2 + nameCol (capped at 16) + 2
+	indent := strings.Repeat(" ", value)
+	// 60 and 61 straddle the opencode header plus its state (61 columns).
+	for _, width := range []int{30, 40, 60, 61, 80, 120} {
+		got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, width}})
+		if !strings.Contains(got, "  "+longURL+"\n") {
+			t.Errorf("width %d: long URL broken:\n%s", width, got)
+		}
+		if !strings.Contains(got, "  "+longURL+"\n"+indent+remoteRefused.text()+"\n") {
+			t.Errorf("width %d: state of the over-wide header not on its own line:\n%s", width, got)
+		}
+		head := "  opencode          https://opencode.ai/zen/go"
+		inline := head + "  " + remoteNeedsOK.text()
+		fits := displayCols(inline) <= width
+		if fits && !strings.Contains(got, inline+"\n") || !fits && !strings.Contains(got, head+"\n"+indent+remoteNeedsOK.text()+"\n") {
+			t.Errorf("width %d: state placement (fits=%v):\n%s", width, fits, got)
+		}
+		if !strings.Contains(got, "\n  abcdefghijklmnopqrst\n"+indent+"https://long.example.com") {
+			t.Errorf("width %d: long name did not move the URL to its own line:\n%s", width, got)
+		}
+		lines := strings.Split(got, "\n")
+		conts := 0
+		for i, l := range lines {
+			if !strings.HasPrefix(l, indent+"used for  ") {
+				continue
+			}
+			for _, c := range lines[i+1:] {
+				if !strings.HasPrefix(c, indent+"          ") {
+					break
+				}
+				if c[value+10] == ' ' {
+					t.Errorf("width %d: continuation not aligned under the first item: %q", width, c)
+				}
+				conts++
+			}
+		}
+		if width <= 80 && conts == 0 {
+			t.Errorf("width %d: uses row never wrapped:\n%s", width, got)
+		}
+		if width == 120 && conts != 0 {
+			t.Errorf("width 120: uses row wrapped:\n%s", got)
+		}
+	}
+
+	cjk := admDest(t, "\u4e2d\u6587", "https://cjk.example.com")
+	mark := admDest(t, "e\u0301", "https://mark.example.com")
+	m = testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: cjk},
+		provider.DestinationEdge{Purpose: "agent", Destination: mark},
+	)
+	got := renderString(m, nil, map[provider.Destination]remoteState{cjk: remoteRefused, mark: remoteRefused}, plain80)
+	want := 2 + displayCols(destinationName(cjk.Provider())) + 2
+	for _, url := range []string{"https://cjk.example.com", "https://mark.example.com"} {
+		found := false
+		for _, l := range strings.Split(got, "\n") {
+			if i := strings.Index(l, url); i >= 0 {
+				found = true
+				if c := displayCols(l[:i]); c != want {
+					t.Errorf("%s starts at column %d, want %d:\n%s", url, c, want, got)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s missing:\n%s", url, got)
+		}
+	}
+}
+
+// sgrPattern matches one SGR escape sequence.
+var sgrPattern = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func TestRenderManifestColor(t *testing.T) {
+	m, remote := dailyManifest(t)
+	keys := map[string]string{"opencode": "sends api_key from $OC_GO_API_KEY"}
+	for _, st := range []remoteState{remoteNeedsOK, remoteAllowedByFlag, remoteRefused} {
+		states := map[provider.Destination]remoteState{remote: st}
+		on := renderString(m, keys, states, manifestOpts{style: consoleStyle{true, 80}, cleared: true})
+		off := renderString(m, keys, states, manifestOpts{style: consoleStyle{false, 80}, cleared: true})
+		if !strings.Contains(on, "\x1b[1;33mRemote\x1b[0m") {
+			t.Errorf("Remote heading not yellow bold: %q", on)
+		}
+		if stripped := sgrPattern.ReplaceAllString(on, ""); stripped != off {
+			t.Errorf("state %d: stripped color output differs:\n%q\nwant\n%q", st, stripped, off)
+		}
+	}
+	on := renderString(m, keys, map[provider.Destination]remoteState{remote: remoteNeedsOK}, manifestOpts{style: consoleStyle{true, 80}})
+	for _, want := range []string{
+		"\x1b[32mOn this machine\x1b[0m \x1b[2m(allowed automatically)\x1b[0m\n",
+		"  \x1b[33mneeds your OK\x1b[0m\n",
+		"            \x1b[36mused for\x1b[0m  chat\n",
+		"            \x1b[36mchecks\x1b[0m    capabilities",
+		"            \x1b[2msends api_key from $OC_GO_API_KEY\x1b[0m\n",
+	} {
+		if !strings.Contains(on, want) {
+			t.Errorf("color render missing %q:\n%q", want, on)
+		}
+	}
+	flagged := renderString(m, keys, map[provider.Destination]remoteState{remote: remoteAllowedByFlag}, manifestOpts{style: consoleStyle{true, 80}})
+	if !strings.Contains(flagged, "  \x1b[2mallowed by -allow-destination\x1b[0m\n") {
+		t.Errorf("allowed state not dim: %q", flagged)
+	}
+}
+
+func TestRenderManifestMissingStatePanics(t *testing.T) {
+	m, _ := dailyManifest(t)
+	defer func() {
+		if recover() == nil {
+			t.Error("a remote without a state rendered instead of panicking")
+		}
+	}()
+	renderString(m, nil, map[provider.Destination]remoteState{}, plain80)
+}
+
+func TestRenderManifestKeySourceLines(t *testing.T) {
+	ref := admDest(t, "ref", "https://one.example.com")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: admDest(t, "lit", "http://127.0.0.1:8090")},
+		provider.DestinationEdge{Purpose: "chat", Destination: admDest(t, "none", "http://127.0.0.1:8091")},
+		provider.DestinationEdge{Purpose: "summarize", Destination: ref},
+	)
+	got := renderString(m, map[string]string{
+		"ref": "sends api_key from $CANARY_VAR",
+		"lit": "sends a literal api_key",
+	}, map[provider.Destination]remoteState{ref: remoteNeedsOK}, plain80)
+	want := "\u2500\u2500 model servers \u2500\u2500 where this session's model requests can go " + strings.Repeat("\u2500", 17) + "\n" +
+		"On this machine (allowed automatically)\n" +
+		"  lit   http://127.0.0.1:8090\n" +
+		"        used for  chat\n" +
+		"        sends a literal api_key\n" +
+		"  none  http://127.0.0.1:8091\n" +
+		"        used for  other: chat\n" +
+		"Remote\n" +
+		"  ref   https://one.example.com  needs your OK\n" +
+		"        used for  summaries\n" +
+		"        sends api_key from $CANARY_VAR\n" +
+		"\n"
+	if got != want {
+		t.Errorf("rendered block:\n%s\nwant:\n%s", got, want)
 	}
 }

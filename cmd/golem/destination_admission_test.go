@@ -195,8 +195,8 @@ func TestAdmissionRendersDedupedManifestWithEdges(t *testing.T) {
 		t.Errorf("remote destination rendered %d times, want exactly 1 (deduped): %s", n, got)
 	}
 	for _, want := range []string{
-		"llamacpp", "opencode", "local", "remote",
-		"agent (fallback)", "summarize", "model-refresh",
+		"llamacpp", "opencode", "On this machine (allowed automatically)", "\nRemote\n",
+		"chat (fallback)", "summaries", "model list",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("manifest missing %q:\n%s", want, got)
@@ -628,7 +628,7 @@ func TestAdmissionExtendAdmitsNewRemoteWithOneConsent(t *testing.T) {
 	// surface extend wrote must be the PROPOSED manifest: approving a grant
 	// for a destination the user was never shown is consent to nothing.
 	proposed := out.String()[startupRender:]
-	for _, want := range []string{"cloud", "https://cloud.example.com", "remote", "agent (fallback)", "model-refresh"} {
+	for _, want := range []string{"cloud", "https://cloud.example.com", "\nRemote\n", "chat (fallback)", "model list"} {
 		if !strings.Contains(proposed, want) {
 			t.Errorf("consent surface written by extend missing %q:\n%s", want, proposed)
 		}
@@ -1049,7 +1049,7 @@ func TestAdmissionExtendAfterRevoke(t *testing.T) {
 		if p.calls != 2 {
 			t.Errorf("prompt consulted %d times across startup and re-admission, want 2 (one decision each)", p.calls)
 		}
-		if n := strings.Count(out.String(), "destinations:"); n != 2 {
+		if n := strings.Count(out.String(), "── model servers"); n != 2 {
 			t.Errorf("manifest rendered %d times, want 2 (one per publication, not one per stage):\n%s", n, out.String())
 		}
 		for _, e := range append(admEdges(t), localCandidate...) {
@@ -1314,33 +1314,5 @@ func TestKeySourceLines(t *testing.T) {
 	}
 	if got := keySourceLines(nil); got != nil {
 		t.Errorf("keySourceLines(nil) = %v, want nil", got)
-	}
-}
-
-func TestRenderManifestKeySourceLines(t *testing.T) {
-	m, err := provider.NewDestinationManifest(
-		provider.DestinationEdge{Purpose: "agent", Destination: admDest(t, "lit", "http://127.0.0.1:8090")},
-		provider.DestinationEdge{Purpose: "chat", Destination: admDest(t, "none", "http://127.0.0.1:8091")},
-		provider.DestinationEdge{Purpose: "summarize", Destination: admDest(t, "ref", "https://one.example.com")},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out strings.Builder
-	renderManifest(&out, m, map[string]string{
-		"ref": "sends api_key from $CANARY_VAR",
-		"lit": "sends a literal api_key",
-	})
-	want := "destinations:\n" +
-		"  lit  http://127.0.0.1:8090  (local, auto-admitted)\n" +
-		"      agent\n" +
-		"      sends a literal api_key\n" +
-		"  none  http://127.0.0.1:8091  (local, auto-admitted)\n" +
-		"      chat\n" +
-		"  ref  https://one.example.com  (remote)\n" +
-		"      summarize\n" +
-		"      sends api_key from $CANARY_VAR\n"
-	if out.String() != want {
-		t.Errorf("rendered block:\n%s\nwant:\n%s", out.String(), want)
 	}
 }

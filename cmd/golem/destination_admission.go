@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 
@@ -137,11 +136,13 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 		return nil
 	}
 
-	a.render(a.out)
-
 	// At startup the baseline is only the exact allow flags (plus the
 	// loopback rule inside Permits): nothing has been granted yet.
-	policy, _, err := a.consent(ctx, a.manifest, provider.NewDestinationPolicy(a.allowed...))
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	renderManifest(a.out, a.manifest, a.keySources, remoteStates(a.manifest, flags, flags, a.consentMode()),
+		manifestOpts{style: styleFor(a.out, false)})
+
+	policy, _, err := a.consent(ctx, a.manifest, flags)
 	if err != nil {
 		return err
 	}
@@ -251,14 +252,16 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 	// revoked, granted is authority the user WITHDREW: reusing it would
 	// silently re-admit a remote they cleared, so only the exact flags (and
 	// the normal loopback rule inside Permits) survive a revoke.
-	baseline := provider.NewDestinationPolicy(a.allowed...)
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	baseline := flags
 	if a.admitted {
 		baseline = a.granted
 	}
 
 	// Rendered before the decision: the question refers to "the remote
 	// destinations listed above", and it asks about the PROPOSED manifest.
-	renderManifest(a.out, m, a.keySources)
+	renderManifest(a.out, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
+		manifestOpts{style: styleFor(a.out, false)})
 
 	policy, newGrant, err := a.consent(ctx, m, baseline)
 	if err != nil {
@@ -382,50 +385,27 @@ func firstUncovered(dests []provider.Destination, policy provider.DestinationPol
 	return nil
 }
 
-// render writes the consent surface: one line per deduplicated destination,
-// grouped local-first, each followed by the purposes that reach it with
-// primary/fallback marking. D14 fields — provider key, canonical URL, purpose,
-// marker, locality — plus, for a provider that sends a key, the key source
-// (#776 D5: variable names or "literal", never a value). Deterministic order.
+// render writes the /grants listing of the session's manifest: every remote
+// with its current state, plus the cleared note while /grants clear has left
+// it unadmitted. The consent surfaces (ensure, extend) render through
+// renderManifest directly, with asking or refusing states.
 func (a *destinationAdmission) render(w io.Writer) {
-	renderManifest(w, a.manifest, a.keySources)
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	baseline := flags
+	if a.admitted {
+		baseline = a.granted
+	}
+	renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
+		manifestOpts{style: styleFor(w, false), cleared: !a.admitted})
 }
 
-// renderManifest is render over an arbitrary manifest — extend renders the
-// PROPOSED one, which is exactly what its consent question refers to.
-func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string) {
-	byDest := make(map[provider.Destination][]provider.DestinationEdge)
-	for _, e := range m.Edges() {
-		byDest[e.Destination] = append(byDest[e.Destination], e)
+// consentMode is the render mode for a manifest shown before the consent
+// decision: asking when a question can be asked, refusing otherwise.
+func (a *destinationAdmission) consentMode() renderMode {
+	if a.interactive && a.promptYN != nil {
+		return renderAsking
 	}
-	dests := m.Destinations()
-	sort.SliceStable(dests, func(i, j int) bool {
-		if dests[i].IsLocal() != dests[j].IsLocal() {
-			return dests[i].IsLocal()
-		}
-		return dests[i].String() < dests[j].String()
-	})
-
-	_, _ = fmt.Fprintln(w, "destinations:")
-	for _, d := range dests {
-		kind := "remote"
-		if d.IsLocal() {
-			kind = "local, auto-admitted"
-		}
-		_, _ = fmt.Fprintf(w, "  %s  %s  (%s)\n", d.Provider(), d.BaseURL(), kind)
-		var parts []string
-		for _, e := range byDest[d] {
-			label := e.Purpose
-			if e.IsFallback {
-				label += " (fallback)"
-			}
-			parts = append(parts, label)
-		}
-		_, _ = fmt.Fprintf(w, "      %s\n", strings.Join(parts, ", "))
-		if line, ok := keySources[d.Provider()]; ok {
-			_, _ = fmt.Fprintf(w, "      %s\n", line)
-		}
-	}
+	return renderRefusing
 }
 
 // startupPromptYN is the pre-REPL consent reader: one line from stdin, read

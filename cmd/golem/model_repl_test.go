@@ -1614,7 +1614,12 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 			t.Errorf("canary leaked into slash output: %q", got)
 		}
 	})
-	if !strings.Contains(atPrompt, "      sends api_key from $CANARY_VAR\n") {
+	// Anchored to the cloud block: the header line, then the value-column
+	// rows down to the key line.
+	if !strings.Contains(atPrompt, "\n  cloud    https://model-switch.invalid/v1  needs your OK\n"+
+		"           used for  chat\n"+
+		"           checks    model list\n"+
+		"           sends api_key from $CANARY_VAR\n") {
 		t.Errorf("extension consent screen missing the key source:\n%s", atPrompt)
 	}
 	if strings.Contains(atPrompt, canary) || strings.Contains(stderr, canary) {

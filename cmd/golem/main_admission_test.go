@@ -106,7 +106,7 @@ func TestRunOneShotOmitsRemoteSummarizeRoute(t *testing.T) {
 		t.Error("local provider received no requests; the one-shot turn cannot have run")
 	}
 	errOut := readRunTestFile(t, stderr)
-	if strings.Contains(errOut, "summarize") || strings.Contains(errOut, "opencode.invalid") {
+	if strings.Contains(errOut, "summaries") || strings.Contains(errOut, "opencode.invalid") {
 		t.Errorf("one-shot admitted unreachable summarize fallback:\n%s", errOut)
 	}
 }
@@ -168,7 +168,7 @@ func TestRunGroundingRoutesJoinTheManifest(t *testing.T) {
 		t.Fatalf("grounding run with remote fallback succeeded\nstderr:\n%s", readRunTestFile(t, stderr))
 	}
 	errOut := readRunTestFile(t, stderr)
-	for _, want := range []string{"verify", "extract"} {
+	for _, want := range []string{"verification", "extraction"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("manifest missing grounding purpose %q:\n%s", want, errOut)
 		}
@@ -227,7 +227,7 @@ func TestRunLocalOnlyRemainsPromptFree(t *testing.T) {
 	if strings.Contains(errOut, "Allow this session") {
 		t.Errorf("local-only run prompted for consent:\n%s", errOut)
 	}
-	if !strings.Contains(errOut, "destinations:") {
+	if !strings.Contains(errOut, "── model servers") {
 		t.Errorf("manifest not rendered:\n%s", errOut)
 	}
 }
@@ -885,7 +885,13 @@ func TestStartupAdmissionShowsKeySource(t *testing.T) {
 		t.Fatal("keyed remote without consent was admitted")
 	}
 	errOut := readRunTestFile(t, stderr)
-	if !strings.Contains(errOut, "      sends api_key from $CANARY_VAR\n") {
+	// Anchored to the opencode block: the header line, then the value-column
+	// rows down to the key line.
+	if !strings.Contains(errOut, "\n  opencode  https://opencode.invalid/zen/go\n"+
+		"            not allowed (needs -allow-destination)\n"+
+		"            used for  extraction, verification\n"+
+		"            checks    model list\n"+
+		"            sends api_key from $CANARY_VAR\n") {
 		t.Errorf("startup consent screen missing the key source:\n%s", errOut)
 	}
 	for name, got := range map[string]string{"stderr": errOut, "stdout": readRunTestFile(t, stdout)} {
