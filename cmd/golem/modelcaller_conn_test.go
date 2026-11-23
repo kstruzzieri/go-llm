@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -29,6 +28,7 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 
 	ep := preflightEndpoint{BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"}
 	ollamaEP := preflightEndpoint{BaseURL: "http://localhost:11434", ModelsPath: "/api/tags"}
+	detailKey := provider.ModelKey{Provider: "ollama", Model: "m1"}
 	epCreds := preflightEndpoint{BaseURL: "http://u:p@127.0.0.1:8080", ModelsPath: "/v1/models"}
 	epMalformedCreds := preflightEndpoint{BaseURL: "user:pass@127.0.0.1:8080", ModelsPath: "/v1/models"}
 
@@ -42,6 +42,16 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 		err      error
 		want     string
 	}{
+		{
+			name: "detail status with unknown endpoint", sel: "m1",
+			err:  &provider.ModelDetailError{Key: detailKey, Err: statusErr{429}},
+			want: `agent fallback "m1": model detail lookup failed on "ollama" (429 Too Many Requests)`,
+		},
+		{
+			name: "detail transport failure", sel: "ollama/m1", ep: ollamaEP, epOK: true,
+			err:  &provider.ModelDetailError{Key: detailKey, Err: io.ErrUnexpectedEOF},
+			want: `agent fallback "ollama/m1": POST /api/show failed on "ollama": "unexpected EOF"`,
+		},
 		{
 			name: "status hit + endpoint", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
 			ep: ep, epOK: true, err: wrapped,
@@ -96,7 +106,8 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := preflightConnectivityWarn(tt.useCase, tt.sel, tt.provider, tt.ep, tt.epOK, tt.err)
+			resolve := func(string) (preflightEndpoint, bool) { return tt.ep, tt.epOK }
+			got := preflightConnectivityWarn(tt.useCase, tt.sel, tt.provider, resolve, tt.err)
 			if got != tt.want {
 				t.Errorf("\n got = %q\nwant = %q", got, tt.want)
 			}
@@ -129,8 +140,11 @@ func TestPreflightConnectivityWarn_ShowFailureIsNotAListingFailure(t *testing.T)
 	if lookupErr == nil {
 		t.Fatal("Lookup succeeded, want an error")
 	}
-	got := preflightConnectivityWarn("", "ollama/qwen3", "ollama", preflightEndpoint{BaseURL: srv.URL, ModelsPath: "/api/tags"}, true, lookupErr)
-	if want := `agent fallback "ollama/qwen3": provider lookup failed: `; !strings.HasPrefix(got, want) || !strings.Contains(got, "HTTP 500") {
-		t.Errorf("warning = %q, want prefix %q and the 500 in its text", got, want)
+	resolve := func(name string) (preflightEndpoint, bool) {
+		return preflightEndpoint{BaseURL: srv.URL, ModelsPath: "/api/tags"}, name == "ollama"
+	}
+	got := preflightConnectivityWarn("", "ollama/qwen3", "ollama", resolve, lookupErr)
+	if want := `agent fallback "ollama/qwen3": POST /api/show failed on "ollama" (500 Internal Server Error)`; got != want {
+		t.Errorf("warning = %q, want %q", got, want)
 	}
 }

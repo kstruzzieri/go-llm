@@ -2278,15 +2278,18 @@ func TestAgentflowEnvValidationKeepsModeExitCodes(t *testing.T) {
 // #856: startup notices carry names from models.json and the workspace path,
 // which may come from an untrusted checkout; none reaches the terminal raw.
 func TestStartupNoticesRenderConfigTextInert(t *testing.T) {
-	got := strings.Join(startupNotices(startupInfo{
-		workspace:        "/r\x1b]0;owned\x07",
+	got := startupNotices(startupInfo{
+		workspace:        "/r\x1b]0;owned\x07\nnext",
 		inputCeilingLine: "input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for x)",
-		thinkLine:        "think: model evil/\x1b[2J does not support thinking; -think ignored",
-	}), "\n")
-	if strings.ContainsAny(got, "\x1b\x07") {
-		t.Fatalf("startup notices = %q, want no raw control characters", got)
+		thinkLine:        "think: model tag\nvariant/\x1b[2J does not support thinking; -think ignored",
+		bootstrapWarns:   []error{errors.New("first line\nsecond line")},
+	})
+	for _, line := range got {
+		if strings.ContainsAny(line, "\x1b\x07\n") {
+			t.Fatalf("startup notice = %q, want one inert line", line)
+		}
 	}
-	if !strings.Contains(got, `/r\x1b]0;owned\a`) {
+	if !slices.Contains(got, `workspace: /r\x1b]0;owned\a next`) {
 		t.Errorf("startup notices = %q, want the escapes shown as text", got)
 	}
 }

@@ -723,7 +723,7 @@ func startupNotices(info startupInfo) []string {
 	// working directory), the workspace path, and provider error text: none
 	// reaches the terminal raw.
 	for i := range out {
-		out[i] = sanitizeApprovalPreview(out[i])
+		out[i] = rawArgsLine(out[i])
 	}
 	return out
 }

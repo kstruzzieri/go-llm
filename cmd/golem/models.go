@@ -284,8 +284,7 @@ func runModelsWith(
 			if err := ctx.Err(); err != nil {
 				return err // cancelled: not a connectivity failure, and no entry after it is read
 			}
-			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, lerr))
+			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, resolveEndpoint, lerr))
 			continue
 		}
 
@@ -294,8 +293,7 @@ func runModelsWith(
 			return cerr
 		}
 		if err != nil {
-			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, ep, epOK, err))
+			_, _ = fmt.Fprintf(out, "%s\t%s\n", sel, preflightConnectivityWarn("agent", sel, key.Provider, resolveEndpoint, err))
 			continue
 		}
 		_, _ = fmt.Fprintln(out, renderModelLine(sel, key, exp, cfg, now))

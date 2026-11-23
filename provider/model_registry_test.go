@@ -1267,7 +1267,9 @@ func TestModelRegistry_Lookup_DirectInfoFailureIsNotFoundOnlyOn404(t *testing.T)
 	}{
 		{"404", fmt.Errorf("show: %w", &HTTPStatusError{StatusCode: http.StatusNotFound}), true},
 		{"server error", fmt.Errorf("show: %w", &HTTPStatusError{StatusCode: http.StatusInternalServerError}), false},
+		{"rate limited", &HTTPStatusError{StatusCode: http.StatusTooManyRequests}, false},
 		{"timeout", context.DeadlineExceeded, false},
+		{"canceled", context.Canceled, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			prov := &mrMockProvider{name: "ollama", caps: CapChat, models: []ModelInfo{{Name: "other:7b"}}, detailsErr: tt.detailsErr}
@@ -1281,6 +1283,12 @@ func TestModelRegistry_Lookup_DirectInfoFailureIsNotFoundOnlyOn404(t *testing.T)
 			}
 			if got := errors.Is(err, ErrModelNotFound); got != tt.wantNotFound {
 				t.Errorf("errors.Is(err, ErrModelNotFound) = %v, want %v (err: %v)", got, tt.wantNotFound, err)
+			}
+			if !tt.wantNotFound && !errors.Is(err, tt.detailsErr) {
+				t.Errorf("Lookup lost detail error %v: %v", tt.detailsErr, err)
+			}
+			if got, want := IsInfrastructureError(err), IsInfrastructureError(tt.detailsErr); got != want {
+				t.Errorf("IsInfrastructureError(%v) = %v, want %v", err, got, want)
 			}
 		})
 	}

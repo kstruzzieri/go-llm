@@ -439,6 +439,21 @@ func (e modelNotFoundError) Error() string {
 
 func (modelNotFoundError) Unwrap() error { return ErrModelNotFound }
 
+// ModelDetailError reports a failed per-model metadata request after a successful
+// listing. Its cause retains the provider's HTTP status or transport error.
+type ModelDetailError struct {
+	Key ModelKey
+	Err error
+}
+
+// Error describes the model and provider whose detail request failed.
+func (e *ModelDetailError) Error() string {
+	return fmt.Sprintf("query model %q from %q: %v", e.Key.Model, e.Key.Provider, e.Err)
+}
+
+// Unwrap returns the underlying detail request error.
+func (e *ModelDetailError) Unwrap() error { return e.Err }
+
 // Lookup returns the merged ModelProfile for a provider-qualified model key.
 // Results are cached by ModelKey. The initial implementation returns the cached
 // profile on cache hit; callers that need digest revalidation must use Refresh.
@@ -1394,15 +1409,10 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 		if err == nil {
 			return detail, nil
 		}
-		// Only the provider's own 404 makes the model not found; a timeout or
-		// a server error may clear, so it must not read as gone (#856). %v,
-		// not %w: the listing succeeded, so this failure must not carry a
-		// status or network error a caller would read as the listing's. The
-		// text keeps the status.
-		if code, ok := httpStatusCode(err); !ok || code != http.StatusNotFound {
-			return nil, fmt.Errorf("query model %q from %q: %v", key.Model, key.Provider, err)
+		if code, ok := httpStatusCode(err); ok && code == http.StatusNotFound {
+			return nil, modelNotFoundError{key: key}
 		}
-		return nil, modelNotFoundError{key: key}
+		return nil, &ModelDetailError{Key: key, Err: err}
 	}
 	if models == nil {
 		// The response had no listing key: not a listing (see
