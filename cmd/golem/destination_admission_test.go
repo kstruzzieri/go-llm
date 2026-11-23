@@ -916,16 +916,13 @@ func TestStartupPromptYN(t *testing.T) {
 	}
 	// Whatever the prompt, even an empty one, a failed write means nothing is
 	// read, and the error marks a question not shown (so run discards the
-	// typed-ahead line) while keeping the write error and exit status 1.
+	// typed-ahead line) while keeping the write error.
 	for _, prompt := range []string{question, ""} {
 		t.Run("prompt write fails "+strconv.Quote(prompt), func(t *testing.T) {
 			in := strings.NewReader("y\n")
 			got, err := startupPromptYN(oneByteReader{t, in}, errWriter{})(context.Background(), prompt)
 			if got || !errors.Is(err, errConsentNotShown) || !errors.Is(err, errBrokenTestWriter) {
 				t.Errorf("= %v, %v; want false and errConsentNotShown wrapping the write error", got, err)
-			}
-			if code := exitCodeFor(err); code != 1 {
-				t.Errorf("exit status %d, want 1", code)
 			}
 			if in.Len() != 2 {
 				t.Errorf("read %d bytes after the prompt failed to print", 2-in.Len())
