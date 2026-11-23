@@ -1177,3 +1177,25 @@ func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
 		t.Errorf("bad message: %v", err)
 	}
 }
+
+func TestMainRecallRequiresRegisteredCaptureFlow(t *testing.T) {
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "recall.json")
+	raw, err := json.Marshal(validRecallTrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := filepath.Join(dir, "report.md")
+	cmd := exec.Command(os.Args[0], "-traces", tracePath, "-models", "fake", "-scorer", "exact-match", "-report", reportPath)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "recall traces require -calibrate-capture with -registration, then -recall-report") {
+		t.Fatalf("ordinary recall run did not fail with capture guidance: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
+		t.Fatalf("report created before refusing: %v", err)
+	}
+}

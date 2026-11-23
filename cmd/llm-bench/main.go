@@ -1139,6 +1139,9 @@ func main() {
 	if anyInjectionTrace(traces) {
 		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
 	}
+	if anyRecallTrace(traces) {
+		log.Fatalf("llm-bench: recall traces require -calibrate-capture with -registration, then -recall-report")
+	}
 
 	var corpusData *corpusReportData
 	if strings.TrimSpace(*corpusManifestPath) != "" {

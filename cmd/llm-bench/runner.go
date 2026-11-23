@@ -312,7 +312,7 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
-	if trace.Injection != nil {
+	if trace.Injection != nil || trace.Recall != nil {
 		return replayInjection(ctx, client, model, trace, opts)
 	}
 	if prefilledAssemblyMode(trace) {

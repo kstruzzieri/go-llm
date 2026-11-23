@@ -1592,7 +1592,7 @@ func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
 // sent with: assemblyCaptureTemperature, or the model's registered injection
 // temperature.
 func captureProvenance(trace Trace, r Result, temp float64, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
-	if !prefilledAssemblyMode(trace) && trace.Injection == nil {
+	if !prefilledAssemblyMode(trace) && trace.Injection == nil && trace.Recall == nil {
 		return nil
 	}
 	prov := &CaptureProvenance{

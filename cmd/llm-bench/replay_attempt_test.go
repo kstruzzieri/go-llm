@@ -1427,3 +1427,27 @@ func TestReplayAttempt_SessionIDReachesHeader(t *testing.T) {
 		})
 	}
 }
+
+// Recall traces (#864) run through -calibrate-capture like injection traces.
+func TestReplayAttemptRefusesRecallTrace(t *testing.T) {
+	srv := newCompatServer(t)
+	path := filepath.Join(t.TempDir(), "recall.json")
+	data, err := json.Marshal(validRecallTrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, rec, stderr := runAttemptStderr(t, context.Background(), attemptTestOptions(t, srv.URL, path))
+	if code != 0 {
+		t.Fatalf("exit %d; an input failure still publishes its terminal", code)
+	}
+	assertAttemptError(t, rec, attemptCodeInput, attemptStageInput, 0)
+	if len(srv.Received()) != 0 {
+		t.Fatal("nothing may reach the wire")
+	}
+	if want := "llm-bench: replay-attempt: recall traces are not supported by -replay-attempt; use -calibrate-capture\n"; stderr != want {
+		t.Fatalf("stderr %q, want %q", stderr, want)
+	}
+}
