@@ -57,6 +57,22 @@ func TestStyleForWidthFallback(t *testing.T) {
 	}
 }
 
+func TestStyleForColor(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm")
+	if got := styleForOps(sizeOps{120, nil}, f, false); got != (consoleStyle{true, 120}) {
+		t.Fatalf("color permitted: %+v", got)
+	}
+	if got := styleForOps(sizeOps{120, nil}, f, true); got != (consoleStyle{false, 120}) {
+		t.Fatalf("noColor: %+v", got)
+	}
+}
+
 func TestPaint(t *testing.T) {
 	if got := (consoleStyle{false, 80}).paint(sgrBold, "x"); got != "x" {
 		t.Fatalf("off: %q", got)
@@ -69,17 +85,22 @@ func TestPaint(t *testing.T) {
 func TestRule(t *testing.T) {
 	s := consoleStyle{false, 80}
 	got := s.rule("model servers", "where this session's model requests can go")
-	if n := strings.Count(got, "─"); n != 4+17 {
+	if n := strings.Count(got, "\u2500"); n != 4+17 {
 		t.Fatalf("dashes %d in %q", n, got)
 	}
-	if !strings.HasSuffix(got, strings.Repeat("─", 17)) || strings.HasSuffix(got, strings.Repeat("─", 18)) {
+	if !strings.HasSuffix(got, strings.Repeat("\u2500", 17)) || strings.HasSuffix(got, strings.Repeat("\u2500", 18)) {
 		t.Fatalf("fill: %q", got)
 	}
-	if got := (consoleStyle{false, 10}).rule("model servers", "x"); !strings.HasSuffix(got, " ───") {
+	if got := (consoleStyle{false, 10}).rule("model servers", "x"); !strings.HasSuffix(got, " \u2500\u2500\u2500") {
 		t.Fatalf("narrow: %q", got)
 	}
-	if got := s.rule("t", ""); !strings.HasPrefix(got, "── t ─") {
-		t.Fatalf("no subtitle: %q", got)
+	if got, want := s.rule("t", ""), "\u2500\u2500 t "+strings.Repeat("\u2500", 75); got != want {
+		t.Fatalf("no subtitle: %q, want %q", got, want)
+	}
+	c := consoleStyle{true, 80}
+	wantColor := "\x1b[2m\u2500\u2500 \x1b[0m\x1b[1mt\x1b[0m \x1b[2m\u2500\u2500 s " + strings.Repeat("\u2500", 70) + "\x1b[0m"
+	if got := c.rule("t", "s"); got != wantColor {
+		t.Fatalf("color: %q, want %q", got, wantColor)
 	}
 }
 
@@ -88,6 +109,13 @@ func TestWrapList(t *testing.T) {
 	want := []string{"used for  chat (fallback),", "          summaries, planning"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %q", got)
+	}
+	items := []string{"aa", "bb"}
+	if got := wrapList(items, "> ", "  ", 8); strings.Join(got, "|") != "> aa, bb" {
+		t.Fatalf("exact width: %q", got)
+	}
+	if got := wrapList(items, "> ", "  ", 7); strings.Join(got, "|") != "> aa,|  bb" {
+		t.Fatalf("one under: %q", got)
 	}
 	got = wrapList([]string{"a", strings.Repeat("x", 50), "b"}, "> ", "  ", 20)
 	want = []string{"> a,", "  " + strings.Repeat("x", 50) + ",", "  b"}
@@ -100,9 +128,9 @@ func TestDisplayFieldExact(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"a\nb", `a\nb`},
 		{"a\tb", `a\tb`},
-		{"a‮b", "a\\u202eb"},
-		{"a\xffb", "a�b"},
-		{"é́́", "é́" + "\\u0301"},
+		{"a\u202eb", "a\\u202eb"},
+		{"a\xffb", "a\ufffdb"},
+		{"e\u0301\u0301\u0301", "e\u0301\u0301" + "\\u0301"},
 		{"ab", "ab"},
 	} {
 		if got := displayField(tc.in); got != tc.want {

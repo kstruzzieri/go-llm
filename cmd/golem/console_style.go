@@ -62,15 +62,15 @@ func (s consoleStyle) paint(sgr, text string) string {
 // ponytail: each box-drawing dash counts as one column; ambiguous-width
 // terminals (CJK) can wrap it.
 func (s consoleStyle) rule(title, subtitle string) string {
-	const dashes = "── "
+	const dashes = "\u2500\u2500 "
 	tail := ""
 	plain := dashes + title + " "
 	if subtitle != "" {
 		tail = dashes + subtitle + " "
 		plain += tail
 	}
-	cols := displayCols(strings.ReplaceAll(plain, "─", "-"))
-	fill := strings.Repeat("─", max(3, s.width-cols))
+	cols := displayCols(strings.ReplaceAll(plain, "\u2500", "-"))
+	fill := strings.Repeat("\u2500", max(3, s.width-cols))
 	return s.paint(sgrDim, dashes) + s.paint(sgrBold, title) + " " + s.paint(sgrDim, tail+fill)
 }
 
@@ -103,7 +103,7 @@ func wrapList(items []string, firstPrefix, contPrefix string, width int) []strin
 // non-graphic rune (C0, DEL, C1, bidi and format controls, tab, LF) with
 // strconv.QuoteToGraphic's convention.
 func escapeNonGraphic(s string) string {
-	s = strings.ToValidUTF8(s, "�")
+	s = strings.ToValidUTF8(s, "\ufffd")
 	var b strings.Builder
 	for _, r := range s {
 		if unicode.IsGraphic(r) {
