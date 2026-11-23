@@ -5,7 +5,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // statusErr is a fake registry error carrying an HTTP status, mirroring the
@@ -95,5 +101,36 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 				t.Errorf("\n got = %q\nwant = %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// #856 through the real Ollama client: the model list answers, /api/show
+// fails with 500. The listing worked, so preflight must not blame the list
+// endpoint or the base URL.
+func TestPreflightConnectivityWarn_ShowFailureIsNotAListingFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = fmt.Fprint(w, `{"models":[{"name":"other:7b"}]}`)
+		case "/api/show":
+			http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	providers := provider.NewRegistry()
+	if err := providers.Register(provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))); err != nil {
+		t.Fatal(err)
+	}
+	models, err := provider.NewModelRegistry(providers, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lookupErr := models.Lookup(t.Context(), provider.ModelKey{Provider: "ollama", Model: "qwen3"})
+	if lookupErr == nil {
+		t.Fatal("Lookup succeeded, want an error")
+	}
+	got := preflightConnectivityWarn("", "ollama/qwen3", "ollama", preflightEndpoint{BaseURL: srv.URL, ModelsPath: "/api/tags"}, true, lookupErr)
+	if want := `agent fallback "ollama/qwen3": provider lookup failed: `; !strings.HasPrefix(got, want) || !strings.Contains(got, "HTTP 500") {
+		t.Errorf("warning = %q, want prefix %q and the 500 in its text", got, want)
 	}
 }

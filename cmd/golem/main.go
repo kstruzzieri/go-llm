@@ -719,6 +719,12 @@ func startupNotices(info startupInfo) []string {
 	if info.retrieveOmitted && !info.retrieveRequested {
 		out = append(out, "retrieve unavailable: no RAG index configured; using file/search tools")
 	}
+	// Notices carry model names from models.json (which may come from the
+	// working directory), the workspace path, and provider error text: none
+	// reaches the terminal raw.
+	for i := range out {
+		out[i] = sanitizeApprovalPreview(out[i])
+	}
 	return out
 }
 

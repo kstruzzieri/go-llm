@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -435,6 +436,8 @@ func TestResolveInputCeiling_NotFoundEntryDoesNotSetCeiling(t *testing.T) {
 			key("big"):     {Key: key("big"), ContextWindow: 256_000, Caps: agent.ModelCallCapabilities(true)},
 			key("nowin"):   {Key: key("nowin"), Caps: agent.ModelCallCapabilities(true)},
 			key("nilprof"): nil, // a capChecker may answer with no profile and no error
+			key("small"):   {Key: key("small"), ContextWindow: 4_096, Caps: agent.ModelCallCapabilities(true)},
+			key("tie"):     {Key: key("tie"), ContextWindow: 8_192 + 2_048, Caps: agent.ModelCallCapabilities(true)},
 		},
 		lookupErrs: map[provider.ModelKey]error{
 			key("gone"):  notFound,
@@ -487,6 +490,20 @@ func TestResolveInputCeiling_NotFoundEntryDoesNotSetCeiling(t *testing.T) {
 			wantLine: "input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for test/nowin)",
 		},
 		{
+			// The safe default only names entries when it is what binds:
+			// fixing the unreachable provider would not raise this budget.
+			name:     "a smaller known window wins over the safe default, in any order",
+			chain:    []string{"test/down", "test/small"},
+			want:     inputCeilingResolution{ceiling: 2_048, source: inputCeilingChainMinimum},
+			wantLine: "input ceiling: 2048 tokens (chain minimum)",
+		},
+		{
+			name:     "a known window equal to the safe default is the chain minimum",
+			chain:    []string{"test/tie", "test/down"},
+			want:     inputCeilingResolution{ceiling: 8_192, source: inputCeilingChainMinimum},
+			wantLine: "input ceiling: 8192 tokens (chain minimum)",
+		},
+		{
 			name:     "no entry resolving keeps the safe default",
 			chain:    []string{"test/gone", "test/gone2"},
 			want:     inputCeilingResolution{ceiling: 8_192, source: inputCeilingSafeFallback},
@@ -526,5 +543,17 @@ func TestResolveInputCeiling_RealRegistrySkipsModelTheProviderDoesNotList(t *tes
 	want := inputCeilingResolution{ceiling: 256_000 - 2_048, source: inputCeilingChainMinimum}
 	if got != want {
 		t.Fatalf("resolveInputCeiling() = %+v, want %+v", got, want)
+	}
+}
+
+// #856: entry names come from models.json, which Golem may load from the
+// working directory, so the line renders them as one inert line.
+func TestInputCeilingLineRendersEntryNamesInert(t *testing.T) {
+	got := inputCeilingResolution{ceiling: 8_192, source: inputCeilingSafeFallback, fallbackFrom: "evil/\x1b[2Jm\nforged: line"}.line()
+	if strings.ContainsAny(got, "\x1b\n") {
+		t.Fatalf("line = %q, want no raw escape or newline", got)
+	}
+	if !strings.Contains(got, `\x1b[2J`) {
+		t.Errorf("line = %q, want the escape shown as text", got)
 	}
 }

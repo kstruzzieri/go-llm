@@ -213,6 +213,18 @@ func TestModelRegistry_OllamaShowStatusDecidesNotFound(t *testing.T) {
 			if got := errors.Is(err, ErrModelNotFound); got != tt.wantNotFound {
 				t.Errorf("errors.Is(err, ErrModelNotFound) = %v, want %v (err: %v)", got, tt.wantNotFound, err)
 			}
+			if tt.wantNotFound {
+				return
+			}
+			// The listing succeeded, so the detail failure must not carry a
+			// status a caller would read as the listing's (Golem's preflight
+			// names GET /api/tags for any status it finds); the text keeps it.
+			if code, ok := httpStatusCode(err); ok {
+				t.Errorf("detail failure exposes HTTP status %d as a typed error: %v", code, err)
+			}
+			if !strings.Contains(err.Error(), "HTTP 500") {
+				t.Errorf("err = %v, want the 500 in its text", err)
+			}
 		})
 	}
 }

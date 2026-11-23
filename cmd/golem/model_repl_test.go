@@ -1667,3 +1667,23 @@ func TestModelSetCeilingSkipsAMissingFallbackAndNamesAnUnreachableOne(t *testing
 		}
 	})
 }
+
+// #856: the /model block shows selector text from models.json and the
+// provider's routed model name; none reaches the terminal raw.
+func TestModelStatusRendersNamesInert(t *testing.T) {
+	sess := &replSession{
+		runtime: newModelStatusRuntime(t, agent.Budget{InputCeiling: 8192}, provider.ModelOptions{}),
+		selection: modelSelection{
+			requested:           "role\x1b[2J",
+			chain:               []string{"p/a\x1b]0;x\x07", "p/b"},
+			useCase:             "agent",
+			ceilingSource:       inputCeilingSafeFallback,
+			ceilingFallbackFrom: "p/b\nforged: line",
+		},
+		lastModel: "served\x1b[31m",
+	}
+	got := slash(t, sess, "/model")
+	if strings.ContainsAny(got, "\x1b\x07") || strings.Count(got, "\n") != 5 {
+		t.Fatalf("/model = %q, want five inert lines", got)
+	}
+}

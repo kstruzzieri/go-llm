@@ -41,7 +41,9 @@ func (r inputCeilingResolution) line() string {
 	if r.source == inputCeilingSafeFallback {
 		source += "; model context metadata unavailable"
 		if r.fallbackFrom != "" {
-			source += " for " + r.fallbackFrom
+			// The names come from models.json, possibly the working
+			// directory's: one inert line.
+			source += " for " + rawArgsLine(r.fallbackFrom)
 		}
 	}
 	return fmt.Sprintf("input ceiling: %d tokens (%s)", r.ceiling, source)
@@ -62,6 +64,7 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 	}
 
 	ceiling := 0
+	knownMin := 0 // smallest window with real metadata; 0 when none
 	usedFallback := false
 	var fallbackFrom []string
 	// entry names the chain entry in the line when it falls back; "" when
@@ -99,6 +102,9 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 			}
 			if outputReserve <= 0 {
 				window -= reserve
+			}
+			if knownMin == 0 || window < knownMin {
+				knownMin = window
 			}
 		} else {
 			usedFallback = true
@@ -200,9 +206,11 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 		add(nil, "")
 	}
 
-	source := inputCeilingChainMinimum
-	if usedFallback {
-		source = inputCeilingSafeFallback
+	// The safe default is the reason only when it binds: a known window at
+	// or below it sets the ceiling whatever the other entries do, and naming
+	// them would point at a fix that cannot raise the budget.
+	if usedFallback && (knownMin == 0 || knownMin > agent.DefaultInputCeiling) {
+		return inputCeilingResolution{ceiling: ceiling, source: inputCeilingSafeFallback, fallbackFrom: strings.Join(fallbackFrom, ", ")}
 	}
-	return inputCeilingResolution{ceiling: ceiling, source: source, fallbackFrom: strings.Join(fallbackFrom, ", ")}
+	return inputCeilingResolution{ceiling: ceiling, source: inputCeilingChainMinimum}
 }

@@ -520,8 +520,10 @@ func writeModelStatus(out io.Writer, sess *replSession) {
 		// selector text to echo.
 		requested = "none configured"
 	}
-	_, _ = fmt.Fprintf(out, "model: %s\n", requested)
-	_, _ = fmt.Fprintf(out, "chain: %s\n", sel.chainLine())
+	// Selector text comes from models.json or the /model set argument, and
+	// the last routed name from the provider: render each as one inert line.
+	_, _ = fmt.Fprintf(out, "model: %s\n", rawArgsLine(requested))
+	_, _ = fmt.Fprintf(out, "chain: %s\n", rawArgsLine(sel.chainLine()))
 	_, _ = fmt.Fprintln(out, inputCeilingResolution{
 		ceiling:      sess.runtime.Budget().InputCeiling,
 		source:       sel.ceilingSource,
@@ -532,5 +534,5 @@ func writeModelStatus(out io.Writer, sess *replSession) {
 	if last == "" {
 		last = "not yet routed"
 	}
-	_, _ = fmt.Fprintf(out, "last routed: %s\n", last)
+	_, _ = fmt.Fprintf(out, "last routed: %s\n", rawArgsLine(last))
 }

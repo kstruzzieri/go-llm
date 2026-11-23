@@ -1395,10 +1395,19 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 			return detail, nil
 		}
 		// Only the provider's own 404 makes the model not found; a timeout or
-		// a server error may clear, so it must not read as gone (#856).
+		// a server error may clear, so it must not read as gone (#856). %v,
+		// not %w: the listing succeeded, so this failure must not carry a
+		// status or network error a caller would read as the listing's. The
+		// text keeps the status.
 		if code, ok := httpStatusCode(err); !ok || code != http.StatusNotFound {
-			return nil, fmt.Errorf("query model %q from %q: %w", key.Model, key.Provider, err)
+			return nil, fmt.Errorf("query model %q from %q: %v", key.Model, key.Provider, err)
 		}
+		return nil, modelNotFoundError{key: key}
+	}
+	if models == nil {
+		// The response had no listing key: not a listing (see
+		// Provider.Models), so the model's absence from it proves nothing.
+		return nil, fmt.Errorf("query models from %q: the response carried no model listing", key.Provider)
 	}
 
 	return nil, modelNotFoundError{key: key}

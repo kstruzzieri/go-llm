@@ -4,12 +4,13 @@ Golem budgets each turn against the smallest context window in its model chain. 
 
 #### Library
 
-- `provider`: new sentinel `ErrModelNotFound`. `ModelRegistry.Lookup` and `Refresh` wrap it when a reachable provider's model list does not include the model and, for Ollama, `/api/show` answers 404; the error text is unchanged. A timeout or server error from `/api/show` is reported as that error instead of "not found". `ModelRegistry.LookupAny` wraps the sentinel only when every provider said not found: if any provider could not be reached, that error is reported. An unqualified name missing from the model index still returns an error that is not `ErrModelNotFound`, since the index can be empty because a listing failed.
+- `provider`: new sentinel `ErrModelNotFound`. `ModelRegistry.Lookup` and `Refresh` wrap it when a reachable provider's model list does not include the model and, for Ollama, `/api/show` answers 404; the error text is unchanged. A response with no listing at all (an OpenAI-compatible `/v1/models` answer without `data`) is not a listing, so it is reported as `query models from "p": the response carried no model listing` instead of "not found". A timeout or server error from `/api/show` after a successful listing is reported with its status in the text instead of "not found", and no longer carries a typed status, so Golem no longer describes it as a failed `GET /api/tags`. `ModelRegistry.LookupAny` wraps the sentinel only when every provider said not found: if any provider could not be reached, that error is reported. An unqualified name missing from the model index still returns an error that is not `ErrModelNotFound`, since the index can be empty because a listing failed.
 
 #### Golem
 
 - The input ceiling skips chain entries that fail lookup with `ErrModelNotFound`, for the session and for `-dispatch-role` children. An entry whose provider cannot be reached still counts as the safe default, since it may come back mid-session.
-- When the ceiling is the safe default, the startup line, `/model` and `/model set` name the configured entries that caused it, for example `input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for remote/big-model)` when that provider is down.
+- The line reads `safe fallback` only when the 8192 default is the smallest window; a known window at or below 8192 now reads `chain minimum`. When it is the safe default, the startup line, `/model` and `/model set` name the configured entries that caused it, for example `input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for remote/big-model)` when that provider is down.
+- Startup notices and the `/model` block now render names from `models.json`, the workspace path and the routed model name with control characters shown as escapes, so a `models.json` from an untrusted checkout cannot write raw terminal sequences.
 
 #### Limits
 
