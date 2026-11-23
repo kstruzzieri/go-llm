@@ -235,8 +235,7 @@ type traceRecord struct {
 		RecoverThinkingOnlyAnswer bool                   `json:"recover_thinking_only_answer"`
 		History                   []provider.ChatMessage `json:"history"`
 	} `json:"request"`
-	// agent.Result itself does not round-trip (a RouteOutcome status
-	// marshals as a string), so decode only the fields read here.
+	// Decode only the fields read here.
 	Result struct {
 		Messages []provider.ChatMessage
 		Events   []agent.EventRecord

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -295,5 +296,79 @@ func TestTraceRequestRecoverThinkingOnlyAnswer(t *testing.T) {
 		if !on && present {
 			t.Errorf("off: request carries recover_thinking_only_answer = %s, want the key omitted", got)
 		}
+	}
+}
+
+// routedTraceFixture writes a real trace for a result whose step and delegate
+// tool call carry distinct route attempts, and returns the file bytes with the
+// original attempt slices.
+func routedTraceFixture(t *testing.T) (raw []byte, step, delegate []provider.RouteAttempt) {
+	t.Helper()
+	step = []provider.RouteAttempt{
+		{Key: provider.ModelKey{Provider: "p", Model: "a"}, Status: provider.AttemptStatusFailed, LatencyMs: 5, ErrorClass: "timeout"},
+		{Key: provider.ModelKey{Provider: "p", Model: "b"}, Status: provider.AttemptStatusSucceeded, LatencyMs: 9},
+	}
+	delegate = []provider.RouteAttempt{
+		{Key: provider.ModelKey{Provider: "p", Model: "c"}, Status: provider.AttemptStatusSucceeded, LatencyMs: 3},
+	}
+	res := sampleResult()
+	res.Steps[0].RouteOutcome = &provider.RouteOutcome{Attempts: step}
+	res.ToolCalls = []agent.ToolCallRecord{{Name: "delegate_code", RouteOutcome: &provider.RouteOutcome{Attempts: delegate}}}
+
+	b, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back agent.Result
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatalf("agent.Result does not decode: %v", err)
+	}
+	if !reflect.DeepEqual(back.Steps[0].RouteOutcome.Attempts, step) || !reflect.DeepEqual(back.ToolCalls[0].RouteOutcome.Attempts, delegate) {
+		t.Fatalf("agent.Result attempts changed in a round trip: %+v / %+v", back.Steps[0].RouteOutcome, back.ToolCalls[0].RouteOutcome)
+	}
+
+	path := filepath.Join(t.TempDir(), "trace.json")
+	if err := WriteTrace(path, BuildTrace(TraceMeta{Goal: "g"}, res, "completed", false, nil)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, step, delegate
+}
+
+func TestTraceRecordRoundTripsRouteAttempts(t *testing.T) {
+	raw, step, delegate := routedTraceFixture(t)
+	var rec TraceRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("trace does not decode: %v", err)
+	}
+	if !reflect.DeepEqual(rec.Result.Steps[0].RouteOutcome.Attempts, step) {
+		t.Fatalf("step attempts = %+v, want %+v", rec.Result.Steps[0].RouteOutcome.Attempts, step)
+	}
+	if !reflect.DeepEqual(rec.Result.ToolCalls[0].RouteOutcome.Attempts, delegate) {
+		t.Fatalf("delegate attempts = %+v, want %+v", rec.Result.ToolCalls[0].RouteOutcome.Attempts, delegate)
+	}
+}
+
+func TestTraceRecordDecodesFutureStatusTag(t *testing.T) {
+	raw, step, delegate := routedTraceFixture(t)
+	// WriteTrace indents its output, so the tag has a space after the colon.
+	old := []byte(`"status": "failed"`)
+	if n := bytes.Count(raw, old); n != 1 {
+		t.Fatalf("found %d failed tags in the trace, want exactly 1", n)
+	}
+	raw = bytes.Replace(raw, old, []byte(`"status": "cancelled"`), 1)
+	var rec TraceRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("a future status tag must decode: %v", err)
+	}
+	got := rec.Result.Steps[0].RouteOutcome.Attempts
+	if got[0].Status != provider.AttemptStatusUnknown || got[1] != step[1] {
+		t.Fatalf("step attempts = %+v, want first Unknown, second unchanged", got)
+	}
+	if !reflect.DeepEqual(rec.Result.ToolCalls[0].RouteOutcome.Attempts, delegate) {
+		t.Fatalf("delegate attempts changed: %+v", rec.Result.ToolCalls[0].RouteOutcome.Attempts)
 	}
 }

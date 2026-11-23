@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -428,5 +429,92 @@ func TestModelOptionsClone(t *testing.T) {
 				t.Fatalf("Clone = %#v, want %#v", got, tc.options)
 			}
 		})
+	}
+}
+
+func TestAttemptStatusUnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    AttemptStatus
+		wantErr bool
+	}{
+		{`"succeeded"`, AttemptStatusSucceeded, false},
+		{`"failed"`, AttemptStatusFailed, false},
+		{`"unknown"`, AttemptStatusUnknown, false},
+		{`"cancelled"`, AttemptStatusUnknown, false}, // D1
+		{`"Succeeded"`, AttemptStatusUnknown, false}, // tags are exact
+		{`""`, AttemptStatusUnknown, false},
+		{`1`, 0, true}, // D2: an int decode would accept this
+		{`{}`, 0, true},
+		{`[]`, 0, true},
+		{`true`, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			// 42 is a value no row expects, so a decoder that leaves the
+			// receiver alone cannot pass any row.
+			s := AttemptStatus(42)
+			err := json.Unmarshal([]byte(c.in), &s)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("Unmarshal(%s) = nil error, s = %d; want error", c.in, s)
+				}
+				return
+			}
+			if err != nil || s != c.want {
+				t.Fatalf("Unmarshal(%s) = %d, %v; want %d, nil", c.in, s, err, c.want)
+			}
+		})
+	}
+}
+
+func TestAttemptStatusUnmarshalJSONNull(t *testing.T) {
+	s := AttemptStatusSucceeded
+	if err := json.Unmarshal([]byte(`null`), &s); err != nil || s != AttemptStatusSucceeded {
+		t.Fatalf("Unmarshal(null) = %d, %v; want unchanged Succeeded, nil", s, err)
+	}
+}
+
+func TestAttemptStatusJSONRoundTrip(t *testing.T) {
+	for _, in := range []AttemptStatus{AttemptStatusUnknown, AttemptStatusSucceeded, AttemptStatusFailed} {
+		b, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := AttemptStatus(42)
+		if err := json.Unmarshal(b, &out); err != nil || out != in {
+			t.Fatalf("round trip of %d via %s = %d, %v", in, b, out, err)
+		}
+	}
+	// Out-of-range values marshal as "unknown": the documented lossy case.
+	b, _ := json.Marshal(AttemptStatus(7))
+	out := AttemptStatus(42)
+	if err := json.Unmarshal(b, &out); err != nil || out != AttemptStatusUnknown {
+		t.Fatalf("AttemptStatus(7) via %s = %d, %v; want Unknown", b, out, err)
+	}
+}
+
+func TestRouteOutcomeJSONRoundTripWithAttempts(t *testing.T) {
+	want := RouteOutcome{
+		PlannedModel:  ModelKey{Provider: "a", Model: "m"},
+		ActualModel:   ModelKey{Provider: "b", Model: "m"},
+		FallbacksUsed: 1,
+		UseCase:       "agent",
+		RouteID:       "r1",
+		Attempts: []RouteAttempt{
+			{Key: ModelKey{Provider: "a", Model: "m"}, Status: AttemptStatusFailed, LatencyMs: 12, ErrorClass: "timeout"},
+			{Key: ModelKey{Provider: "b", Model: "m"}, Status: AttemptStatusSucceeded, LatencyMs: 30},
+		},
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got RouteOutcome
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", b, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
 	}
 }

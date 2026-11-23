@@ -547,6 +547,11 @@ type CompletionConfidence struct {
 // and is treated by the RoutingFeedback seam as a no-op rather than as a
 // failure. AttemptStatus values out of range serialize as "unknown" but are
 // rejected by the seam's validation.
+//
+// JSON decoding reads the tags MarshalJSON writes. An unrecognized tag (for
+// example one written by a newer version) decodes as AttemptStatusUnknown. A
+// non-string value is an error, a change from earlier readers, which accepted
+// a number. null leaves the value unchanged.
 type AttemptStatus int
 
 const (
@@ -573,6 +578,28 @@ func (s AttemptStatus) String() string {
 // diagnostics in serialized RouteOutcome.Attempts.
 func (s AttemptStatus) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + s.String() + `"`), nil
+}
+
+// UnmarshalJSON decodes the tags MarshalJSON writes. Tags are matched exactly;
+// any other string decodes as AttemptStatusUnknown, a non-string is an error,
+// and null leaves *s unchanged.
+func (s *AttemptStatus) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	var tag string
+	if err := json.Unmarshal(b, &tag); err != nil {
+		return fmt.Errorf("provider: attempt status: %w", err)
+	}
+	switch tag {
+	case AttemptStatusSucceeded.String():
+		*s = AttemptStatusSucceeded
+	case AttemptStatusFailed.String():
+		*s = AttemptStatusFailed
+	default:
+		*s = AttemptStatusUnknown
+	}
+	return nil
 }
 
 // RouteAttempt records one execution attempt against a specific
