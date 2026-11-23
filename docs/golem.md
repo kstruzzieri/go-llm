@@ -706,8 +706,15 @@ last routed: not yet routed
 
 `chain:` is the ordered fallback chain the session routes under, not the
 serving model; `last routed:` is the model that actually served a turn and
-reads `not yet routed` until one has. A successful `set` prints this same
-block, preceded by any thinking notice and per-entry preflight warnings.
+reads `not yet routed` until one has. `input ceiling:` comes from the
+smallest context window in the chain. An entry its provider answers for but
+does not list is left out: routing cannot pick it while that stays true. An
+entry whose window is unknown, or whose provider cannot be reached, counts as
+8192 tokens; the line then reads `safe fallback` and names those entries, as
+in `input ceiling: 8192 tokens (safe fallback; model context metadata
+unavailable for remote/big-model)` when the `remote` server is down. A
+successful `set` prints this same block, preceded by any thinking notice and
+per-entry preflight warnings.
 Resolution, admission, cancellation, and publication failures print
 `model unchanged:` with the reason and change nothing.
 

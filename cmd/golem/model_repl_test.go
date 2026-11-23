@@ -90,6 +90,23 @@ func TestModelStatusRendersTheLiteralBlock(t *testing.T) {
 				"last routed: test/agent-model\n",
 		},
 		{
+			// #856: the status line names the entries behind a safe default,
+			// as the startup line does.
+			name: "safe fallback names its entries",
+			sel: modelSelection{
+				requested:           "coding",
+				chain:               []string{"local/big", "cloud/down"},
+				useCase:             "agent",
+				ceilingSource:       inputCeilingSafeFallback,
+				ceilingFallbackFrom: "cloud/down",
+			},
+			want: "model: coding\n" +
+				"chain: local/big -> cloud/down (strict; use case: agent)\n" +
+				"input ceiling: 28672 tokens (safe fallback; model context metadata unavailable for cloud/down)\n" +
+				"think: default (model decides)\n" +
+				"last routed: not yet routed\n",
+		},
+		{
 			name: "explicit ceiling and thinking off",
 			sel: modelSelection{
 				requested:     "test/alt-model",
@@ -1603,4 +1620,50 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 	if strings.Contains(atPrompt, canary) || strings.Contains(stderr, canary) {
 		t.Errorf("canary leaked into captured output:\n%s", stderr)
 	}
+}
+
+// #856 end to end through /model set and the real registry: a fallback its
+// (reachable) provider does not list leaves the chain's own minimum, and a
+// fallback whose provider cannot be reached keeps the safe default and is
+// named in the status block.
+func TestModelSetCeilingSkipsAMissingFallbackAndNamesAnUnreachableOne(t *testing.T) {
+	fx := newModelSwitchFixture(t, "")
+	raw, err := os.ReadFile(fx.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const caps = `"capabilities": ["chat", "generate", "stream", "tool_call"]`
+	text := strings.Replace(string(raw), `"providers": {`,
+		`"providers": {"down": {"base_url": "http://127.0.0.1:1", "api_format": "openai-compat", "timeout": "5s"},`, 1)
+	text = strings.Replace(text, `"models": {`, `"models": {
+    "gone": {"name": "gone-model", "provider": "alt", "type": "dense", `+caps+`},
+    "offline": {"name": "offline-model", "provider": "down", "type": "dense", `+caps+`},
+    "swapgone": {"name": "alt-model", "provider": "alt", "type": "dense", "context_window": 16384, "think_mode": "none", `+caps+`, "fallbacks": ["gone"]},
+    "swapdown": {"name": "alt-model", "provider": "alt", "type": "dense", "context_window": 16384, "think_mode": "none", `+caps+`, "fallbacks": ["offline"]},`, 1)
+	if err := os.WriteFile(fx.configPath, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for down/offline-model)\n"
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		if got, want := slash(t, sess, "/model set swapgone"), "input ceiling: 14336 tokens (chain minimum)\n"; !strings.Contains(got, want) {
+			t.Errorf("/model set swapgone =\n%s\nwant it to contain %q", got, want)
+		}
+		if got := slash(t, sess, "/model set swapdown"); !strings.Contains(got, want) {
+			t.Errorf("/model set swapdown =\n%s\nwant it to contain %q", got, want)
+		}
+		if got := slash(t, sess, "/model"); !strings.Contains(got, want) {
+			t.Errorf("/model after the switch =\n%s\nwant it to contain %q", got, want)
+		}
+	})
+
+	// The same chain chosen at startup: /model reads the names startup kept.
+	text = strings.Replace(text, `"defaults": {"agent": "agent"`, `"defaults": {"agent": "swapdown"`, 1)
+	if err := os.WriteFile(fx.configPath, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		if got := slash(t, sess, "/model"); !strings.Contains(got, want) {
+			t.Errorf("/model at startup =\n%s\nwant it to contain %q", got, want)
+		}
+	})
 }

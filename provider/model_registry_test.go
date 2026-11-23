@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func (m *mrMockProvider) ModelInfo(_ context.Context, name string) (*ModelInfo, 
 		copy := detail
 		return &copy, nil
 	}
-	return nil, fmt.Errorf("provider: model %q not found", name)
+	return nil, fmt.Errorf("provider: model %q not found: %w", name, &HTTPStatusError{StatusCode: http.StatusNotFound})
 }
 
 func (m *mrMockProvider) Chat(_ context.Context, _ ChatRequest) (*ChatResponse, error) {
@@ -1230,6 +1231,100 @@ func TestModelRegistry_Lookup_ModelNotFound(t *testing.T) {
 	_, err = mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "nonexistent:7b"})
 	if err == nil {
 		t.Fatal("expected error for model not found on provider")
+	}
+	// #856: a reachable provider that does not serve the model is
+	// distinguishable from one that cannot be reached, and the message
+	// users already see is unchanged.
+	if !errors.Is(err, ErrModelNotFound) {
+		t.Errorf("errors.Is(err, ErrModelNotFound) = false for %v", err)
+	}
+	if want := `provider: lookup ollama/nonexistent:7b: model "nonexistent:7b" not found on "ollama"`; err.Error() != want {
+		t.Errorf("err = %q, want %q", err.Error(), want)
+	}
+}
+
+// #856: a provider whose model list cannot be read may come back, so its
+// failure must not read as "not found".
+func TestModelRegistry_Lookup_ListErrorIsNotModelNotFound(t *testing.T) {
+	prov := &mrMockProvider{name: "ollama", caps: CapChat, modelsErr: errors.New("connection refused")}
+	mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+	_, err = mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	if err == nil || errors.Is(err, ErrModelNotFound) {
+		t.Fatalf("err = %v, want a lookup error that is not ErrModelNotFound", err)
+	}
+}
+
+// #856: when the model list holds no exact match, Ollama's /api/show decides.
+// Only its 404 means not found; a timeout or server error may clear.
+func TestModelRegistry_Lookup_DirectInfoFailureIsNotFoundOnlyOn404(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		detailsErr   error
+		wantNotFound bool
+	}{
+		{"404", fmt.Errorf("show: %w", &HTTPStatusError{StatusCode: http.StatusNotFound}), true},
+		{"server error", fmt.Errorf("show: %w", &HTTPStatusError{StatusCode: http.StatusInternalServerError}), false},
+		{"timeout", context.DeadlineExceeded, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prov := &mrMockProvider{name: "ollama", caps: CapChat, models: []ModelInfo{{Name: "other:7b"}}, detailsErr: tt.detailsErr}
+			mr, err := NewModelRegistry(&mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}, newMrMockFingerprintStore())
+			if err != nil {
+				t.Fatalf("NewModelRegistry() error: %v", err)
+			}
+			_, err = mr.Lookup(context.Background(), ModelKey{Provider: "ollama", Model: "qwen3"})
+			if err == nil {
+				t.Fatal("Lookup succeeded, want an error")
+			}
+			if got := errors.Is(err, ErrModelNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrModelNotFound) = %v, want %v (err: %v)", got, tt.wantNotFound, err)
+			}
+		})
+	}
+}
+
+// mrFixedIndexRegistry reports a fixed provider list for every model, as a
+// model index built before a provider stopped serving the model would.
+type mrFixedIndexRegistry struct {
+	*mrMockProviderRegistry
+	index []Provider
+}
+
+func (m mrFixedIndexRegistry) ProvidersForModel(string) ([]Provider, error) { return m.index, nil }
+
+// #856: LookupAny reports ErrModelNotFound only when every provider said so.
+// One unreachable provider keeps the error retryable, whatever the order.
+func TestModelRegistry_LookupAny_ModelNotFoundOnlyWhenEveryProviderSaysSo(t *testing.T) {
+	gone := &mrMockProvider{name: "gone", caps: CapChat}
+	gone2 := &mrMockProvider{name: "gone2", caps: CapChat}
+	down := &mrMockProvider{name: "down", caps: CapChat, modelsErr: errors.New("connection refused")}
+	all := map[string]Provider{"gone": gone, "gone2": gone2, "down": down}
+
+	for _, tt := range []struct {
+		name         string
+		index        []Provider
+		wantNotFound bool
+	}{
+		{"all not found", []Provider{gone, gone2}, true},
+		{"not found then unreachable", []Provider{gone, down}, false},
+		{"unreachable then not found", []Provider{down, gone}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			mr, err := NewModelRegistry(mrFixedIndexRegistry{&mrMockProviderRegistry{providers: all}, tt.index}, newMrMockFingerprintStore())
+			if err != nil {
+				t.Fatalf("NewModelRegistry() error: %v", err)
+			}
+			_, err = mr.LookupAny(context.Background(), "qwen3:8b")
+			if err == nil {
+				t.Fatal("LookupAny succeeded, want an error")
+			}
+			if got := errors.Is(err, ErrModelNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrModelNotFound) = %v, want %v (err: %v)", got, tt.wantNotFound, err)
+			}
+		})
 	}
 }
 

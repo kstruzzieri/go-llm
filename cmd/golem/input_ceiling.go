@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/fingerprint"
@@ -18,8 +21,9 @@ const (
 )
 
 type inputCeilingResolution struct {
-	ceiling int
-	source  inputCeilingSource
+	ceiling      int
+	source       inputCeilingSource
+	fallbackFrom string // the chain entries that put the safe default in, comma-separated
 }
 
 type toolCallExplainer interface {
@@ -36,6 +40,9 @@ func (r inputCeilingResolution) line() string {
 	source := string(r.source)
 	if r.source == inputCeilingSafeFallback {
 		source += "; model context metadata unavailable"
+		if r.fallbackFrom != "" {
+			source += " for " + r.fallbackFrom
+		}
 	}
 	return fmt.Sprintf("input ceiling: %d tokens (%s)", r.ceiling, source)
 }
@@ -56,7 +63,10 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 
 	ceiling := 0
 	usedFallback := false
-	add := func(profile *provider.ModelProfile) {
+	var fallbackFrom []string
+	// entry names the chain entry in the line when it falls back; "" when
+	// no single entry is to blame.
+	add := func(profile *provider.ModelProfile, entry string) {
 		window := agent.DefaultInputCeiling
 		eff := 0
 		if profile != nil {
@@ -92,6 +102,9 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 			}
 		} else {
 			usedFallback = true
+			if entry != "" && !slices.Contains(fallbackFrom, entry) {
+				fallbackFrom = append(fallbackFrom, entry)
+			}
 		}
 		if ceiling == 0 || window < ceiling {
 			ceiling = window
@@ -131,7 +144,7 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 	}
 
 	if reg == nil {
-		add(nil)
+		add(nil, "")
 	} else if len(chain) == 0 {
 		requiredCaps := agent.ModelCallCapabilities(true)
 		if canResolveToolCall {
@@ -139,44 +152,57 @@ func resolveInputCeiling(ctx context.Context, reg capChecker, chain []string, us
 		}
 		profiles, err := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: requiredCaps})
 		if err != nil || len(profiles) == 0 {
-			add(nil)
+			add(nil, "")
 		} else {
 			for _, profile := range profiles {
 				if eligible(profile) {
-					add(profile)
+					// No configured entry to name: the recommendation is
+					// unbounded and not the user's to fix.
+					add(profile, "")
 				}
 			}
 		}
 	} else {
 		for _, selector := range chain {
+			var profiles []*provider.ModelProfile
+			var err error
 			if key, qualified := parseSelector(selector); qualified {
-				profile, err := reg.Lookup(ctx, key)
-				if err != nil {
-					add(nil)
-				} else if eligible(profile) {
-					add(profile)
-				}
-				continue
+				var profile *provider.ModelProfile
+				profile, err = reg.Lookup(ctx, key)
+				profiles = []*provider.ModelProfile{profile}
+			} else {
+				profiles, err = reg.LookupAny(ctx, selector)
 			}
-			profiles, err := reg.LookupAny(ctx, selector)
-			if err != nil || len(profiles) == 0 {
-				add(nil)
-				continue
-			}
-			for _, profile := range profiles {
-				if eligible(profile) {
-					add(profile)
+			switch {
+			case errors.Is(err, provider.ErrModelNotFound):
+				// The provider answered and does not list it, so routing
+				// cannot pick it while that stays true: like a window the
+				// reserve consumes, it must not set the chain minimum (#856).
+				// Any other lookup error keeps the safe default below, since
+				// an unreachable provider may come back mid-session.
+			case err != nil || len(profiles) == 0:
+				add(nil, selector)
+			default:
+				for _, profile := range profiles {
+					if !eligible(profile) {
+						continue
+					}
+					entry := selector
+					if profile != nil {
+						entry = profile.Key.String()
+					}
+					add(profile, entry)
 				}
 			}
 		}
 	}
 	if ceiling == 0 {
-		add(nil)
+		add(nil, "")
 	}
 
 	source := inputCeilingChainMinimum
 	if usedFallback {
 		source = inputCeilingSafeFallback
 	}
-	return inputCeilingResolution{ceiling: ceiling, source: source}
+	return inputCeilingResolution{ceiling: ceiling, source: source, fallbackFrom: strings.Join(fallbackFrom, ", ")}
 }

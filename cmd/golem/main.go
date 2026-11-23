@@ -2019,11 +2019,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		grounding:        groundingSvc,
 		thinkModels:      bundle.Models,
 		selection: modelSelection{
-			requested:     startupSelector(cfg, activeRoute),
-			chain:         slices.Clone(plan.chain),
-			useCase:       plan.useCase,
-			useRecommend:  plan.useRecommend,
-			ceilingSource: inputCeiling.source,
+			requested:           startupSelector(cfg, activeRoute),
+			chain:               slices.Clone(plan.chain),
+			useCase:             plan.useCase,
+			useRecommend:        plan.useRecommend,
+			ceilingSource:       inputCeiling.source,
+			ceilingFallbackFrom: inputCeiling.fallbackFrom,
 			// The frozen inputs a later /model set re-prepares from: exactly
 			// the values used above, never re-resolved (#376 M2).
 			effective:       bundle.Effective,
