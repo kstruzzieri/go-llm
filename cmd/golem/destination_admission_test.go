@@ -630,8 +630,9 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("section write failed") }
 
 // A section that fails to print is never followed by the question: the
-// admission refuses (ErrDestinationDenied, saying why) without reading an
-// answer and installs nothing. ensure and extend share the rule. Where no
+// admission drops the one line typed for it unanswered (even a "yes"),
+// refuses (ErrDestinationDenied, saying why) and installs nothing. ensure
+// (the re-admission after /grants clear) and extend share the rule. Where no
 // question would be asked, a failed write changes nothing: nothing uncovered
 // admits as before, and a refusal keeps its exact bytes.
 func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
@@ -659,8 +660,10 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		if strings.Contains(err.Error(), "\n") {
 			t.Errorf("err is not one line: %q", err)
 		}
-		if p.calls != 0 {
-			t.Errorf("prompt asked %d times after the section failed to print", p.calls)
+		// Exactly one read, with no question shown: the line typed for the
+		// question is dropped, never left for a goal. Its "yes" admits nothing.
+		if p.calls != 1 || p.seen != "" {
+			t.Errorf("after the section failed to print: %d reads, last prompt %q; want one discard read with no prompt", p.calls, p.seen)
 		}
 	}
 
@@ -793,16 +796,21 @@ func TestStartupPromptYN(t *testing.T) {
 			}
 		})
 	}
-	t.Run("prompt write fails", func(t *testing.T) {
-		in := strings.NewReader("y\n")
-		got, err := startupPromptYN(oneByteReader{t, in}, failWriter{})(context.Background(), question)
-		if got || err == nil {
-			t.Errorf("= %v, %v; want false and the write error", got, err)
-		}
-		if in.Len() != 2 {
-			t.Errorf("read %d bytes after the prompt failed to print", 2-in.Len())
-		}
-	})
+	// The empty prompt is consent's discard read after a section that failed
+	// to print: at startup it reads nothing either, since the startup refusal
+	// is fatal and no goal follows.
+	for _, prompt := range []string{question, ""} {
+		t.Run("prompt write fails "+strconv.Quote(prompt), func(t *testing.T) {
+			in := strings.NewReader("y\n")
+			got, err := startupPromptYN(oneByteReader{t, in}, failWriter{})(context.Background(), prompt)
+			if got || err == nil {
+				t.Errorf("= %v, %v; want false and the write error", got, err)
+			}
+			if in.Len() != 2 {
+				t.Errorf("read %d bytes after the prompt failed to print", 2-in.Len())
+			}
+		})
+	}
 }
 
 // A malformed -allow-destination flag is a construction error naming the

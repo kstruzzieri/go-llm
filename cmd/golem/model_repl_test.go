@@ -717,6 +717,42 @@ func TestModelSetScriptedRemoteConsentConsumesExactlyOneLine(t *testing.T) {
 	})
 }
 
+// TestModelSetSectionWriteFailureDropsTheAnswerLine is the scripted consent
+// sequence with a REPL writer that refuses every write: the section cannot be
+// shown, so the switch is refused, and the "yes" typed for the question is
+// still read as its answer and dropped. It is never run as a goal on the old
+// model; only "test prompt" is.
+func TestModelSetSectionWriteFailureDropsTheAnswerLine(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		src := newCountingSource(sess, "/model set cloudrole\nyes\ntest prompt\n")
+		sess.destAdmission.setReplOut(failWriter{})
+		primaryBefore := fx.primary.chats.Load()
+		var out strings.Builder
+		if err := runREPL(t.Context(), src, &out, nil, sess); err != nil {
+			t.Fatalf("runREPL: %v", err)
+		}
+		if got := src.goals(); !reflect.DeepEqual(got, []string{"test prompt"}) {
+			t.Errorf("recorded goals = %q, want exactly [test prompt]", got)
+		}
+		if n := src.answers.Load(); n != 1 {
+			t.Errorf("ReadAnswer calls = %d, want exactly 1 (the dropped answer line)", n)
+		}
+		if !strings.Contains(out.String(), "model unchanged:") || !strings.Contains(out.String(), "model-server section could not be shown") {
+			t.Fatalf("want the switch refused because the section could not be shown:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), destinationGrantRetainedNotice) {
+			t.Errorf("a grant was reported after the refusal:\n%s", out.String())
+		}
+		if got, want := fx.primary.chats.Load(), primaryBefore+1; got != want {
+			t.Errorf("primary chat requests = %d, want %d (the one goal, on the old model)", got, want)
+		}
+		if _, err := sess.destAdmission.gate.Bind(context.Background(), modelSetUseCase, "cloud"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("cloud admitted after the refused switch: Bind = %v", err)
+		}
+	})
+}
+
 // TestModelSetParksTheLoopUntilResolutionFinishes holds a resolvable
 // candidate inside its metadata lookup and proves the REPL asks for no second
 // goal until the operation resolves -- and that a Ctrl-C there cancels the
