@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -51,10 +52,23 @@ var errSegmentFlagMissing = errors.New("golem: terminal returned a line with no 
 type termIO struct {
 	r io.Reader
 	w io.Writer
+	// writeErr, when set, keeps the first write error since editorSource.read
+	// last cleared it. x/term ignores its own write errors (the prompt
+	// included), so this is the only way an answer read learns that its
+	// question was never drawn. Shared by every copy, as each Terminal holds
+	// its own.
+	writeErr *atomic.Pointer[error]
 }
 
-func (t termIO) Read(p []byte) (int, error)  { return t.r.Read(p) }
-func (t termIO) Write(p []byte) (int, error) { return t.w.Write(p) }
+func (t termIO) Read(p []byte) (int, error) { return t.r.Read(p) }
+
+func (t termIO) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if err != nil && t.writeErr != nil {
+		t.writeErr.CompareAndSwap(nil, &err)
+	}
+	return n, err
+}
 
 // terminalBinding owns the answer to "where does terminal output go right
 // now": the current Terminal, or the scanner the editor permanently fell back
@@ -272,7 +286,7 @@ func newEditorSource(cfg inputConfig, resize <-chan struct{}, stopResize func(),
 		fallback:    fallback,
 		onInterrupt: cfg.OnInterrupt,
 	}
-	e.rw = termIO{r: e.filter, w: cfg.Out}
+	e.rw = termIO{r: e.filter, w: cfg.Out, writeErr: new(atomic.Pointer[error])}
 	e.binding.out = cfg.Out
 	if cfg.UseHistory {
 		e.hist = newGoalHistory(cfg.Getenv, cfg.Root, func(msg string) {
@@ -391,6 +405,9 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 	}()
 
 	refused := false
+	// A new window: only its own writes can have hidden its prompt. Nothing
+	// is bound yet, so no notice can write through termIO concurrently.
+	e.rw.writeErr.Store(nil)
 	e.bindTerminal(prompt, hist, &refused)
 
 	// Composition state (spec 8.2), used only when compose is true. joined
@@ -463,6 +480,12 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 					default:
 						return "", false, derr
 					}
+				}
+				// The only answer path that returns what was typed (every
+				// other one denies), so the check sits here: a question this
+				// window failed to draw is never answered.
+				if werr := e.rw.writeErr.Load(); werr != nil {
+					return "", false, fmt.Errorf("golem: the question could not be shown, so its answer was discarded: %w", *werr)
 				}
 				return seg, true, nil
 			}

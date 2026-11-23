@@ -109,7 +109,7 @@ config's full network plan and shows a "model servers" section — where this
 session's model requests can go — and asks for consent. Servers are grouped
 under "On this machine (allowed automatically)" (literal loopback endpoints:
 llama.cpp, Ollama on `127.0.0.1`/`localhost`) and "Remote". Each shows its
-name and URL (non-ASCII characters in the URL as `\uXXXX` escapes), a
+name and URL (non-ASCII characters in the URL shown escaped), a
 `used for` row in plain words (chat, summaries, code
 delegation, embeddings; `(fallback)` marks a use reached only through fallback
 entries), and a `checks` row for metadata requests (model list, capabilities,

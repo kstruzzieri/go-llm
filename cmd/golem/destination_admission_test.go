@@ -107,6 +107,39 @@ func TestLineSourcePromptYN(t *testing.T) {
 	}
 }
 
+// A REPL question that fails to print is never answered, in either line
+// source: the typed-ahead "y" yields false and an error, never consent. Goal
+// reads are unchanged, so the next goal still reads.
+func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
+	check := func(t *testing.T, src lineSource) {
+		t.Helper()
+		got, err := lineSourcePromptYN(src)(context.Background(), "allow? ")
+		if got || err == nil {
+			t.Fatalf("lineSourcePromptYN with a failing writer = %v, %v; want false and an error", got, err)
+		}
+		if !strings.Contains(err.Error(), "could not be shown") || !strings.Contains(err.Error(), "section write failed") {
+			t.Errorf("error does not say the question was not shown: %v", err)
+		}
+	}
+	t.Run("scanner", func(t *testing.T) {
+		src := newScannerSource(strings.NewReader("y\n"), failWriter{})
+		check(t, src)
+		// The answer was left unread: the next read sees it.
+		line, ok, err := src.ReadGoal(context.Background(), promptText)
+		if line != "y" || !ok || err != nil {
+			t.Errorf("next read = %q, %v, %v; want the unread \"y\"", line, ok, err)
+		}
+	})
+	t.Run("editor", func(t *testing.T) {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\rhello\r"), out: failWriter{}})
+		check(t, f.src)
+		line, ok, err := f.readGoal(t)
+		if line != "hello" || !ok || err != nil {
+			t.Errorf("goal read after the refused answer = %q, %v, %v; want \"hello\"", line, ok, err)
+		}
+	})
+}
+
 func TestLineSourcePromptYNRejectedAnswerDeniesWithoutConsumingTypeahead(t *testing.T) {
 	f := newEditorFixture(t, editorOpts{in: strings.NewReader("bad\xb2\ry\r")})
 	got, err := lineSourcePromptYN(f.src)(context.Background(), "allow? ")
