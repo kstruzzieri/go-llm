@@ -105,14 +105,38 @@ golem -config models.json
 ```
 
 **Destination admission:** before the first outbound byte, Golem resolves the
-config's full network plan and shows a manifest of every remote endpoint it
-could reach — deduplicated destinations with each use-case route marked
-primary or fallback — and asks for consent. Literal loopback endpoints
-(llama.cpp, Ollama on `127.0.0.1`/`localhost`) auto-admit; anything remote
-waits for a yes. Under each destination whose provider sends a key, the screen
-adds `sends api_key from $NAME` (several: `$A, $B`) or `sends a literal
-api_key`, so you see which secret goes where; this extends the #477 consent
-field set. For scripts and one-shot runs, pre-admit exact
+config's full network plan and shows a "model servers" section — where this
+session's model requests can go — and asks for consent. Servers are grouped
+under "On this machine (allowed automatically)" (literal loopback endpoints:
+llama.cpp, Ollama on `127.0.0.1`/`localhost`) and "Remote". Each shows its
+name and URL, a `used for` row in plain words (chat, summaries, code
+delegation, embeddings; `(fallback)` marks a use reached only through fallback
+entries), and a `checks` row for metadata requests (model list, capabilities,
+slot status). Under each server whose provider sends a key, the section adds
+`sends api_key from $NAME` (several: `$A, $B`) or `sends a literal api_key`, so
+you see which secret goes where; this extends the #477 consent field set. Each
+remote carries its own state: `needs your OK`, `allowed by -allow-destination`,
+`allowed earlier this session`, or `not allowed (needs -allow-destination)`
+where Golem cannot ask. The question names exactly the remotes a yes admits:
+
+```text
+── model servers ── where this session's model requests can go ─────────────────
+On this machine (allowed automatically)
+  llamacpp  http://localhost:8090
+            used for  chat
+            checks    capabilities, model list, slot status
+Remote
+  opencode  https://opencode.ai/zen/go  needs your OK
+            used for  chat (fallback), summaries
+            checks    capabilities, model list
+            sends api_key from $OC_GO_API_KEY
+
+Send data to opencode (remote) during this session? [y/N]
+```
+
+A remote not covered by `-allow-destination` waits for a yes. Color follows
+`NO_COLOR`, `TERM=dumb`, `-no-color` and whether the output is a terminal.
+For scripts and one-shot runs, pre-admit exact
 destinations with the repeatable flag:
 
 ```bash

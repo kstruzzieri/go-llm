@@ -1,0 +1,7 @@
+### Changed — Golem's consent screen groups model servers by location and names what it asks about (#857)
+
+The block Golem prints before it sends data to a model server is now a "model servers" section. Servers are grouped under "On this machine (allowed automatically)" and "Remote". Each shows its name and URL, a `used for` row in plain words (chat, summaries, code delegation, embeddings; `(fallback)` for a use reached only through fallback entries), and a `checks` row for metadata requests such as the model list. Each remote carries its own state: `needs your OK`, `allowed by -allow-destination`, `allowed earlier this session`, or `not allowed (needs -allow-destination)` where Golem cannot ask. The question names exactly the remotes a yes admits, for example `Send data to opencode (remote) during this session?`. After `/grants clear`, the next admission asks about every remote not covered by `-allow-destination`, including ones approved before the clear.
+
+During `/model set` the section prints on the REPL's output, where the question is asked, instead of stderr. `/grants` shows the section with each remote's state. `golem models` labels the uses row `in route`. Color follows `NO_COLOR`, `TERM=dumb`, `-no-color` and whether the output is a terminal, per output stream; `golem index -no-color` now also turns off color in this section.
+
+Who is admitted, the approval policy, the non-interactive denial error and exit code, and all machine output (JSON records, `golem models -json`) are unchanged.
