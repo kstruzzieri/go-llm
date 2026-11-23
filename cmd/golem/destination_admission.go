@@ -24,10 +24,18 @@ type destinationAdmissionConfig struct {
 	AllowFlags  []string
 	Interactive bool
 	PromptYN    func(ctx context.Context, prompt string) (bool, error)
-	Out         io.Writer
+	// Out receives the consent section until the REPL binds its own writer
+	// with setReplOut: stderr at startup and for the subcommands.
+	Out io.Writer
 	// KeySources maps provider key -> the consent line saying where its key
 	// comes from (see keySourceLines); nil renders none.
 	KeySources map[string]string
+	// NoColor is the command's -no-color; NO_COLOR, TERM=dumb and a
+	// non-terminal writer turn color off without it.
+	NoColor bool
+	// Operation is "" for a session, or the subcommand ("models", "index",
+	// "source") whose requests the section describes.
+	Operation string
 }
 
 // destinationAdmission is golem's consent surface for #477: it renders the
@@ -46,8 +54,13 @@ type destinationAdmission struct {
 	promptYN    func(ctx context.Context, prompt string) (bool, error)
 	out         io.Writer
 	keySources  map[string]string
+	noColor     bool
+	operation   string
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// replOut is the REPL line source's writer once setReplOut binds it; the
+	// consent section then renders there, beside the question.
+	replOut  io.Writer
 	admitted bool
 	// granted is the policy the current generation was installed with —
 	// always an EXACT set (D4), never allow-all: the gate's Narrow carries
@@ -94,6 +107,8 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 		promptYN:    cfg.PromptYN,
 		out:         out,
 		keySources:  cfg.KeySources,
+		noColor:     cfg.NoColor,
+		operation:   cfg.Operation,
 	}, nil
 }
 
@@ -134,8 +149,7 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 	// At startup the baseline is only the exact allow flags (plus the
 	// loopback rule inside Permits): nothing has been granted yet.
 	flags := provider.NewDestinationPolicy(a.allowed...)
-	renderManifest(a.out, a.manifest, a.keySources, remoteStates(a.manifest, flags, flags, a.consentMode()),
-		manifestOpts{style: styleFor(a.out, false)})
+	a.renderForConsent(a.manifest, flags, flags)
 
 	policy, _, err := a.consent(ctx, a.manifest, flags)
 	if err != nil {
@@ -260,8 +274,7 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 
 	// Rendered before the decision: the question names the remotes of the
 	// PROPOSED manifest that need a yes, and the rendering shows their uses.
-	renderManifest(a.out, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
-		manifestOpts{style: styleFor(a.out, false)})
+	a.renderForConsent(m, flags, baseline)
 
 	policy, newGrant, err := a.consent(ctx, m, baseline)
 	if err != nil {
@@ -310,12 +323,36 @@ func manifestCovers(cur, proposed *provider.DestinationManifest) bool {
 
 // setPrompt rebinds the interactive seam — the REPL installs its lineSource
 // here once it exists, so post-startup re-admissions (after /grants clear)
-// run through the same input discipline as every other prompt.
+// run through the same input discipline as every other prompt. setReplOut
+// moves the section those questions sit under onto the same stream.
 func (a *destinationAdmission) setPrompt(promptYN func(ctx context.Context, prompt string) (bool, error)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.promptYN = promptYN
 	a.interactive = promptYN != nil
+}
+
+// setReplOut binds the writer the REPL's line source prints to. Every consent
+// section drawn after that (a /model set extension, the re-admission after
+// /grants clear) renders there, on the stream its question is asked on, with
+// color and width measured on it. Startup admission and the subcommands never
+// call it and stay on Out.
+func (a *destinationAdmission) setReplOut(out io.Writer) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.replOut = out
+}
+
+// renderForConsent draws m before the consent decision on the writer the
+// question is asked on (replOut once bound, else Out), asking when a question
+// can be asked and refusing otherwise. Callers hold a.mu.
+func (a *destinationAdmission) renderForConsent(m *provider.DestinationManifest, flags, baseline provider.DestinationPolicy) {
+	w := a.out
+	if a.replOut != nil {
+		w = a.replOut
+	}
+	renderManifest(w, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
+		manifestOpts{style: styleFor(w, a.noColor), operation: a.operation})
 }
 
 // pinLoopback re-installs the current generation with one provider's
@@ -373,18 +410,23 @@ func purposeReaching(m *provider.DestinationManifest, d provider.Destination) st
 	return ""
 }
 
-// render writes the /grants listing of the session's manifest: every remote
-// with its current state, plus the cleared note while /grants clear has left
-// it unadmitted. The consent surfaces (ensure, extend) render through
-// renderManifest directly, with asking or refusing states.
-func (a *destinationAdmission) render(w io.Writer) {
+// render writes the /grants listing of the session's manifest in style: every
+// remote with its current state, plus the cleared note while /grants clear has
+// left it unadmitted. Uses and fallback marks are as admitted, not as the
+// routes now stand: a route switched away from stays listed, and a fallback a
+// switch made primary can still read "(fallback)". It takes a.mu, so the
+// states, the cleared note and the manifest come from one moment; ensure and
+// extend hold a.mu and render through renderForConsent, never through this.
+func (a *destinationAdmission) render(w io.Writer, style consoleStyle) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	flags := provider.NewDestinationPolicy(a.allowed...)
 	baseline := flags
 	if a.admitted {
 		baseline = a.granted
 	}
 	renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
-		manifestOpts{style: styleFor(w, false), cleared: !a.admitted})
+		manifestOpts{style: style, cleared: !a.admitted})
 }
 
 // consentMode is the render mode for a manifest shown before the consent
@@ -499,7 +541,8 @@ func (a *destinationAdmission) effectiveConfigForDiscovery(raw *config.Config) *
 // render, admit via the exact -allow-destination set — NEVER a prompt (D10;
 // these commands do not read stdin for consent). A remote destination outside
 // the allowlist fails closed with the diagnostic naming it and the flag that
-// would cover it.
+// would cover it. The section on errOut describes operation (the subcommand's
+// name) and honors noColor.
 func admitForSubcommand(
 	ctx context.Context,
 	cfg *config.Config,
@@ -507,6 +550,8 @@ func admitForSubcommand(
 	opts providerbootstrap.PlanOptions,
 	allow []string,
 	ollamaOverride, ocProv, ocURL string,
+	operation string,
+	noColor bool,
 	errOut io.Writer,
 ) (*provider.DestinationGate, *providerbootstrap.NetworkPlan, *destinationAdmission, error) {
 	eff, err := providerbootstrap.Materialize(cfg, ollamaOverride, ocProv, ocURL)
@@ -524,6 +569,8 @@ func admitForSubcommand(
 		AllowFlags: allow,
 		Out:        errOut,
 		KeySources: keySourceLines(cfg),
+		NoColor:    noColor,
+		Operation:  operation,
 	})
 	if err != nil {
 		return nil, nil, nil, err

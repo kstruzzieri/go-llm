@@ -212,7 +212,7 @@ func sourceEmbedderFor(ctx context.Context, configPath, ollamaURL string, allowD
 	}
 	gate, netPlan, _, err := admitForSubcommand(ctx, cfg,
 		[]providerbootstrap.PlannedRoute{{UseCase: "embedding", Chain: embChain}},
-		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", errOut)
+		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", "source", false, errOut)
 	if err != nil {
 		return nil, nil, nil, err
 	}

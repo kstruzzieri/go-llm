@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -322,3 +323,130 @@ func TestPTYRawModeIsActuallyEntered(t *testing.T) {
 // writes through, so a future signature change breaks here rather than at
 // runtime in CI only.
 var _ io.Writer = (*lockedBuffer)(nil)
+
+// TestIndexNoColorHonored runs golem index with a real terminal as stderr:
+// the model-server section is colored by default, and -no-color leaves no
+// escape sequence. The remote embedding is refused, so nothing is sent.
+func TestIndexNoColorHonored(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("NO_COLOR", "")
+	configPath, _ := subcommandHarness(t, "remote")
+	for _, tc := range []struct {
+		name    string
+		flags   []string
+		wantESC bool
+	}{
+		{"default", nil, true},
+		{"-no-color", []string{"-no-color"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openPTY(t)
+			seen := drainMaster(p)
+			args := append([]string{"-config", configPath, "-root", t.TempDir()}, tc.flags...)
+			if err := runIndex(context.Background(), args, io.Discard, p.slave); err == nil {
+				t.Fatal("index with an uncovered remote embedding succeeded")
+			}
+			// Everything index wrote reaches the master before this marker.
+			const end = "END-OF-INDEX-OUTPUT"
+			if _, err := p.slave.WriteString(end); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for !strings.Contains(seen.String(), end) {
+				if time.Now().After(deadline) {
+					p.close()
+					t.Fatalf("the marker never reached the master: %q", seen.String())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			got := seen.String()
+			if !strings.Contains(got, "model servers") {
+				t.Fatalf("section not drawn on the terminal: %q", got)
+			}
+			if has := strings.Contains(got, "\x1b"); has != tc.wantESC {
+				t.Errorf("escape sequences present = %v, want %v: %q", has, tc.wantESC, got)
+			}
+		})
+	}
+}
+
+// TestStartupConsentTypeahead types "y\nhello\n" before golem reads anything.
+// The startup consent reads its answer a byte at a time from the terminal, so
+// it takes only "y\n", and the line editor that takes the descriptor next
+// reads "hello" as the first goal.
+func TestStartupConsentTypeahead(t *testing.T) {
+	t.Setenv("TERM", "xterm")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	local := newModelBackend(t, "local", "agent-model")
+	configPath := filepath.Join(t.TempDir(), "models.json")
+	configJSON := fmt.Sprintf(`{
+  "providers": {
+    "local": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},
+    "cloud": {"base_url": "https://typeahead.invalid/v1", "api_format": "openai-compat", "timeout": "5s"}
+  },
+  "models": {
+    "agent": {"name": "agent-model", "provider": "local", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream", "tool_call"]},
+    "summ": {"name": "summ-model", "provider": "cloud", "type": "dense", "context_window": 32768,
+      "capabilities": ["chat", "generate", "stream"]}
+  },
+  "defaults": {"agent": "agent", "summarize": "summ"}
+}`, local.url)
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := openPTY(t)
+	seen := drainMaster(p)
+	_, _, stderr := runTestFiles(t)
+
+	// Typed before run starts: the line discipline holds it for whoever
+	// reads first.
+	writeMaster(t, p, "y\nhello\n")
+	done := make(chan error, 1)
+	go func() {
+		done <- run([]string{"-config", configPath, "-root", t.TempDir(),
+			"-no-probe", "-no-cap-probe", "-no-memory", "-no-rag", "-no-project-context",
+			"-no-git-context", "-no-auto-index", "-no-session"}, p.slave, p.slave, stderr)
+	}()
+	wait := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for !cond() {
+			select {
+			case err := <-done:
+				t.Fatalf("golem exited before %s: %v\nstderr:\n%s\nterminal: %q", what, err, readRunTestFile(t, stderr), seen.String())
+			default:
+			}
+			if time.Now().After(deadline) {
+				p.close()
+				t.Fatalf("timed out waiting for %s\nstderr:\n%s\nterminal: %q", what, readRunTestFile(t, stderr), seen.String())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	wait("the first goal", func() bool { return local.chats.Load() >= 1 })
+	// The editor draws one prompt per read, so a second one on screen means
+	// the raw window is open again (the awaitPrompt barrier) and /exit
+	// reaches it.
+	wait("the next prompt", func() bool { return strings.Count(seen.String(), promptText) >= 2 })
+	writeMaster(t, p, "/exit\r")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run = %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
+		}
+	case <-time.After(10 * time.Second):
+		p.close()
+		t.Fatal("golem did not exit after /exit")
+	}
+
+	if bodies := local.chatBodies(); len(bodies) != 1 || !strings.Contains(bodies[0], "hello") {
+		t.Errorf("chat requests = %q, want exactly one carrying the goal \"hello\"", bodies)
+	}
+	const question = "Send data to cloud (remote) during this session? [y/N] "
+	if errOut := readRunTestFile(t, stderr); strings.Count(errOut, question) != 1 {
+		t.Errorf("startup consent asked %d times, want once:\n%s", strings.Count(errOut, question), errOut)
+	}
+}

@@ -232,6 +232,39 @@ func TestRunLocalOnlyRemainsPromptFree(t *testing.T) {
 	}
 }
 
+// -p - reads stdin once, as the prompt body, never as a consent answer: a
+// body of "y" leaves the uncovered remote refused with the unchanged
+// noninteractive error, and no question is printed.
+func TestPipedStdinNoConsentRead(t *testing.T) {
+	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+	if _, err := stdin.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+
+	// -grounding makes the remote analysis fallback reachable in one-shot.
+	err := run([]string{"-config", configPath, "-root", root, "-p", "-", "-grounding",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	const want = `provider: destination opencode/https://opencode.invalid/zen/go not admitted for extract; pass -allow-destination "opencode/https://opencode.invalid/zen/go" to permit it`
+	errOut := readRunTestFile(t, stderr)
+	if err == nil || err.Error() != want {
+		t.Fatalf("denial = %v\nwant     %s\nstderr:\n%s", err, want, errOut)
+	}
+	if strings.Contains(errOut, "Send data to") {
+		t.Errorf("-p - asked a consent question:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "  not allowed (needs -allow-destination)\n") {
+		t.Errorf("refused row missing:\n%s", errOut)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("refused -p - sent %d requests, want 0", got)
+	}
+}
+
 // M15/D8: the discovery target derives from the plan's agent route, not from
 // defaults.agent.
 func TestOpenAICompatTargetFromRoute(t *testing.T) {

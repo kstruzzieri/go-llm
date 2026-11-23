@@ -669,7 +669,7 @@ func TestReplGrantsClearRevokesDestinations(t *testing.T) {
 		t.Error("/grants clear left destination authority in place")
 	}
 	if !strings.Contains(out.String(), "destination") {
-		t.Errorf("/grants clear output does not mention destinations: %s", out.String())
+		t.Errorf("/grants clear output does not mention destination grants: %s", out.String())
 	}
 
 	// /new and /clear do NOT revoke destination authority (D12): re-admit,
@@ -695,6 +695,87 @@ func TestReplGrantsStatusShowsDestinations(t *testing.T) {
 	dispatchSlash(context.Background(), &out, sess, "/grants")
 	if !strings.Contains(out.String(), "opencode") {
 		t.Errorf("/grants status does not show destination grants: %s", out.String())
+	}
+}
+
+// grantsEdges: a local server, a remote the flags cover, and a remote only an
+// interactive yes admits.
+func grantsEdges(t *testing.T) []provider.DestinationEdge {
+	t.Helper()
+	return []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "agent", Destination: admDest(t, "approved", "https://approved.example.com"), IsFallback: true},
+		{Purpose: "summarize", Destination: admDest(t, "flagged", "https://flagged.example.com")},
+	}
+}
+
+// /grants lists each remote's state as the session holds it, and after
+// /grants clear says so: every destination, local and flagged included, is
+// out of the gate until the next goal re-admits.
+func TestGrantsListingStates(t *testing.T) {
+	p := &fakePrompt{answer: true}
+	adm, _ := newTestAdmission(t, grantsEdges(t), []string{"flagged/https://flagged.example.com"}, true, p)
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{grants: newApprovalGrants(), destAdmission: adm}
+	const (
+		approved = "\n  approved  https://approved.example.com"
+		flagged  = "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n"
+		cleared  = "access cleared by /grants clear: local and flag-covered servers are re-admitted before the next goal; others ask again\n"
+	)
+
+	before := slash(t, sess, "/grants")
+	for _, want := range []string{approved + "  allowed earlier this session\n", flagged} {
+		if !strings.Contains(before, want) {
+			t.Errorf("/grants after a yes missing %q:\n%s", want, before)
+		}
+	}
+	if strings.Contains(before, cleared) {
+		t.Errorf("/grants shows the cleared line before any clear:\n%s", before)
+	}
+
+	slash(t, sess, "/grants clear")
+	after := slash(t, sess, "/grants")
+	// The longer state does not fit beside the URL at 80 columns, so it sits
+	// on its own line at the value column.
+	for _, want := range []string{cleared, approved + "\n            not allowed (cleared; the next goal asks again)\n", flagged} {
+		if !strings.Contains(after, want) {
+			t.Errorf("/grants after clear missing %q:\n%s", want, after)
+		}
+	}
+	// Why the cleared line exists: nothing binds until the next goal, not
+	// even the servers the listing still calls allowed.
+	for _, b := range [][2]string{{"agent", "llamacpp"}, {"summarize", "flagged"}, {"agent", "approved"}} {
+		if _, err := adm.gate.Bind(context.Background(), b[0], b[1]); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("Bind(%s, %s) after /grants clear = %v, want ErrDestinationDenied", b[0], b[1], err)
+		}
+	}
+}
+
+// Startup with every remote covered by -allow-destination asks nothing, even
+// with a prompt bound, and the rows say which flag admitted them.
+func TestStartupFlagsOnlyAsksNothing(t *testing.T) {
+	p := &fakePrompt{answer: false}
+	edges := []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "summarize", Destination: admDest(t, "flagged", "https://flagged.example.com")},
+	}
+	adm, out := newTestAdmission(t, edges, []string{"flagged/https://flagged.example.com"}, true, p)
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatalf("flag-covered startup: %v", err)
+	}
+	if p.calls != 0 {
+		t.Errorf("flag-covered startup asked %d questions, want none", p.calls)
+	}
+	got := out.String()
+	if !strings.Contains(got, "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n") {
+		t.Errorf("flagged row missing its state:\n%s", got)
+	}
+	for _, unwanted := range []string{"needs your OK", "Send data to"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("flag-covered startup shows %q:\n%s", unwanted, got)
+		}
 	}
 }
 

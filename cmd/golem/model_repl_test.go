@@ -1592,18 +1592,14 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 	}
 	var atPrompt string
 	stderr := fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
-		out, ok := sess.destAdmission.out.(*os.File)
-		if !ok {
-			t.Fatalf("admission Out is %T, want the run's stderr file", sess.destAdmission.out)
-		}
-		src := newScannerSource(strings.NewReader("yes\n"), io.Discard)
+		// Bound as run() binds the REPL: the section and the question share
+		// the line source's writer, read here before the answer is.
+		var replOut strings.Builder
+		sess.destAdmission.setReplOut(&replOut)
+		src := newScannerSource(strings.NewReader("yes\n"), &replOut)
 		inner := lineSourcePromptYN(src)
 		sess.destAdmission.setPrompt(func(ctx context.Context, prompt string) (bool, error) {
-			b, err := os.ReadFile(out.Name())
-			if err != nil {
-				t.Fatal(err)
-			}
-			atPrompt = string(b)
+			atPrompt = replOut.String()
 			return inner(ctx, prompt)
 		})
 		got := slash(t, sess, "/model set cloudrole")
@@ -1624,6 +1620,69 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 	}
 	if strings.Contains(atPrompt, canary) || strings.Contains(stderr, canary) {
 		t.Errorf("canary leaked into captured output:\n%s", stderr)
+	}
+}
+
+// TestModelSetSectionOnAnswerWriter drives the real REPL through run(): the
+// /model set consent section is drawn on the line source's writer (stdout)
+// before the question is asked there, and none of it reaches stderr. Both
+// orientations run, so neither stream's kind (pipe or file) picks the writer.
+func TestModelSetSectionOnAnswerWriter(t *testing.T) {
+	const question = "Send data to cloud (remote) during this session? [y/N] "
+	const cloudRow = "\n  cloud    https://model-switch.invalid/v1  needs your OK\n"
+	for _, stdoutPipe := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stdout pipe %v", stdoutPipe), func(t *testing.T) {
+			fx := newModelSwitchFixture(t, remoteModelURL)
+			stdin, outFile, errFile := runTestFiles(t)
+			if _, err := stdin.WriteString("/model set cloudrole\nyes\n"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			pr, pw, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+			piped := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(pr)
+				piped <- string(b)
+			}()
+			stdout, stderr := pw, errFile
+			if !stdoutPipe {
+				stdout, stderr = outFile, pw
+			}
+			runErr := run([]string{"-config", fx.configPath, "-root", fx.root,
+				"-no-probe", "-no-cap-probe", "-no-memory", "-no-rag", "-no-project-context",
+				"-no-git-context", "-no-auto-index", "-no-editor", "-no-session"}, stdin, stdout, stderr)
+			_ = pw.Close()
+			outText, errText := <-piped, readRunTestFile(t, errFile)
+			if !stdoutPipe {
+				outText, errText = readRunTestFile(t, outFile), outText
+			}
+			if runErr != nil {
+				t.Fatalf("run = %v\nstdout:\n%s\nstderr:\n%s", runErr, outText, errText)
+			}
+			q := strings.Index(outText, question)
+			if q < 0 {
+				t.Fatalf("question not asked on stdout:\n%s", outText)
+			}
+			s := strings.Index(outText, "\u2500\u2500 model servers")
+			if s < 0 || s > q || !strings.Contains(outText[s:q], cloudRow) {
+				t.Errorf("section not on stdout before the question:\n%s", outText)
+			}
+			var leaks []string
+			for _, leak := range []string{"model-switch.invalid", "needs your OK", "\nRemote\n", question} {
+				if strings.Contains(errText, leak) {
+					leaks = append(leaks, leak)
+				}
+			}
+			if len(leaks) > 0 {
+				t.Errorf("stderr carries %q of the /model set section:\n%s", leaks, errText)
+			}
+		})
 	}
 }
 

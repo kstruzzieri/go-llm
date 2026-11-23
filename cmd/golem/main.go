@@ -1185,6 +1185,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		PromptYN:    startupPromptYN(stdin, stderr),
 		Out:         stderr,
 		KeySources:  keySourceLines(cfg),
+		NoColor:     f.noColor,
 	})
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
@@ -1998,6 +1999,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),
+		noColor:          f.noColor,
 		retrieveOmitted:  retrieveOmitted,
 		session:          sessn,
 		strictApproval:   f.strictApproval,
@@ -2277,6 +2279,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// through the SAME lineSource as every other read, never a second
 		// stdin reader racing the editor.
 		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
+		// ...and draw the section above that question on the stream the line
+		// source prints to (inputConfig.Out defaults to Stdout), not stderr.
+		sess.destAdmission.setReplOut(stdout)
 		// Bound before the auto-index goroutine can emit a notice, so no
 		// asynchronous message is ever rendered through the default display
 		// while a source exists.

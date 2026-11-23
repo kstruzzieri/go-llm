@@ -95,6 +95,7 @@ type replSession struct {
 	// runtime's budget without touching this field (#376 M4).
 	startupBudget   agent.Budget
 	color           bool
+	noColor         bool // -no-color, for writers styled later (the /grants listing)
 	clock           func() time.Time
 	retrieveOmitted bool // when true, /tools appends the omission note
 
@@ -898,7 +899,7 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 				_, _ = fmt.Fprintln(out, autoEditLine(sess, suspended))
 			}
 			if sess.destAdmission != nil {
-				sess.destAdmission.render(out)
+				sess.destAdmission.render(out, styleFor(out, sess.noColor))
 			}
 		case len(fields) == 2 && fields[1] == "clear":
 			sess.grants.clear()

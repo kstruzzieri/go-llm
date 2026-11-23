@@ -53,6 +53,94 @@ func subcommandHarness(t *testing.T, embeddingProvider string) (configPath strin
 	return configPath, counter
 }
 
+// opsConfig writes a config with a never-dialed local provider and the
+// remote "cloud" (https://ops.invalid/api); models and defaults are the
+// caller's JSON members.
+func opsConfig(t *testing.T, models, defaults string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "models.json")
+	configJSON := `{
+  "providers": {
+    "local": {"base_url": "http://127.0.0.1:9", "api_format": "openai-compat", "timeout": "5s"},
+    "cloud": {"base_url": "https://ops.invalid/api", "api_format": "openai-compat", "timeout": "5s"}
+  },
+  "models": {` + models + `},
+  "defaults": {` + defaults + `}
+}`
+	if err := os.WriteFile(path, []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const (
+	opsLocalChat  = `"agent": {"name": "m1", "provider": "local", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]`
+	opsCloudChat  = `"cloudchat": {"name": "c1", "provider": "cloud", "type": "dense", "context_window": 32768, "capabilities": ["chat", "generate", "stream", "tool_call"]}`
+	opsCloudEmbed = `"embedding": {"name": "e1", "provider": "cloud", "type": "embedding", "context_window": 8192}`
+)
+
+// golem models with an uncovered remote on its route draws the refused row
+// under the models subtitle and fails with the unchanged denial.
+func TestSubcommandRefusedRow(t *testing.T) {
+	configPath := opsConfig(t, opsCloudChat, `"agent": "cloudchat"`)
+	var out, errOut strings.Builder
+	err := runModels(context.Background(), []string{"-config", configPath}, &out, &errOut)
+	const want = `provider: destination cloud/https://ops.invalid/api not admitted for agent; pass -allow-destination "cloud/https://ops.invalid/api" to permit it`
+	if err == nil || err.Error() != want {
+		t.Fatalf("denial = %v\nwant     %s", err, want)
+	}
+	got := errOut.String()
+	for _, w := range []string{
+		"\u2500\u2500 model servers \u2500\u2500 servers golem models lists and checks ",
+		"\n  cloud  https://ops.invalid/api  not allowed (needs -allow-destination)\n         in route  chat\n",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("models section missing %q:\n%s", w, got)
+		}
+	}
+}
+
+// Each subcommand describes its own operation: the subtitle names it, and
+// models says "in route" where the others say "used for". Every case is
+// refused, so none sends a request.
+func TestSubcommandOperations(t *testing.T) {
+	withFallback := opsConfig(t, opsLocalChat+`, "fallbacks": ["cloudchat"]}, `+opsCloudChat, `"agent": "agent"`)
+	everyRoute := opsConfig(t, opsLocalChat+`}, `+opsCloudChat+`, `+opsCloudEmbed,
+		`"agent": "agent", "embedding": "embedding", "summarize": "cloudchat"`)
+	for _, tc := range []struct {
+		name string
+		run  func(errOut io.Writer) error
+		want []string
+	}{
+		{"models", func(errOut io.Writer) error {
+			return runModels(context.Background(), []string{"-config", withFallback}, io.Discard, errOut)
+		}, []string{"\u2500\u2500 servers golem models lists and checks ", "\n         in route  chat (fallback)\n"}},
+		{"models -json", func(errOut io.Writer) error {
+			return runModels(context.Background(), []string{"-config", everyRoute, "-json"}, io.Discard, errOut)
+		}, []string{"\u2500\u2500 servers golem models lists and checks ", "\n         in route  chat\n"}},
+		{"index -progressive", func(errOut io.Writer) error {
+			return runIndex(context.Background(), []string{"-config", everyRoute, "-root", t.TempDir(), "-progressive"}, io.Discard, errOut)
+		}, []string{"\u2500\u2500 where golem index sends model requests ", "\n         used for  embeddings, summaries\n"}},
+		{"source add", func(errOut io.Writer) error {
+			return runSource(context.Background(),
+				[]string{"add", "-config", everyRoute, "-root", t.TempDir(), "-text", "-name", "doc"},
+				strings.NewReader("hello world"), io.Discard, errOut)
+		}, []string{"\u2500\u2500 where golem source sends model requests ", "\n         used for  embeddings\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var errOut strings.Builder
+			if err := tc.run(&errOut); err == nil || !strings.Contains(err.Error()+errOut.String(), "-allow-destination") {
+				t.Fatalf("%s with an uncovered remote = %v, want the denial\nstderr:\n%s", tc.name, err, errOut.String())
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(errOut.String(), w) {
+					t.Errorf("section missing %q:\n%s", w, errOut.String())
+				}
+			}
+		})
+	}
+}
+
 // golem index with a remote embedding role fails closed — no prompt, the
 // diagnostic names destination and flag, zero requests anywhere (I6/I18).
 func TestRunIndexDeniesRemoteEmbedding(t *testing.T) {
