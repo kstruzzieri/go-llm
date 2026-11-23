@@ -5,6 +5,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -584,7 +585,7 @@ func (s AttemptStatus) MarshalJSON() ([]byte, error) {
 // any other string decodes as AttemptStatusUnknown, a non-string is an error,
 // and null leaves *s unchanged.
 func (s *AttemptStatus) UnmarshalJSON(b []byte) error {
-	if string(b) == "null" {
+	if string(bytes.Trim(b, " \t\r\n")) == "null" {
 		return nil
 	}
 	var tag string

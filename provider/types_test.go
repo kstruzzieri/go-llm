@@ -475,6 +475,16 @@ func TestAttemptStatusUnmarshalJSONNull(t *testing.T) {
 	}
 }
 
+func TestAttemptStatusUnmarshalJSONDirectNull(t *testing.T) {
+	s := AttemptStatusSucceeded
+	if err := s.UnmarshalJSON([]byte(" \tnull\r\n")); err != nil || s != AttemptStatusSucceeded {
+		t.Fatalf("padded null: got %v, %v; want unchanged Succeeded, nil", s, err)
+	}
+	if err := s.UnmarshalJSON([]byte("\vnull")); err == nil {
+		t.Fatal("accepted a vertical tab as JSON whitespace")
+	}
+}
+
 func TestAttemptStatusJSONRoundTrip(t *testing.T) {
 	for _, in := range []AttemptStatus{AttemptStatusUnknown, AttemptStatusSucceeded, AttemptStatusFailed} {
 		b, err := json.Marshal(in)
