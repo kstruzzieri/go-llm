@@ -403,6 +403,9 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 		}
 	}
 
+	// destinationName always yields ASCII (non-ASCII names are quoted with
+	// escapes), so this pins only that such names stay column-aligned; wide
+	// text on screen is a URL, covered by TestRenderManifestWideURLStatePlacement.
 	cjk := admDest(t, "\u4e2d\u6587", "https://cjk.example.com")
 	mark := admDest(t, "e\u0301", "https://mark.example.com")
 	m = testManifest(t,
@@ -424,6 +427,32 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 		if !found {
 			t.Errorf("%s missing:\n%s", url, got)
 		}
+	}
+}
+
+// A URL with wide characters (an IDN host survives canonicalization raw) is
+// longer in bytes than in columns, so the state placement must measure
+// columns: at the width where the header and its state exactly fill the
+// line, the state stays inline; one column narrower it moves to its own line.
+func TestRenderManifestWideURLStatePlacement(t *testing.T) {
+	d := admDest(t, "wide2", "https://\u4f8b\u4f8b\u4f8b\u4f8b.jp")
+	m := testManifest(t, provider.DestinationEdge{Purpose: "agent", Destination: d})
+	states := map[provider.Destination]remoteState{d: remoteNeedsOK}
+	head := "  wide2  " + d.BaseURL()
+	text := remoteNeedsOK.text()
+	cols := displayCols(head) + 2 + displayCols(text)
+	if len(head)+2+len(text) <= cols {
+		t.Fatalf("fixture does not separate bytes (%d) from columns (%d)", len(head)+2+len(text), cols)
+	}
+	indent := strings.Repeat(" ", 2+len("wide2")+2)
+
+	got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, cols}})
+	if !strings.Contains(got, "\n"+head+"  "+text+"\n") {
+		t.Errorf("width %d: state should stay inline:\n%s", cols, got)
+	}
+	got = renderString(m, nil, states, manifestOpts{style: consoleStyle{false, cols - 1}})
+	if !strings.Contains(got, "\n"+head+"\n"+indent+text+"\n") {
+		t.Errorf("width %d: state should move to its own line:\n%s", cols-1, got)
 	}
 }
 

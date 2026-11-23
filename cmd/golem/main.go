@@ -1110,7 +1110,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		routes = append(routes, summarizeRoute)
 	}
 	if embChainErr == nil && retrievalEnabled {
-		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: embeddingUseCase, Chain: embChain})
 	}
 	if f.grounding && cfg != nil {
 		// Grounding (#348, merged via #480) binds the extract and verify use

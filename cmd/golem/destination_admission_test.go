@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -340,6 +342,41 @@ func TestAdmissionPartialAllowlistStillFails(t *testing.T) {
 	}
 }
 
+// remoteRow matches one remote header line of the model-server section: name,
+// URL and its state on one line (the test writer is 80 columns).
+var remoteRow = regexp.MustCompile(`(?m)^  (\S+)\s+(https?://\S+)  (needs your OK|allowed by -allow-destination|allowed earlier this session|not allowed \(.*\))$`)
+
+// assertRows checks each remote's full header line (name, URL and state), that
+// no other remote row is drawn, and that the remotes reading "needs your OK"
+// are exactly the question's names.
+func assertRows(t *testing.T, step, section, question string, want, urls map[string]string) {
+	t.Helper()
+	got := map[string]string{}
+	for _, m := range remoteRow.FindAllStringSubmatch(section, -1) {
+		got[m[1]] = m[3]
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("%s: row states %v, want %v:\n%s", step, got, want, section)
+	}
+	var needs []string
+	for name, state := range want {
+		line := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(name) + `\s+` + regexp.QuoteMeta(urls[name]) + `  ` + regexp.QuoteMeta(state) + `$`)
+		if !line.MatchString(section) {
+			t.Errorf("%s: no header line for %q with URL %s and state %q:\n%s", step, name, urls[name], state, section)
+		}
+		if state == "needs your OK" {
+			needs = append(needs, name)
+		}
+	}
+	slices.Sort(needs)
+	names := strings.TrimSuffix(strings.TrimPrefix(question, "Send data to "), " (remote) during this session? [y/N] ")
+	asked := strings.Split(strings.ReplaceAll(names, " and ", ", "), ", ")
+	slices.Sort(asked)
+	if !slices.Equal(needs, asked) {
+		t.Errorf("%s: rows needing OK %v, question names %v", step, needs, asked)
+	}
+}
+
 // R3-8: across a session the question names exactly the remotes a yes would
 // admit: never a flag-covered one, never one granted earlier in the
 // generation, and after a revoke every remote the user withdrew, sorted.
@@ -354,7 +391,18 @@ func TestConsentSequenceAsksForExactlyUncovered(t *testing.T) {
 	fresh := []provider.DestinationEdge{{Purpose: "verify", Destination: admDest(t, "fresh", "https://fresh.example.com")}}
 	newer := []provider.DestinationEdge{{Purpose: "extract", Destination: admDest(t, "newer", "https://newer.example.com")}}
 
-	adm, _ := newTestAdmission(t, startup, []string{flagged.String()}, true, &fakePrompt{})
+	adm, out := newTestAdmission(t, startup, []string{flagged.String()}, true, &fakePrompt{})
+	urls := map[string]string{
+		"flagged": flagged.BaseURL(),
+		"granted": "https://granted.example.com",
+		"fresh":   "https://fresh.example.com",
+		"newer":   "https://newer.example.com",
+	}
+	const (
+		needs   = "needs your OK"
+		byFlag  = "allowed by -allow-destination"
+		earlier = "allowed earlier this session"
+	)
 	var asked []string
 	adm.setPrompt(func(_ context.Context, q string) (bool, error) {
 		asked = append(asked, q)
@@ -378,14 +426,20 @@ func TestConsentSequenceAsksForExactlyUncovered(t *testing.T) {
 	q2 := "Send data to fresh (remote) during this session? [y/N] "
 	q3 := "Send data to fresh, granted and newer (remote) during this session? [y/N] "
 
+	start := out.Len()
 	if err := adm.ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
 	check("ensure", []string{q1}, startup)
+	assertRows(t, "ensure", out.String()[start:], q1,
+		map[string]string{"flagged": byFlag, "granted": needs}, urls)
 
+	start = out.Len()
 	if _, err := adm.extend(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
+	assertRows(t, "extend", out.String()[start:], q2,
+		map[string]string{"flagged": byFlag, "granted": earlier, "fresh": needs}, urls)
 	all := append(slices.Clone(startup), fresh...)
 	check("extend", []string{q1, q2}, all)
 
@@ -396,10 +450,13 @@ func TestConsentSequenceAsksForExactlyUncovered(t *testing.T) {
 		}
 	}
 
+	start = out.Len()
 	if _, err := adm.extend(ctx, newer); err != nil {
 		t.Fatal(err)
 	}
 	check("revoke then extend", []string{q1, q2, q3}, append(all, newer...))
+	assertRows(t, "revoke then extend", out.String()[start:], q3,
+		map[string]string{"flagged": byFlag, "granted": needs, "fresh": needs, "newer": needs}, urls)
 }
 
 // R3-8: pinning replaces a provider's destination with the discovered
@@ -431,12 +488,23 @@ func TestConsentPinnedLoopbackNeverAsked(t *testing.T) {
 	if err := adm.ensure(ctx); err != nil {
 		t.Fatal(err)
 	}
+	assertRows(t, "re-admission", out.String()[start:], "Send data to other (remote) during this session? [y/N] ",
+		map[string]string{"other": "needs your OK"}, map[string]string{"other": "https://other.example.com"})
 	if want := "Send data to other (remote) during this session? [y/N] "; p.calls != 2 || p.seen != want {
 		t.Errorf("re-admission asked %d question(s), last %q; want 2 in all, last %q", p.calls, p.seen, want)
 	}
 	section := out.String()[start:]
 	if !strings.Contains(section, pinned.BaseURL()) || strings.Contains(section, configured.BaseURL()) {
 		t.Errorf("re-admission section must show only the pinned URL %s, never %s:\n%s", pinned.BaseURL(), configured.BaseURL(), section)
+	}
+	// The pinned provider sits under the local group, with no state.
+	if i, j := strings.Index(section, "Remote"), strings.Index(section, pinned.BaseURL()); i < 0 || j < 0 || j > i {
+		t.Errorf("pinned URL not under the local group, before Remote:\n%s", section)
+	}
+	for _, l := range strings.Split(section, "\n") {
+		if strings.Contains(l, pinned.BaseURL()) && strings.TrimRight(l, " ") != "  llamacpp  "+pinned.BaseURL() {
+			t.Errorf("pinned row carries a state or odd shape: %q", l)
+		}
 	}
 	for _, purpose := range []string{"agent", provider.DestinationPurposeModelRefresh} {
 		if _, err := adm.gate.Bind(ctx, purpose, "llamacpp"); err != nil {

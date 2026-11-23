@@ -115,7 +115,7 @@ const (
 	renderAsking renderMode = iota
 	// renderRefusing accompanies a refusal.
 	renderRefusing
-	// renderListing is a plain listing (for example /model servers).
+	// renderListing is a plain listing (for example /grants).
 	renderListing
 )
 
