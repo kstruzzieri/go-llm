@@ -235,7 +235,7 @@ func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride, ocSourc
 // resolvePreflightEndpoint guards a nil resolver before invoking it, so callers
 // (and tests) can pass nil to mean "no endpoint metadata available."
 func resolvePreflightEndpoint(resolve endpointResolver, providerName string) (preflightEndpoint, bool) {
-	if resolve == nil {
+	if resolve == nil || providerName == "" {
 		return preflightEndpoint{}, false
 	}
 	return resolve(providerName)
@@ -266,14 +266,30 @@ func providerDiscoveryFailure(err error) bool {
 
 // preflightConnectivityWarn builds the bare warning string for a chain entry
 // whose registry lookup errored — a connectivity/config failure rather than a
-// capability gap. When the provider's endpoint is known it names the provider +
+// capability gap. A per-model detail error identifies the failed operation.
+// For a listing failure with a known endpoint it names the provider +
 // base_url + discovery path (and the HTTP status, when the underlying error
 // carries one). With no endpoint, or when the lookup error is not a discovery
 // failure, it surfaces the underlying error under a neutral "provider lookup
 // failed" framing. The error and the base_url are quoted: either can carry a
 // server's body or config text, control characters included.
 // The returned string is bare: the startup renderer prepends "warning: ".
-func preflightConnectivityWarn(useCase, sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
+func preflightConnectivityWarn(useCase, sel, providerName string, resolve endpointResolver, lookupErr error) string {
+	var detail *provider.ModelDetailError
+	if errors.As(lookupErr, &detail) {
+		ep, epOK := resolvePreflightEndpoint(resolve, detail.Key.Provider)
+		operation := "model detail lookup"
+		if epOK && ep.ModelsPath == "/api/tags" {
+			operation = "POST /api/show"
+		}
+		message := fmt.Sprintf("%s %q: %s failed on %q", fallbackLabel(useCase), sel, operation, detail.Key.Provider)
+		var hs httpStatuser
+		if errors.As(detail, &hs) {
+			return fmt.Sprintf("%s (%s)", message, statusLabel(hs.HTTPStatusCode()))
+		}
+		return fmt.Sprintf("%s: %q", message, detail.Err)
+	}
+	ep, epOK := resolvePreflightEndpoint(resolve, providerName)
 	if !epOK || ep.BaseURL == "" || !providerDiscoveryFailure(lookupErr) {
 		return fmt.Sprintf("%s %q: provider lookup failed: %q", fallbackLabel(useCase), sel, lookupErr)
 	}
@@ -445,8 +461,7 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, re
 	if key, parsed := parseSelector(sel); parsed {
 		p, lerr := reg.Lookup(ctx, key)
 		if lerr != nil {
-			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
-			return false, preflightConnectivityWarn(useCase, sel, key.Provider, ep, epOK, lerr), true
+			return false, preflightConnectivityWarn(useCase, sel, key.Provider, resolveEndpoint, lerr), true
 		}
 		if profileToolCapable(p) {
 			return true, "", false
@@ -454,12 +469,11 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel, useCase string, re
 		return classifyToolCapability(ctx, sel, useCase, key, resolver, allowProbe)
 	}
 
-	// Bare model name: resolve across providers. A bare selector names no single
-	// provider, so there is no endpoint to resolve — reuse the connectivity
-	// builder's no-endpoint branch (epOK=false) so the message has one source.
+	// A bare selector has no provider of its own. A detail error still
+	// identifies the provider that handled the request.
 	profs, lerr := reg.LookupAny(ctx, sel)
 	if lerr != nil {
-		return false, preflightConnectivityWarn(useCase, sel, "", preflightEndpoint{}, false, lerr), true
+		return false, preflightConnectivityWarn(useCase, sel, "", resolveEndpoint, lerr), true
 	}
 	for _, p := range profs {
 		if profileToolCapable(p) {

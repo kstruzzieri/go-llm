@@ -3,8 +3,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -421,6 +423,36 @@ func NewModelRegistry(providers ProviderResolver, fpStore fingerprint.Store, opt
 	}
 	return r, nil
 }
+
+// ErrModelNotFound reports that a provider answered its model listing and the
+// model was not on it. Lookup, Refresh and LookupAny wrap it; a provider that
+// could not be reached returns a different error, since it may come back (#856).
+var ErrModelNotFound = errors.New("provider: model not found")
+
+// modelNotFoundError keeps the message users already see while matching
+// ErrModelNotFound.
+type modelNotFoundError struct{ key ModelKey }
+
+func (e modelNotFoundError) Error() string {
+	return fmt.Sprintf("model %q not found on %q", e.key.Model, e.key.Provider)
+}
+
+func (modelNotFoundError) Unwrap() error { return ErrModelNotFound }
+
+// ModelDetailError reports a failed per-model metadata request after a successful
+// listing. Its cause retains the provider's HTTP status or transport error.
+type ModelDetailError struct {
+	Key ModelKey
+	Err error
+}
+
+// Error describes the model and provider whose detail request failed.
+func (e *ModelDetailError) Error() string {
+	return fmt.Sprintf("query model %q from %q: %v", e.Key.Model, e.Key.Provider, e.Err)
+}
+
+// Unwrap returns the underlying detail request error.
+func (e *ModelDetailError) Unwrap() error { return e.Err }
 
 // Lookup returns the merged ModelProfile for a provider-qualified model key.
 // Results are cached by ModelKey. The initial implementation returns the cached
@@ -880,7 +912,9 @@ func (r *ModelRegistry) LookupAny(ctx context.Context, model string) ([]*ModelPr
 		key := ModelKey{Provider: p.Name(), Model: model}
 		profile, lookupErr := r.Lookup(ctx, key)
 		if lookupErr != nil {
-			if firstErr == nil {
+			// The model is not found only if every provider said so: one
+			// unreachable provider is the error to report (#856).
+			if firstErr == nil || (errors.Is(firstErr, ErrModelNotFound) && !errors.Is(lookupErr, ErrModelNotFound)) {
 				firstErr = lookupErr
 			}
 			continue
@@ -1371,12 +1405,22 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 		}
 	}
 	if direct != nil {
-		if detail, err := direct.ModelInfo(ctx, key.Model); err == nil {
+		detail, err := direct.ModelInfo(ctx, key.Model)
+		if err == nil {
 			return detail, nil
 		}
+		if code, ok := httpStatusCode(err); ok && code == http.StatusNotFound {
+			return nil, modelNotFoundError{key: key}
+		}
+		return nil, &ModelDetailError{Key: key, Err: err}
+	}
+	if models == nil {
+		// The response had no listing key: not a listing (see
+		// Provider.Models), so the model's absence from it proves nothing.
+		return nil, fmt.Errorf("query models from %q: the response carried no model listing", key.Provider)
 	}
 
-	return nil, fmt.Errorf("model %q not found on %q", key.Model, key.Provider)
+	return nil, modelNotFoundError{key: key}
 }
 
 // merge combines runtime, static, fingerprint, and config data into a single

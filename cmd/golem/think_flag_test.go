@@ -173,6 +173,15 @@ func TestThinkSupportGate(t *testing.T) {
 		}
 	})
 
+	t.Run("model name stays on one line in the thinking notice", func(t *testing.T) {
+		key := provider.ModelKey{Provider: "ollama", Model: "m1\nv2"}
+		reg := &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{key: provider.ThinkNone}}
+		_, notice := resolveThinkOptions(ctx, reg, []string{key.String()}, "on")
+		if want := "think: model ollama/m1 v2 does not support thinking; -think ignored"; notice != want {
+			t.Errorf("notice = %q, want %q", notice, want)
+		}
+	})
+
 	t.Run("mixed chain: options applied, no notice", func(t *testing.T) {
 		reg := &thinkFakeReg{byKey: map[provider.ModelKey]provider.ThinkMode{
 			k1: provider.ThinkNone,

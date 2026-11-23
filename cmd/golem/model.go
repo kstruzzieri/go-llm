@@ -191,6 +191,9 @@ type modelSelection struct {
 	useCase       string             // the routing use case the chain is served under
 	useRecommend  bool               // startup recommendation mode; the first successful set clears it for good
 	ceilingSource inputCeilingSource // which rule produced the live input ceiling
+	// The chain entries behind a safe-fallback ceiling, as the ceiling line
+	// names them; "" otherwise.
+	ceilingFallbackFrom string
 
 	// Frozen preparation inputs: the exact bundle and flag values startup
 	// passed to BuildNetworkPlan, prepareModel, newDispatchTool, and
@@ -430,6 +433,7 @@ func prepareModelRoute(ctx context.Context, sess *replSession, route providerboo
 	next.useCase = prep.plan.useCase
 	next.useRecommend = false // the first successful set is strict for the process lifetime
 	next.ceilingSource = prep.ceiling.source
+	next.ceilingFallbackFrom = prep.ceiling.fallbackFrom
 	return modelSwitch{
 		selection:   next,
 		tools:       newTools,
@@ -516,16 +520,19 @@ func writeModelStatus(out io.Writer, sess *replSession) {
 		// selector text to echo.
 		requested = "none configured"
 	}
-	_, _ = fmt.Fprintf(out, "model: %s\n", requested)
-	_, _ = fmt.Fprintf(out, "chain: %s\n", sel.chainLine())
+	// Selector text comes from models.json or the /model set argument, and
+	// the last routed name from the provider: render each as one inert line.
+	_, _ = fmt.Fprintf(out, "model: %s\n", rawArgsLine(requested))
+	_, _ = fmt.Fprintf(out, "chain: %s\n", rawArgsLine(sel.chainLine()))
 	_, _ = fmt.Fprintln(out, inputCeilingResolution{
-		ceiling: sess.runtime.Budget().InputCeiling,
-		source:  sel.ceilingSource,
+		ceiling:      sess.runtime.Budget().InputCeiling,
+		source:       sel.ceilingSource,
+		fallbackFrom: sel.ceilingFallbackFrom,
 	}.line())
 	_, _ = fmt.Fprintln(out, formatThinkOptions(sess.runtime.ModelOptions()))
 	last := sess.lastModel
 	if last == "" {
 		last = "not yet routed"
 	}
-	_, _ = fmt.Fprintf(out, "last routed: %s\n", last)
+	_, _ = fmt.Fprintf(out, "last routed: %s\n", rawArgsLine(last))
 }

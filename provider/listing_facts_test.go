@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -172,5 +173,59 @@ func TestOllamaModelInfoKeepsShowDataWhenTagsFail(t *testing.T) {
 	want := ModelInfo{Name: "m", Family: "fam", ParameterSize: "7B", QuantLevel: "Q4", Template: "tmpl", Capabilities: []string{"completion"}}
 	if !reflect.DeepEqual(*info, want) {
 		t.Fatalf("ModelInfo = %+v, want %+v", *info, want)
+	}
+}
+
+// #856 through the real Ollama client: a name missing from /api/tags is not
+// found only when /api/show answers 404. A 500 may clear, so it must not
+// match ErrModelNotFound.
+func TestModelRegistry_OllamaShowStatusDecidesNotFound(t *testing.T) {
+	for _, tt := range []struct {
+		status       int
+		wantNotFound bool
+	}{
+		{http.StatusNotFound, true},
+		{http.StatusInternalServerError, false},
+	} {
+		t.Run(http.StatusText(tt.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/tags":
+					_, _ = fmt.Fprint(w, `{"models":[{"name":"other:7b"}]}`)
+				case "/api/show":
+					w.WriteHeader(tt.status)
+					_, _ = fmt.Fprint(w, `{"error":"model 'qwen3' not found"}`)
+				}
+			}))
+			defer srv.Close()
+			providers := NewRegistry()
+			if err := providers.Register(NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))); err != nil {
+				t.Fatal(err)
+			}
+			mr, err := NewModelRegistry(providers, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = mr.Lookup(t.Context(), ModelKey{Provider: "ollama", Model: "qwen3"})
+			if err == nil {
+				t.Fatal("Lookup succeeded, want an error")
+			}
+			if got := errors.Is(err, ErrModelNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrModelNotFound) = %v, want %v (err: %v)", got, tt.wantNotFound, err)
+			}
+			if tt.wantNotFound {
+				return
+			}
+			var detail *ModelDetailError
+			if !errors.As(err, &detail) || detail.Key != (ModelKey{Provider: "ollama", Model: "qwen3"}) {
+				t.Fatalf("Lookup = %v, want the failed Ollama model detail request", err)
+			}
+			if code, ok := httpStatusCode(err); !ok || code != tt.status {
+				t.Errorf("detail failure HTTP status = %d, %v; want %d", code, ok, tt.status)
+			}
+			if !strings.Contains(err.Error(), "HTTP 500") {
+				t.Errorf("err = %v, want the 500 in its text", err)
+			}
+		})
 	}
 }

@@ -183,5 +183,5 @@ func resolveThinkOptions(ctx context.Context, src capChecker, chain []string, fl
 	}
 	// Every configured candidate resolved and none supports thinking: suppress
 	// the options and tell the user once. chain[0] is a ThinkNone example.
-	return provider.ModelOptions{}, fmt.Sprintf("think: model %s does not support thinking; -think ignored", chain[0])
+	return provider.ModelOptions{}, fmt.Sprintf("think: model %s does not support thinking; -think ignored", rawArgsLine(chain[0]))
 }

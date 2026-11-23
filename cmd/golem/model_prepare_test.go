@@ -251,7 +251,7 @@ func TestPrepareModelResolvesCeilingWarningsAndBudget(t *testing.T) {
 			plan:        agentPlan("test/unknown"),
 			wantCeiling: 8_192,
 			wantSource:  inputCeilingSafeFallback,
-			wantLine:    "input ceiling: 8192 tokens (safe fallback; model context metadata unavailable)",
+			wantLine:    "input ceiling: 8192 tokens (safe fallback; model context metadata unavailable for test/unknown)",
 		},
 		{
 			name: "a fallback without tool_call warns and is excluded from the ceiling",
