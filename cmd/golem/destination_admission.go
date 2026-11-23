@@ -216,12 +216,17 @@ func (a *destinationAdmission) consent(ctx context.Context, m *provider.Destinat
 		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered[0].String())
 	}
 	// Fail closed when the section did not print: the user has not seen what
-	// a yes admits, and a typed-ahead "y" must not answer for them. The line
-	// typed after the command is still its answer, never a goal, so one line
-	// is read and dropped through the same seam; no question is shown and
-	// whatever it returns is ignored.
+	// a yes admits, and a typed-ahead "y" must not answer for them. In the
+	// REPL (replOut is bound only there, beside the line-source prompt) the
+	// line typed after the command is still its answer, never a goal, so one
+	// line is read and dropped through the same seam; no question is shown and
+	// whatever it returns is ignored. At startup and in the subcommands a
+	// refusal ends the run and no goal is read, so a discard read there could
+	// only wait on stdin with nothing on screen.
 	if renderErr != nil {
-		_, _ = a.promptYN(ctx, "")
+		if a.replOut != nil {
+			_, _ = a.promptYN(ctx, "")
+		}
 		return baseline, false, fmt.Errorf("%w; the model-server section could not be shown: %w", denied, renderErr)
 	}
 	ok, err := a.promptYN(ctx, consentQuestion(uncovered))

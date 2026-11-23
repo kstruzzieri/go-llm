@@ -630,13 +630,16 @@ type failWriter struct{}
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("section write failed") }
 
 // A section that fails to print is never followed by the question: the
-// admission drops the one line typed for it unanswered (even a "yes"),
-// refuses (ErrDestinationDenied, saying why) and installs nothing. ensure
-// (the re-admission after /grants clear) and extend share the rule. Where no
-// question would be asked, a failed write changes nothing: nothing uncovered
-// admits as before, and a refusal keeps its exact bytes.
+// admission refuses (ErrDestinationDenied, saying why) and installs nothing.
+// In the REPL it first drops the one line typed for the question unanswered
+// (even a "yes"); at startup, where the refusal is fatal, it reads nothing.
+// ensure (the re-admission after /grants clear) and extend share the rule.
+// Where no question would be asked, a failed write changes nothing: nothing
+// uncovered admits as before, and a refusal keeps its exact bytes.
 func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
-	newAdm := func(t *testing.T, edges []provider.DestinationEdge, interactive bool, p *fakePrompt) *destinationAdmission {
+	// repl binds the REPL writer as run() does; the startup shape leaves it
+	// unbound and draws on Out.
+	newAdm := func(t *testing.T, edges []provider.DestinationEdge, interactive, repl bool, p *fakePrompt) *destinationAdmission {
 		t.Helper()
 		adm, err := newDestinationAdmission(destinationAdmissionConfig{
 			Gate: provider.NewDestinationGate(), Edges: edges,
@@ -645,9 +648,12 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if repl {
+			adm.setReplOut(failWriter{})
+		}
 		return adm
 	}
-	checkRefused := func(t *testing.T, err error, p *fakePrompt) {
+	checkRefused := func(t *testing.T, err error, p *fakePrompt, reads int) {
 		t.Helper()
 		if !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Fatalf("err = %v, want ErrDestinationDenied", err)
@@ -660,33 +666,45 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 		if strings.Contains(err.Error(), "\n") {
 			t.Errorf("err is not one line: %q", err)
 		}
-		// Exactly one read, with no question shown: the line typed for the
-		// question is dropped, never left for a goal. Its "yes" admits nothing.
-		if p.calls != 1 || p.seen != "" {
-			t.Errorf("after the section failed to print: %d reads, last prompt %q; want one discard read with no prompt", p.calls, p.seen)
+		// In the REPL, exactly one read with no question shown: the line typed
+		// for the question is dropped, never left for a goal, and its "yes"
+		// admits nothing. At startup, none.
+		if p.calls != reads || p.seen != "" {
+			t.Errorf("after the section failed to print: %d reads, last prompt %q; want %d, with no prompt", p.calls, p.seen, reads)
 		}
 	}
 
 	t.Run("ensure asking", func(t *testing.T) {
 		p := &fakePrompt{answer: true}
-		adm := newAdm(t, admEdges(t), true, p)
-		checkRefused(t, adm.ensure(context.Background()), p)
+		adm := newAdm(t, admEdges(t), true, true, p)
+		checkRefused(t, adm.ensure(context.Background()), p, 1)
 		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("gate installed after a refused admission: Bind = %v", err)
+		}
+	})
+
+	t.Run("startup asking", func(t *testing.T) {
+		// No REPL writer bound: the refusal is fatal and no goal is read, so
+		// nothing waits on stdin for an answer to a question never shown.
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, admEdges(t), true, false, p)
+		checkRefused(t, adm.ensure(context.Background()), p, 0)
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("gate installed after a refused startup admission: Bind = %v", err)
 		}
 	})
 
 	t.Run("extend asking", func(t *testing.T) {
 		p := &fakePrompt{answer: true}
 		local := admDest(t, "llamacpp", "http://127.0.0.1:8090")
-		adm := newAdm(t, []provider.DestinationEdge{{Purpose: "agent", Destination: local}}, true, p)
+		adm := newAdm(t, []provider.DestinationEdge{{Purpose: "agent", Destination: local}}, true, true, p)
 		// Nothing uncovered: the failed write does not stop a local admission.
 		if err := adm.ensure(context.Background()); err != nil {
 			t.Fatalf("local-only ensure with a failing writer: %v", err)
 		}
 		remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
 		_, err := adm.extend(context.Background(), []provider.DestinationEdge{{Purpose: "summarize", Destination: remote}})
-		checkRefused(t, err, p)
+		checkRefused(t, err, p, 1)
 		if _, err := adm.gate.Bind(context.Background(), "summarize", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
 			t.Errorf("remote admitted after a refused extension: Bind = %v", err)
 		}
@@ -701,7 +719,7 @@ func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
 			{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
 			{Purpose: "agent", Destination: admDest(t, "zeta", "https://zeta.example.com"), IsFallback: true},
 			{Purpose: "summarize", Destination: admDest(t, "alpha", "https://alpha.example.com")},
-		}, false, p)
+		}, false, false, p)
 		err := adm.ensure(context.Background())
 		const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
 		if err == nil || err.Error() != want {
@@ -796,9 +814,8 @@ func TestStartupPromptYN(t *testing.T) {
 			}
 		})
 	}
-	// The empty prompt is consent's discard read after a section that failed
-	// to print: at startup it reads nothing either, since the startup refusal
-	// is fatal and no goal follows.
+	// Whatever the prompt, even an empty one, a failed write means nothing is
+	// read.
 	for _, prompt := range []string{question, ""} {
 		t.Run("prompt write fails "+strconv.Quote(prompt), func(t *testing.T) {
 			in := strings.NewReader("y\n")
