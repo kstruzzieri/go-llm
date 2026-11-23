@@ -1049,7 +1049,7 @@ func TestAdmissionExtendAfterRevoke(t *testing.T) {
 		if p.calls != 2 {
 			t.Errorf("prompt consulted %d times across startup and re-admission, want 2 (one decision each)", p.calls)
 		}
-		if n := strings.Count(out.String(), "── model servers"); n != 2 {
+		if n := strings.Count(out.String(), "\u2500\u2500 model servers"); n != 2 {
 			t.Errorf("manifest rendered %d times, want 2 (one per publication, not one per stage):\n%s", n, out.String())
 		}
 		for _, e := range append(admEdges(t), localCandidate...) {

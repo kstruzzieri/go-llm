@@ -245,6 +245,14 @@ func TestRenderManifestStates(t *testing.T) {
 	if strings.HasSuffix(got, "\n\n") || strings.Contains(got, remoteNeedsOK.text()) {
 		t.Errorf("non-asking render has a trailing empty line or asks:\n%q", got)
 	}
+	// One heading for the whole remote group, however many remotes.
+	if n := strings.Count(got, "Remote\n"); n != 1 {
+		t.Errorf("Remote heading printed %d times, want 1:\n%s", n, got)
+	}
+	on := renderString(testManifest(t, edges...), nil, states, manifestOpts{style: consoleStyle{true, 120}})
+	if n := strings.Count(on, "\x1b[1;33mRemote\x1b[0m\n"); n != 1 {
+		t.Errorf("color Remote heading printed %d times, want 1:\n%q", n, on)
+	}
 }
 
 func TestRenderManifestCleared(t *testing.T) {
@@ -363,6 +371,14 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 		if !strings.Contains(got, "\n  abcdefghijklmnopqrst\n"+indent+"https://long.example.com") {
 			t.Errorf("width %d: long name did not move the URL to its own line:\n%s", width, got)
 		}
+		// The long name's state follows its URL line, or takes its own line
+		// at the value column when the URL line cannot hold it.
+		urlLine := indent + "https://long.example.com"
+		flagText := remoteAllowedByFlag.text()
+		if fits := displayCols(urlLine+"  "+flagText) <= width; fits && !strings.Contains(got, "\n"+urlLine+"  "+flagText+"\n") ||
+			!fits && !strings.Contains(got, "\n"+urlLine+"\n"+indent+flagText+"\n") {
+			t.Errorf("width %d: long-name state placement (fits=%v):\n%s", width, fits, got)
+		}
 		lines := strings.Split(got, "\n")
 		conts := 0
 		for i, l := range lines {
@@ -440,9 +456,37 @@ func TestRenderManifestColor(t *testing.T) {
 			t.Errorf("color render missing %q:\n%q", want, on)
 		}
 	}
-	flagged := renderString(m, keys, map[provider.Destination]remoteState{remote: remoteAllowedByFlag}, manifestOpts{style: consoleStyle{true, 80}})
-	if !strings.Contains(flagged, "  \x1b[2mallowed by -allow-destination\x1b[0m\n") {
-		t.Errorf("allowed state not dim: %q", flagged)
+	// Asking and not-allowed states are yellow; allowed states are dim.
+	for st, sgr := range map[remoteState]string{
+		remoteNeedsOK:        sgrYellow,
+		remoteRefused:        sgrYellow,
+		remoteNotAllowed:     sgrYellow,
+		remoteAllowedByFlag:  sgrDim,
+		remoteAllowedEarlier: sgrDim,
+	} {
+		got := renderString(m, keys, map[provider.Destination]remoteState{remote: st}, manifestOpts{style: consoleStyle{true, 80}})
+		if want := "\x1b[" + sgr + "m" + st.text() + "\x1b[0m\n"; !strings.Contains(got, want) {
+			t.Errorf("state %q: missing %q in:\n%q", st.text(), want, got)
+		}
+	}
+}
+
+// A destination reached only by metadata purposes gets a checks row and no
+// uses row.
+func TestRenderManifestMetadataOnly(t *testing.T) {
+	local := admDest(t, "llamacpp", "http://localhost:8090")
+	meta := admDest(t, "meta", "https://meta.example.com")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: "agent", Destination: local},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeModelRefresh, Destination: meta},
+		provider.DestinationEdge{Purpose: provider.DestinationPurposeCapabilityProbe, Destination: meta},
+	)
+	got := renderString(m, nil, map[provider.Destination]remoteState{meta: remoteRefused}, plain80)
+	want := "Remote\n" +
+		"  meta      https://meta.example.com  not allowed (needs -allow-destination)\n" +
+		"            checks    capabilities, model list\n"
+	if !strings.HasSuffix(got, want) {
+		t.Errorf("metadata-only block:\n%s\nwant it to end with:\n%s", got, want)
 	}
 }
 

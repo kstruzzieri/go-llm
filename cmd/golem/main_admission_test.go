@@ -227,7 +227,7 @@ func TestRunLocalOnlyRemainsPromptFree(t *testing.T) {
 	if strings.Contains(errOut, "Allow this session") {
 		t.Errorf("local-only run prompted for consent:\n%s", errOut)
 	}
-	if !strings.Contains(errOut, "── model servers") {
+	if !strings.Contains(errOut, "\u2500\u2500 model servers") {
 		t.Errorf("manifest not rendered:\n%s", errOut)
 	}
 }

@@ -71,7 +71,7 @@ func TestRunIndexDeniesRemoteEmbedding(t *testing.T) {
 	if got := counter.Load(); got != 0 {
 		t.Errorf("denied index sent %d requests to the local provider, want 0", got)
 	}
-	if !strings.Contains(errOut.String(), "── model servers") {
+	if !strings.Contains(errOut.String(), "\u2500\u2500 model servers") {
 		t.Errorf("manifest not rendered before denial:\n%s", errOut.String())
 	}
 }
