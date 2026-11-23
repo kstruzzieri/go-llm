@@ -487,7 +487,10 @@ func TestAttemptStatusJSONRoundTrip(t *testing.T) {
 		}
 	}
 	// Out-of-range values marshal as "unknown": the documented lossy case.
-	b, _ := json.Marshal(AttemptStatus(7))
+	b, err := json.Marshal(AttemptStatus(7))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out := AttemptStatus(42)
 	if err := json.Unmarshal(b, &out); err != nil || out != AttemptStatusUnknown {
 		t.Fatalf("AttemptStatus(7) via %s = %d, %v; want Unknown", b, out, err)
