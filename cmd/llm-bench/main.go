@@ -481,6 +481,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
 		}
+		if anyRecallTrace(traces) {
+			log.Fatalf("llm-bench: calibrate-capture: %v", errRecallCaptureRegistration)
+		}
 		targets, err := parseModelTargets(*modelsArg)
 		if err != nil {
 			log.Fatalf("llm-bench: parse models: %v", err)

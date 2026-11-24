@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -35,6 +36,14 @@ type RecallValue struct {
 	Alternatives []string `json:"alternatives,omitempty"`
 }
 
+// currentValue is the value the scripted file read shows in Trace B.
+func (r RecallEval) currentValue() string {
+	if len(r.Cases) > 0 && r.Cases[0] == "S1" {
+		return r.Value.Changed
+	}
+	return r.Value.Lesson
+}
+
 // frozenWireTrace reports whether t replays a frozen decision-point wire
 // (injection or recall): registered decoding, raw tool-call channel, one turn.
 func frozenWireTrace(t Trace) bool { return t.Injection != nil || t.Recall != nil }
@@ -63,6 +72,23 @@ func anyRecallTrace(traces []Trace) bool {
 // trailing fractional zeros), so string equality equals numeric equality.
 var recallNumberPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$`)
 
+// recallWorkspaceFile returns the path relative to the fixture's /workspace
+// display root. Empty, escaping and unrelated absolute paths identify no file.
+func recallWorkspaceFile(p string) string {
+	p = path.Clean(p)
+	if path.IsAbs(p) {
+		var ok bool
+		p, ok = strings.CutPrefix(p, "/workspace/")
+		if !ok {
+			return ""
+		}
+	}
+	if p == "." || p == ".." || strings.HasPrefix(p, "../") {
+		return ""
+	}
+	return p
+}
+
 // validateRecallTrace checks the recall block's closed vocabularies and the
 // Trace/Arm/Cases/Split combinations the spec allows, then the frozen turn
 // shape. Every error starts with "recall: ".
@@ -74,6 +100,9 @@ func validateRecallTrace(t Trace) error {
 	if r.Split != "pilot" && r.Split != "confirmatory" {
 		return fmt.Errorf("recall: split %q invalid (want pilot or confirmatory)", r.Split)
 	}
+	if r.TaskStyle != "direct" && r.TaskStyle != "task" {
+		return fmt.Errorf("recall: task_style %q invalid (want direct or task)", r.TaskStyle)
+	}
 	for _, f := range []struct{ name, v string }{{"family_id", r.FamilyID}, {"template", r.Template}, {"named_file", r.NamedFile}} {
 		if strings.TrimSpace(f.v) == "" || f.v != strings.TrimSpace(f.v) {
 			return fmt.Errorf("recall: %s must be non-empty without surrounding whitespace", f.name)
@@ -81,6 +110,14 @@ func validateRecallTrace(t Trace) error {
 	}
 	if r.Value.Type != "number" && r.Value.Type != "identifier" {
 		return fmt.Errorf("recall: value.type %q invalid (want number or identifier)", r.Value.Type)
+	}
+	if recallWorkspaceFile(r.NamedFile) == "" {
+		return fmt.Errorf("recall: named_file %q must name a file in the fixture workspace", r.NamedFile)
+	}
+	for _, p := range r.TaskPaths {
+		if p != strings.TrimSpace(p) || recallWorkspaceFile(p) == "" {
+			return fmt.Errorf("recall: task_paths entry %q must name a file in the fixture workspace", p)
+		}
 	}
 	for _, a := range r.Value.Alternatives {
 		if strings.TrimSpace(a) == "" || a != strings.TrimSpace(a) {
@@ -147,8 +184,43 @@ func validateRecallTrace(t Trace) error {
 			return fmt.Errorf("recall: pilot split does not include trace %s arm %s cases %v repeat=%t", r.Trace, r.Arm, r.Cases, r.Repeat)
 		}
 	}
-	if err := validateToolEndingTurns(t.Turns); err != nil {
+	return validateRecallTurns(t.Turns, *r)
+}
+
+func validateRecallTurns(turns []Turn, r RecallEval) error {
+	if err := validateToolEndingTurns(turns); err != nil {
 		return fmt.Errorf("recall: %w", err)
+	}
+	// A stops after recall. B additionally shows the named file's contents.
+	tools := []string{"agent_memory_search"}
+	if r.Trace == "B" {
+		tools = append(tools, "read_file")
+	}
+	if len(turns) != 1+2*len(tools) {
+		return fmt.Errorf("recall: trace %s requires the %s call and result sequence", r.Trace, strings.Join(tools, ", "))
+	}
+	for i, tool := range tools {
+		request, result := turns[2*i+1], turns[2*i+2]
+		if request.Role != "assistant" || len(request.ToolCalls) != 1 || request.ToolCalls[0].Name != tool {
+			return fmt.Errorf("recall: turn %d must call %s exactly once", 2*i+1, tool)
+		}
+		call := request.ToolCalls[0]
+		if result.Role != "tool" || result.ToolCallID != call.ID || (result.Name != "" && result.Name != tool) || strings.TrimSpace(result.Content) == "" {
+			return fmt.Errorf("recall: turn %d must hold the matching non-empty %s result", 2*i+2, tool)
+		}
+		args, ok := recallCallArgs(call)
+		if !ok {
+			return fmt.Errorf("recall: %s arguments must decode to an object", tool)
+		}
+		if tool == "read_file" {
+			p, _ := args["path"].(string)
+			if recallWorkspaceFile(p) != recallWorkspaceFile(r.NamedFile) {
+				return fmt.Errorf("recall: trace B must read named_file %q", r.NamedFile)
+			}
+			if !statesValue(result.Content, r.Value, r.currentValue()) {
+				return fmt.Errorf("recall: read_file result for %q must contain the current value", r.NamedFile)
+			}
+		}
 	}
 	return nil
 }

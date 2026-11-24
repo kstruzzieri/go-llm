@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +30,7 @@ func validRecallTrace() Trace {
 			{Role: "tool", ToolCallID: "call_1", Name: "agent_memory_search", Content: "record"},
 		},
 		Recall: &RecallEval{
-			FamilyID: "f1", Template: "t", TaskStyle: "s", Split: "pilot", Trace: "A", Arm: "1",
+			FamilyID: "f1", Template: "t", TaskStyle: "direct", Split: "pilot", Trace: "A", Arm: "1",
 			Cases: []string{"S1", "S2"}, NamedFile: "retry.go",
 			Value: RecallValue{Type: "number", Identifier: "maxRetries", Lesson: "5", Changed: "7"},
 		},
@@ -38,6 +40,14 @@ func validRecallTrace() Trace {
 func TestValidateRecallTrace(t *testing.T) {
 	traceB := func(tr *Trace, arm string, cases ...string) {
 		tr.Recall.Trace, tr.Recall.Arm, tr.Recall.Cases = "B", arm, cases
+		value := "5"
+		if len(cases) == 1 && cases[0] == "S1" {
+			value = "7"
+		}
+		tr.Turns = append(tr.Turns,
+			Turn{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_2", Name: "read_file", Arguments: json.RawMessage(`{"path":"./retry.go"}`)}}},
+			Turn{Role: "tool", ToolCallID: "call_2", Name: "read_file", Content: "maxRetries = " + value},
+		)
 	}
 	confirmatory := func(tr *Trace) { tr.Recall.Split = "confirmatory" }
 	cases := []struct {
@@ -46,6 +56,29 @@ func TestValidateRecallTrace(t *testing.T) {
 		want   string // empty = valid
 	}{
 		{"valid trace A", func(*Trace) {}, ""},
+		{"valid task style", func(tr *Trace) { tr.Recall.TaskStyle = "task" }, ""},
+		{"missing task style", func(tr *Trace) { tr.Recall.TaskStyle = "" }, "task_style"},
+		{"unknown task style", func(tr *Trace) { tr.Recall.TaskStyle = "other" }, "task_style"},
+		{"B without a read", func(tr *Trace) { tr.Recall.Trace, tr.Recall.Cases = "B", []string{"S2"} }, "read_file"},
+		{"A with a read", func(tr *Trace) {
+			traceB(tr, "1", "S2")
+			tr.Recall.Trace, tr.Recall.Cases = "A", []string{"S1", "S2"}
+		}, "call and result sequence"},
+		{"wrong search tool", func(tr *Trace) { tr.Turns[1].ToolCalls[0].Name = "read_file" }, "must call agent_memory_search"},
+		{"wrong read tool", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[3].ToolCalls[0].Name = "agent_memory_search" }, "must call read_file"},
+		{"wrong read path", func(tr *Trace) {
+			traceB(tr, "1", "S2")
+			tr.Recall.TaskPaths = []string{"vendor/retry.go"}
+			tr.Turns[3].ToolCalls[0].Arguments = json.RawMessage(`{"path":"vendor/retry.go"}`)
+		}, "must read named_file"},
+		{"undeclared read args", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[3].ToolCalls[0].Arguments = nil }, "arguments"},
+		{"wrong result id", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[4].ToolCallID = "call_1" }, "answers no open call"},
+		{"wrong result name", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[4].Name = "agent_memory_search" }, "matching non-empty read_file"},
+		{"empty result", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[4].Content = " " }, "matching non-empty read_file"},
+		{"read error supplies no evidence", func(tr *Trace) { traceB(tr, "1", "S2"); tr.Turns[4].Content = "permission denied" }, "current value"},
+		{"stale file in S1", func(tr *Trace) { traceB(tr, "1", "S1"); tr.Turns[4].Content = "maxRetries = 5" }, "current value"},
+		{"named file outside fixture", func(tr *Trace) { tr.Recall.NamedFile = "../retry.go" }, "named_file"},
+		{"task path outside fixture", func(tr *Trace) { tr.Recall.TaskPaths = []string{"/other/retry.go"} }, "task_paths"},
 		{"valid trace A arm 0 pilot", func(tr *Trace) { tr.Recall.Arm = "0" }, ""},
 		{"valid S7 confirmatory", func(tr *Trace) { confirmatory(tr); tr.Recall.Arm = "2"; tr.Recall.Cases = []string{"S7"} }, ""},
 		{"valid trace A arm 2 confirmatory", func(tr *Trace) { confirmatory(tr); tr.Recall.Arm = "2" }, ""},
@@ -128,9 +161,7 @@ func TestValidateRecallTrace(t *testing.T) {
 }
 
 func TestReplayWithRecallSendsToolsAndKeepsCalls(t *testing.T) {
-	c := &fakeInjectionClient{resp: candidateChatResponse{Message: ollama.ChatMessage{Role: "assistant", ToolCalls: []ollama.ToolCall{{
-		Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "retry.go"}},
-	}}}}}
+	c := &fakeInjectionClient{resp: candidateChatResponse{RawToolCalls: []injectionRawCall{rawCall("read_file", map[string]any{"path": "retry.go"})}}}
 	out, err := replayWith(context.Background(), c, "m", validRecallTrace(), replayOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +174,47 @@ func TestReplayWithRecallSendsToolsAndKeepsCalls(t *testing.T) {
 	}
 	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
 		t.Fatalf("transcript %+v; want one turn with one call", out.Transcript)
+	}
+}
+
+func TestRecallScoringUsesIndividualWireCalls(t *testing.T) {
+	const read = `{"function":{"name":"read_file","arguments":"{\"path\":\"retry.go\"}"}}`
+	const malformed = `{"function":{"name":"list","arguments":"{"}}`
+	for _, tc := range []struct {
+		name, calls, content string
+		wantA                recallKind
+		wantB                recallBOutcome
+	}{
+		{"read beside malformed call", read + "," + malformed, "It is 5", recallRecheck, recallContinues},
+		{"malformed call before read", malformed + "," + read, "", recallRecheck, recallContinues},
+		{"missing arguments", `{"function":{"name":"agent_memory_search"}}`, "", recallEmpty, recallDeclinesOrWrong},
+		{"null arguments", `{"function":{"name":"agent_memory_search","arguments":null}}`, "", recallEmpty, recallDeclinesOrWrong},
+		{"valid object arguments", `{"function":{"name":"agent_memory_search","arguments":{}}}`, "", recallSecondSearch, recallContinues},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"choices":[{"message":{"role":"assistant","content":` + jsonQuote(tc.content) + `,"tool_calls":[` + tc.calls + `]}}]}`
+			client := &http.Client{Transport: attemptRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			target := ModelTarget{Display: "openai-compat/fake", Provider: openAICompatTransport, Model: "fake"}
+			transport, err := newCandidateTransport(target, candidateTransportOptions{openAICompatBaseURL: "http://localhost", httpClient: client})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := validRecallTrace()
+			out, err := replayWith(t.Context(), transport.chat, target.Model, tr, replayOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reply := out.Transcript[0]
+			if got := classifyRecallA(*tr.Recall, reply); got != tc.wantA {
+				t.Errorf("Trace A got %v, want %v (wire calls %+v)", got, tc.wantA, out.RawToolCalls)
+			}
+			tr.Recall.Cases = []string{"S1"} // current value is 7
+			if got, _ := classifyRecallB(*tr.Recall, reply); got != tc.wantB {
+				t.Errorf("Trace B got %v, want %v", got, tc.wantB)
+			}
+		})
 	}
 }
 

@@ -1194,17 +1194,32 @@ func TestMainRefusesRecallTraces(t *testing.T) {
 	if err := os.WriteFile(tracePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	reportPath := filepath.Join(dir, "report.md")
-	cmd := exec.Command(os.Args[0], "-traces", tracePath, "-models", "fake", "-scorer", "exact-match", "-ollama-url", server.URL, "-report", reportPath)
-	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
-	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "recall traces cannot be replayed by this build yet") {
-		t.Fatalf("recall trace run was not refused: %v\n%s", err, out)
+	assembly := `{"id":"assembly","system":"sys","turns":[{"role":"user","content":"question"}],"assembly_eval":{"mode":"topline","pair_id":"pair"}}`
+	if err := os.WriteFile(filepath.Join(dir, "assembly.json"), []byte(assembly), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
-		t.Fatalf("report created before refusing: %v", err)
-	}
-	if n := hits.Load(); n != 0 {
-		t.Fatalf("candidate server saw %d request(s) before the refusal", n)
+	for _, tc := range []struct {
+		name, traces, outputFlag, wantError string
+		flags                               []string
+	}{
+		{"plain", tracePath, "-report", "recall traces cannot be replayed by this build yet", []string{"-scorer", "exact-match"}},
+		{"mixed assembly capture", filepath.Join(dir, "*.json"), "-labels-out", errRecallCaptureRegistration.Error(), []string{"-calibrate-capture"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "out")
+			args := append([]string{"-traces", tc.traces, "-models", "fake", "-ollama-url", server.URL, tc.outputFlag, outPath}, tc.flags...)
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.wantError) {
+				t.Fatalf("recall trace run was not refused: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+				t.Fatalf("output created before refusing: %v", err)
+			}
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("candidate server saw %d request(s) before the refusal", n)
+			}
+		})
 	}
 }

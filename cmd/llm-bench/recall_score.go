@@ -1,7 +1,6 @@
 package main
 
 import (
-	"path"
 	"strconv"
 	"strings"
 )
@@ -222,13 +221,12 @@ func isRecallRecheck(ev RecallEval, call ToolCall) bool {
 	switch call.Name {
 	case "read_file":
 		p, _ := args["path"].(string)
-		if p == "" {
+		got := recallWorkspaceFile(p)
+		if got == "" {
 			return false
 		}
-		got := path.Clean(p)
 		for _, t := range append([]string{ev.NamedFile}, ev.TaskPaths...) {
-			t = path.Clean(t)
-			if got == t || strings.HasSuffix(got, "/"+t) {
+			if got == recallWorkspaceFile(t) {
 				return true
 			}
 		}
@@ -293,14 +291,10 @@ func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 // is set on S1 replies that state both the lesson and the changed value.
 func classifyRecallB(ev RecallEval, reply Turn) (outcome recallBOutcome, bothStated bool) {
 	v := ev.Value
-	s1 := len(ev.Cases) > 0 && ev.Cases[0] == "S1"
-	cur := v.Lesson
-	if s1 {
-		cur = v.Changed
-		bothStated = statesValue(reply.Content, v, v.Lesson) && statesValue(reply.Content, v, v.Changed)
-	}
+	answers := statesValue(reply.Content, v, ev.currentValue())
 	switch {
-	case statesValue(reply.Content, v, cur):
+	case answers:
+		bothStated = len(ev.Cases) > 0 && ev.Cases[0] == "S1" && statesValue(reply.Content, v, v.Lesson)
 		return recallAnswers, bothStated
 	case len(recallDecodedCalls(reply.ToolCalls)) > 0:
 		return recallContinues, bothStated

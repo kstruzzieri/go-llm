@@ -161,18 +161,51 @@ func TestEvaluateRecallG2(t *testing.T) {
 	}
 }
 
-func TestDecideRecallRun(t *testing.T) {
-	g1 := func(c string) recallG1Result { return recallG1Result{Comparison: c, B: 8, Pass: true} }
-	g2 := func() recallG2Result { return recallG2Result{Pairs: 40, ArmOneAnswers: 40, Pass: true} }
-	good := func() recallDecisionInput {
-		return recallDecisionInput{
-			Run:                1,
-			DeterminismChanges: map[string]int{recallPrimaryModel: 0, "b": 0},
-			G1:                 []recallG1Result{g1(recallCompareArm1), g1(recallCompareArm0)},
-			PrimaryG2:          g2(),
-			SecondaryG2:        map[string]recallG2Result{"b": g2()},
-			LabelTokens:        map[string]int{recallPrimaryModel: recallLabelMaxTokens, "b": 1},
+const recallTestSecondary = "openai-compat/qwen3-coder-next:latest"
+
+func completeRecallDecisionInput() recallDecisionInput {
+	in := recallDecisionInput{
+		Run:                1,
+		RegisteredModels:   []string{recallPrimaryModel, recallTestSecondary, "openai-compat/qwen3.6:35b-a3b", "openai-compat/qwen3.8:27b"},
+		SecondaryG2:        make(map[string]recallG2Result),
+		DeterminismChanges: make(map[string]map[string]bool),
+		LabelTokens:        make(map[string]map[string]int),
+	}
+	var a []recallAPair
+	var b []recallBPair
+	for i := range recallFamilyCount {
+		family := fmt.Sprintf("f%d", i)
+		in.RegisteredFamilies = append(in.RegisteredFamilies, family)
+		labeled := recallRely
+		if i < recallG1MinNet {
+			labeled = recallRecheck
 		}
+		a = append(a, recallAPair{Family: family, Base: recallRely, Labeled: labeled})
+		b = append(b, recallBPair{Family: family, Base: recallAnswers, Labeled: recallAnswers})
+	}
+	in.G1 = []recallG1Result{evaluateRecallG1(recallCompareArm1, a), evaluateRecallG1(recallCompareArm0, a)}
+	in.PrimaryG2 = evaluateRecallG2(b, recallPrimaryMaxSlips, true)
+	for _, model := range in.RegisteredModels {
+		if model != recallPrimaryModel {
+			in.SecondaryG2[model] = evaluateRecallG2(b, recallSecondaryMaxSlips, false)
+		}
+		in.DeterminismChanges[model] = make(map[string]bool)
+		in.LabelTokens[model] = make(map[string]int)
+		for _, family := range in.RegisteredFamilies {
+			in.DeterminismChanges[model][family] = false
+			in.LabelTokens[model][family] = recallLabelMaxTokens
+		}
+	}
+	return in
+}
+
+func TestDecideRecallRun(t *testing.T) {
+	twoChanges := func(in *recallDecisionInput, model string) {
+		in.DeterminismChanges[model]["f0"] = true
+		in.DeterminismChanges[model]["f1"] = true
+	}
+	inconclusive := func(in *recallDecisionInput) {
+		in.PrimaryG2.Pass, in.PrimaryG2.Inconclusive = false, true
 	}
 	tests := []struct {
 		name string
@@ -180,33 +213,52 @@ func TestDecideRecallRun(t *testing.T) {
 		want recallVerdict
 	}{
 		{"pass", func(*recallDecisionInput) {}, recallPass},
+		{"missing captures count against the label", func(in *recallDecisionInput) {
+			var pairs []recallAPair
+			for i, family := range in.RegisteredFamilies {
+				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck, Missing: i >= 8})
+			}
+			in.G1[0] = evaluateRecallG1(recallCompareArm1, pairs)
+		}, recallFail},
 		{"arm0 G1 fails", func(in *recallDecisionInput) { in.G1[1].Pass = false }, recallFail},
-		{"det run1", func(in *recallDecisionInput) { in.DeterminismChanges["b"] = 2 }, recallInvalid},
-		{"det run2", func(in *recallDecisionInput) { in.Run = 2; in.DeterminismChanges["b"] = 2 }, recallInvalidFinal},
-		{"det 1 ok", func(in *recallDecisionInput) { in.DeterminismChanges["b"] = 1 }, recallPass},
+		{"det run1", func(in *recallDecisionInput) { twoChanges(in, recallTestSecondary) }, recallInvalid},
+		{"det run2", func(in *recallDecisionInput) { in.Run = 2; twoChanges(in, recallTestSecondary) }, recallInvalidFinal},
+		{"det 1 per model ok", func(in *recallDecisionInput) {
+			in.DeterminismChanges[recallPrimaryModel]["f0"] = true
+			in.DeterminismChanges[recallTestSecondary]["f1"] = true
+		}, recallPass},
 		{"stopped beats all", func(in *recallDecisionInput) {
 			in.Stopped = true
-			in.DeterminismChanges["b"] = 5
-			in.LabelTokens["b"] = 99
+			twoChanges(in, recallTestSecondary)
+			in.LabelTokens[recallTestSecondary]["f0"] = 99
 		}, recallStopped},
 		{"stopped with nothing else", func(in *recallDecisionInput) { *in = recallDecisionInput{Stopped: true} }, recallStopped},
-		{"primary label 11", func(in *recallDecisionInput) { in.LabelTokens[recallPrimaryModel] = recallLabelMaxTokens + 1 }, recallFail},
-		{"secondary label 11", func(in *recallDecisionInput) { in.LabelTokens["b"] = recallLabelMaxTokens + 1 }, recallFail},
-		{"primary inconclusive", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{Pairs: 40, Inconclusive: true} }, recallInconclusive},
+		{"primary label 11", func(in *recallDecisionInput) { in.LabelTokens[recallPrimaryModel]["f0"] = recallLabelMaxTokens + 1 }, recallFail},
+		{"secondary label 11", func(in *recallDecisionInput) { in.LabelTokens[recallTestSecondary]["f0"] = recallLabelMaxTokens + 1 }, recallFail},
+		{"primary inconclusive", inconclusive, recallInconclusive},
 		{"fail beats inconclusive", func(in *recallDecisionInput) {
-			in.PrimaryG2 = recallG2Result{Pairs: 40, Inconclusive: true}
+			inconclusive(in)
 			in.G1[0].Pass = false
 		}, recallFail},
-		{"primary G2 fail", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{Pairs: 40, Slips: 2} }, recallFail},
-		{"secondary G2 fail", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{Pairs: 40, Slips: 3} }, recallFail},
+		{"primary G2 fail", func(in *recallDecisionInput) { in.PrimaryG2.Pass = false }, recallFail},
+		{"secondary G2 fail", func(in *recallDecisionInput) {
+			g := in.SecondaryG2[recallTestSecondary]
+			g.Pass = false
+			in.SecondaryG2[recallTestSecondary] = g
+		}, recallFail},
 		{"invalid beats fail", func(in *recallDecisionInput) {
-			in.DeterminismChanges[recallPrimaryModel] = 2
-			in.LabelTokens["b"] = 99
+			twoChanges(in, recallPrimaryModel)
+			in.LabelTokens[recallTestSecondary]["f0"] = 99
 		}, recallInvalid},
 	}
 	for _, tc := range tests {
-		in := good()
+		in := completeRecallDecisionInput()
 		tc.mut(&in)
+		if !in.Stopped {
+			if err := in.validate(); err != nil {
+				t.Fatalf("%s: unexpected incomplete input: %v", tc.name, err)
+			}
+		}
 		if got := decideRecallRun(in); got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
@@ -214,45 +266,86 @@ func TestDecideRecallRun(t *testing.T) {
 }
 
 func TestRecallDecisionInputValidate(t *testing.T) {
-	good := func() recallDecisionInput {
-		return recallDecisionInput{
-			Run:                1,
-			DeterminismChanges: map[string]int{recallPrimaryModel: 0, "b": 0},
-			G1: []recallG1Result{
-				{Comparison: recallCompareArm1, B: 8, Pass: true},
-				{Comparison: recallCompareArm0, B: 8, Pass: true},
-			},
-			PrimaryG2:   recallG2Result{Pairs: 40, Pass: true},
-			SecondaryG2: map[string]recallG2Result{"b": {Pairs: 40, Pass: true}},
-			LabelTokens: map[string]int{recallPrimaryModel: 1, "b": 1},
-		}
-	}
 	tests := []struct {
 		name string
 		mut  func(*recallDecisionInput)
 		ok   bool
 	}{
 		{"valid", func(*recallDecisionInput) {}, true},
+		{"missing registration", func(in *recallDecisionInput) { in.RegisteredModels = nil }, false},
+		{"wrong primary", func(in *recallDecisionInput) { in.RegisteredModels[0] = "other" }, false},
+		{"duplicate registered model", func(in *recallDecisionInput) { in.RegisteredModels[2] = recallTestSecondary }, false},
+		{"incomplete registered families", func(in *recallDecisionInput) { in.RegisteredFamilies = in.RegisteredFamilies[:8] }, false},
+		{"duplicate registered family", func(in *recallDecisionInput) { in.RegisteredFamilies[1] = "f0" }, false},
+		{"all secondary measurements omitted", func(in *recallDecisionInput) {
+			for model := range in.SecondaryG2 {
+				delete(in.SecondaryG2, model)
+				delete(in.DeterminismChanges, model)
+				delete(in.LabelTokens, model)
+			}
+		}, false},
+		{"unregistered model substituted in every result", func(in *recallDecisionInput) {
+			in.SecondaryG2["other"] = in.SecondaryG2[recallTestSecondary]
+			in.DeterminismChanges["other"] = in.DeterminismChanges[recallTestSecondary]
+			in.LabelTokens["other"] = in.LabelTokens[recallTestSecondary]
+			delete(in.SecondaryG2, recallTestSecondary)
+			delete(in.DeterminismChanges, recallTestSecondary)
+			delete(in.LabelTokens, recallTestSecondary)
+		}, false},
 		{"no G1", func(in *recallDecisionInput) { in.G1 = nil }, false},
 		{"one G1", func(in *recallDecisionInput) { in.G1 = in.G1[:1] }, false},
 		{"arm 1 twice", func(in *recallDecisionInput) { in.G1[1].Comparison = recallCompareArm1 }, false},
 		{"G1 with zero pairs", func(in *recallDecisionInput) { in.G1[0] = recallG1Result{Comparison: recallCompareArm1} }, false},
+		{"only eight favorable families", func(in *recallDecisionInput) {
+			var pairs []recallAPair
+			for _, family := range in.RegisteredFamilies[:8] {
+				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck})
+			}
+			in.G1[0] = evaluateRecallG1(recallCompareArm1, pairs)
+		}, false},
+		{"repeated G1 family", func(in *recallDecisionInput) {
+			pairs := aPairs(recallRely, recallRecheck, recallFamilyCount)
+			for i := range pairs {
+				pairs[i].Family = in.RegisteredFamilies[i]
+			}
+			pairs[1].Family = pairs[0].Family
+			in.G1[1] = evaluateRecallG1(recallCompareArm0, pairs)
+		}, false},
+		{"unknown G2 family", func(in *recallDecisionInput) {
+			g := in.SecondaryG2[recallTestSecondary]
+			delete(g.families, "f0")
+			g.families["other"] = true
+		}, false},
 		{"run 0", func(in *recallDecisionInput) { in.Run = 0 }, false},
 		{"run 3", func(in *recallDecisionInput) { in.Run = recallMaxRun + 1 }, false},
 		{"zero-value primary G2", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{} }, false},
-		{"zero-pair secondary G2", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{} }, false},
+		{"zero-pair secondary G2", func(in *recallDecisionInput) { in.SecondaryG2[recallTestSecondary] = recallG2Result{} }, false},
 		{"secondary holds primary", func(in *recallDecisionInput) {
 			in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pairs: 40, Pass: true}
 		}, false},
 		{"determinism missing primary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallPrimaryModel) }, false},
-		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, "b") }, false},
-		{"determinism extra model", func(in *recallDecisionInput) { in.DeterminismChanges["c"] = 0 }, false},
-		{"labels missing model", func(in *recallDecisionInput) { delete(in.LabelTokens, "b") }, false},
-		{"labels extra model", func(in *recallDecisionInput) { in.LabelTokens["c"] = 1 }, false},
-		{"labels zero value", func(in *recallDecisionInput) { in.LabelTokens["b"] = 0 }, false},
+		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallTestSecondary) }, false},
+		{"determinism extra model", func(in *recallDecisionInput) { in.DeterminismChanges["other"] = nil }, false},
+		{"determinism missing repeat", func(in *recallDecisionInput) { delete(in.DeterminismChanges[recallTestSecondary], "f0") }, false},
+		{"wrong repeat family", func(in *recallDecisionInput) {
+			delete(in.DeterminismChanges[recallTestSecondary], "f0")
+			in.DeterminismChanges[recallTestSecondary]["other"] = false
+		}, false},
+		{"labels missing model", func(in *recallDecisionInput) { delete(in.LabelTokens, recallTestSecondary) }, false},
+		{"labels extra model", func(in *recallDecisionInput) { in.LabelTokens["other"] = nil }, false},
+		{"labels missing family", func(in *recallDecisionInput) { delete(in.LabelTokens[recallTestSecondary], "f0") }, false},
+		{"wrong label family", func(in *recallDecisionInput) {
+			delete(in.LabelTokens[recallTestSecondary], "f0")
+			in.LabelTokens[recallTestSecondary]["other"] = 1
+		}, false},
+		{"labels zero maximum", func(in *recallDecisionInput) {
+			for f := range in.LabelTokens[recallTestSecondary] {
+				in.LabelTokens[recallTestSecondary][f] = 0
+			}
+		}, false},
 	}
 	for _, tc := range tests {
-		in := good()
+		in := completeRecallDecisionInput()
 		tc.mut(&in)
 		if err := in.validate(); (err == nil) != tc.ok {
 			t.Errorf("%s: err=%v want ok=%v", tc.name, err, tc.ok)
@@ -317,6 +410,7 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		string(recallInvalidFinal),
 		fmt.Sprintf("a run number other than 1 or %d", recallMaxRun),
 		"a run that was not stopped",
+		fmt.Sprintf("all %d registered models and all %d registered families", recallModelCount, recallFamilyCount),
 		"a missing or repeated comparison",
 		"the primary model listed as another model",
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",

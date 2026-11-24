@@ -1070,6 +1070,8 @@ func emitCaptureManifestDigest(raw []byte, stdout io.Writer) {
 	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
 }
 
+var errRecallCaptureRegistration = errors.New("calibrate-capture: recall traces need a recall registration, which this build does not load yet")
+
 // runCalibrateCapture replays each (trace, candidate) cell — retrying every
 // failed cell exactly once in-run (the registered one-retry policy) — and
 // writes one Artifact per captured cell to OutputPath as JSONL. Artifacts
@@ -1101,7 +1103,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	}
 	if anyRecallTrace(opts.Traces) {
 		// The later recall-registration wiring replaces this refusal and must keep the frozen-wire switch below.
-		return errors.New("calibrate-capture: recall traces need a recall registration, which this build does not load yet")
+		return errRecallCaptureRegistration
 	}
 	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
 	frozenWireCapture := anyFrozenWireTrace(opts.Traces)

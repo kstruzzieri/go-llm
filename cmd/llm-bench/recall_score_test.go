@@ -103,6 +103,9 @@ func TestRecallRecheckPathSpellings(t *testing.T) {
 		"./config/retry.go": recallRecheck, "config//retry.go": recallRecheck,
 		"/workspace/config/retry.go": recallRecheck, "svc/main.go": recallRecheck,
 		"config/retry_test.go": recallOtherTool, "xconfig/retry.go": recallOtherTool,
+		"vendor/config/retry.go": recallOtherTool, "../config/retry.go": recallOtherTool,
+		"/other/config/retry.go": recallOtherTool, "/workspace/vendor/config/retry.go": recallOtherTool,
+		"/workspace/../other/config/retry.go": recallOtherTool, "/workspace/svc/main.go": recallRecheck,
 	} {
 		args, _ := json.Marshal(map[string]string{"path": path})
 		if got := classifyRecallA(ev, Turn{ToolCalls: []ToolCall{recallCall("read_file", string(args))}}); got != want {

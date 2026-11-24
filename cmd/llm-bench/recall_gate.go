@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
+	"strings"
 )
 
 // Pre-registered #864 Stage 0 gate constants. Every comparison against them
@@ -12,6 +14,9 @@ import (
 const (
 	// recallPrimaryModel is the model G1 and the primary G2 are decided on.
 	recallPrimaryModel = "openai-compat/gemma4:31b"
+	// The confirmatory decision covers the registered four models and 40 families.
+	recallModelCount  = 4
+	recallFamilyCount = 40
 	// recallG1MinNet is the minimum B-C for G1.
 	recallG1MinNet = 8
 	// recallG1AlphaDenom is 1/alpha: the one-sided sign-test level is 1/40.
@@ -55,7 +60,7 @@ G2' (safety): a slip is a question the baseline answered and the labeled reply d
 G5: the label costs at most 10 prompt tokens per labeled record, on each model.
 Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
 Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
-For a run that was not stopped, the report refuses to decide on incomplete input (a missing or repeated comparison or one with no pairs, the primary model listed as another model, a model without G2 pairs, a determinism count or a measured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
+For a run that was not stopped, the report requires all 4 registered models and all 40 registered families. It rejects a missing or repeated comparison, an omitted or repeated family in G1 or G2, the primary model listed as another model, a missing repeat or label measurement, or a run number other than 1 or 2. Incomplete input is a harness error and never a gate outcome. Fix the report and re-run it on the same captures.
 Order: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 
@@ -109,13 +114,15 @@ type recallG1Result struct {
 	B, C, Neither int
 	P             float64
 	Pass          bool
+	families      map[string]bool
 }
 
 // evaluateRecallG1 counts discordant pairs between a baseline arm and the
 // labeled arm and applies the net and exact sign-test conditions.
 func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
-	r := recallG1Result{Comparison: comparison}
+	r := recallG1Result{Comparison: comparison, families: make(map[string]bool, len(pairs))}
 	for _, p := range pairs {
+		r.families[p.Family] = true
 		switch {
 		case p.Missing:
 			r.C++
@@ -136,6 +143,7 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 type recallG2Result struct {
 	Pairs, ArmOneAnswers, Slips int
 	Inconclusive, Pass          bool
+	families                    map[string]bool
 }
 
 // evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it
@@ -144,8 +152,9 @@ type recallG2Result struct {
 // fail; otherwise a primary whose arm 1 answered fewer than
 // recallBaselineMin is inconclusive.
 func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2Result {
-	r := recallG2Result{Pairs: len(pairs)}
+	r := recallG2Result{Pairs: len(pairs), families: make(map[string]bool, len(pairs))}
 	for _, p := range pairs {
+		r.families[p.Family] = true
 		if p.Missing {
 			r.Slips++
 			continue
@@ -192,33 +201,34 @@ type recallDecisionInput struct {
 	Stopped bool
 	// Run is 1 or 2 (the rerun after a recorded serving fix).
 	Run int
-	// DeterminismChanges is keyed by model display name; its key set must be
-	// the primary model plus every key of SecondaryG2.
-	DeterminismChanges map[string]int
+	// RegisteredModels and RegisteredFamilies come from the frozen registration,
+	// independently of which captures or summaries were available.
+	RegisteredModels, RegisteredFamilies []string
+	// DeterminismChanges records whether each model/family repeat changed.
+	DeterminismChanges map[string]map[string]bool
 	// G1 holds exactly the arm 1 and arm 0 comparisons.
 	G1 []recallG1Result
 	// PrimaryG2 is the primary model's safety result.
 	PrimaryG2 recallG2Result
 	// SecondaryG2 is each other local model's safety result.
 	SecondaryG2 map[string]recallG2Result
-	// LabelTokens is keyed like DeterminismChanges: per model, the largest
-	// arm 2 minus arm 1 prompt-token difference over that model's labeled
-	// pairs. Each value must be at least 1 (0 means not measured).
-	LabelTokens map[string]int
+	// LabelTokens is the largest measured arm 2 minus arm 1 prompt-token
+	// difference per model/family. Each model needs a positive maximum.
+	LabelTokens map[string]map[string]int
 }
 
-// recallKeysMatch reports whether got holds exactly the primary model plus
-// the keys of secondary.
-func recallKeysMatch(got map[string]int, secondary map[string]recallG2Result) bool {
-	if _, ok := got[recallPrimaryModel]; !ok || len(got) != len(secondary)+1 {
-		return false
+func recallRegisteredIDs(kind string, ids []string, want int) (map[string]bool, error) {
+	if len(ids) != want {
+		return nil, fmt.Errorf("recall: registration has %d %s, want %d", len(ids), kind, want)
 	}
-	for m := range secondary {
-		if _, ok := got[m]; !ok {
-			return false
+	set := make(map[string]bool, want)
+	for _, id := range ids {
+		if id == "" || strings.TrimSpace(id) != id || set[id] {
+			return nil, fmt.Errorf("recall: invalid or duplicate entry %q in registered %s", id, kind)
 		}
+		set[id] = true
 	}
-	return true
+	return set, nil
 }
 
 // validate reports why the input is too incomplete to decide. It applies to
@@ -226,11 +236,22 @@ func recallKeysMatch(got map[string]int, secondary map[string]recallG2Result) bo
 // stopped run. Task 7 must call it and surface the error as a harness error
 // before deciding; decideRecallRun also fails closed on it.
 func (in recallDecisionInput) validate() error {
+	models, err := recallRegisteredIDs("models", in.RegisteredModels, recallModelCount)
+	if err != nil {
+		return err
+	}
+	if !models[recallPrimaryModel] {
+		return fmt.Errorf("recall: registration lacks primary model %s", recallPrimaryModel)
+	}
+	families, err := recallRegisteredIDs("families", in.RegisteredFamilies, recallFamilyCount)
+	if err != nil {
+		return err
+	}
 	seen := map[string]int{}
 	for _, g := range in.G1 {
 		seen[g.Comparison]++
-		if g.B+g.C+g.Neither < 1 {
-			return fmt.Errorf("recall: G1 %q has no pairs", g.Comparison)
+		if g.B+g.C+g.Neither != len(families) || !maps.Equal(g.families, families) {
+			return fmt.Errorf("recall: G1 %q requires one pair per registered family", g.Comparison)
 		}
 	}
 	if len(in.G1) != 2 || seen[recallCompareArm1] != 1 || seen[recallCompareArm0] != 1 {
@@ -239,26 +260,34 @@ func (in recallDecisionInput) validate() error {
 	if in.Run < 1 || in.Run > recallMaxRun {
 		return fmt.Errorf("recall: Run must be 1 to %d, got %d", recallMaxRun, in.Run)
 	}
-	if _, ok := in.SecondaryG2[recallPrimaryModel]; ok {
-		return fmt.Errorf("recall: SecondaryG2 must not hold the primary model %s", recallPrimaryModel)
+	if len(in.SecondaryG2) != len(models)-1 || len(in.DeterminismChanges) != len(models) || len(in.LabelTokens) != len(models) {
+		return errors.New("recall: G2, determinism and label measurements must cover exactly the registered models")
 	}
-	if !recallKeysMatch(in.DeterminismChanges, in.SecondaryG2) {
-		return errors.New("recall: DeterminismChanges models must be the primary plus SecondaryG2's models")
-	}
-	if !recallKeysMatch(in.LabelTokens, in.SecondaryG2) {
-		return errors.New("recall: LabelTokens models must be the primary plus SecondaryG2's models")
-	}
-	for m, n := range in.LabelTokens {
-		if n < 1 {
-			return fmt.Errorf("recall: label tokens not measured for %s", m)
+	for _, m := range in.RegisteredModels {
+		g := in.SecondaryG2[m]
+		if m == recallPrimaryModel {
+			g = in.PrimaryG2
 		}
-	}
-	if in.PrimaryG2.Pairs < 1 {
-		return errors.New("recall: primary G2 has no pairs")
-	}
-	for m, g := range in.SecondaryG2 {
-		if g.Pairs < 1 {
-			return fmt.Errorf("recall: G2 for %s has no pairs", m)
+		if g.Pairs != len(families) || !maps.Equal(g.families, families) {
+			return fmt.Errorf("recall: G2 for %s requires one pair per registered family", m)
+		}
+		repeats, tokens := in.DeterminismChanges[m], in.LabelTokens[m]
+		if len(repeats) != len(families) || len(tokens) != len(families) {
+			return fmt.Errorf("recall: %s requires a repeat and label measurement per registered family", m)
+		}
+		maxTokens := 0
+		for _, family := range in.RegisteredFamilies {
+			if _, ok := repeats[family]; !ok {
+				return fmt.Errorf("recall: missing determinism repeat for %s family %s", m, family)
+			}
+			n, ok := tokens[family]
+			if !ok {
+				return fmt.Errorf("recall: missing label measurement for %s family %s", m, family)
+			}
+			maxTokens = max(maxTokens, n)
+		}
+		if maxTokens < 1 {
+			return fmt.Errorf("recall: label tokens not measured for %s", m)
 		}
 	}
 	return nil
@@ -276,8 +305,14 @@ func decideRecallRun(in recallDecisionInput) recallVerdict {
 	if in.validate() != nil {
 		return recallFail
 	}
-	for _, n := range in.DeterminismChanges {
-		if n > recallDeterminismMaxChanges {
+	for _, repeats := range in.DeterminismChanges {
+		changes := 0
+		for _, changed := range repeats {
+			if changed {
+				changes++
+			}
+		}
+		if changes > recallDeterminismMaxChanges {
 			if in.Run >= recallMaxRun {
 				return recallInvalidFinal
 			}
@@ -285,8 +320,10 @@ func decideRecallRun(in recallDecisionInput) recallVerdict {
 		}
 	}
 	fail := !in.PrimaryG2.Pass && !in.PrimaryG2.Inconclusive
-	for _, n := range in.LabelTokens {
-		fail = fail || n > recallLabelMaxTokens
+	for _, tokens := range in.LabelTokens {
+		for _, n := range tokens {
+			fail = fail || n > recallLabelMaxTokens
+		}
 	}
 	for _, g := range in.G1 {
 		fail = fail || !g.Pass
