@@ -21,6 +21,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
+	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -1392,19 +1393,21 @@ func TestModelSetRebindsTheOrchestratorAndTraceBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Only the budget metadata matters here, and the full TraceRecord does
-		// not round-trip through encoding/json (provider.AttemptStatus), so
-		// the record is read through a minimal shape.
-		var rec struct {
-			Request struct {
-				Budget agent.Budget `json:"budget"`
-			} `json:"request"`
-		}
+		var rec agenttrace.TraceRecord
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			t.Fatal(err)
 		}
 		if rec.Request.Budget.InputCeiling != 14336 {
 			t.Fatalf("trace budget = %+v, want the republished ceiling 14336", rec.Request.Budget)
+		}
+		attempts := 0
+		for _, st := range rec.Result.Steps {
+			if st.RouteOutcome != nil {
+				attempts += len(st.RouteOutcome.Attempts)
+			}
+		}
+		if attempts == 0 {
+			t.Fatalf("trace records no route attempts across %d steps", len(rec.Result.Steps))
 		}
 	})
 }
