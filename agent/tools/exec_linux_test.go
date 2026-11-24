@@ -572,6 +572,77 @@ func TestBwrapPrepareMountsGitLayout(t *testing.T) {
 	}
 }
 
+// TestBwrapPrepareWorkspaceMountsPinned pins, byte for byte, the workspace
+// segment of prepare's argv (the workspace bind through --chdir) for the git
+// fixture plus a .git symlink, a bare repository and a HEAD-and-commondir
+// layout. The walk records those three for the post-run check; none of them
+// may add, drop or reorder a mount.
+func TestBwrapPrepareWorkspaceMountsPinned(t *testing.T) {
+	ws := wsTempDir(t)
+	writeGitFixture(t, ws)
+	applyGitMetaVariant(t, ws, "stripped")
+	for _, d := range []string{"link", "bare.git/objects", "bare.git/refs/heads", "wtadmin"} {
+		if err := os.MkdirAll(filepath.Join(ws, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../nested/.git", filepath.Join(ws, "link", ".git")); err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{
+		"bare.git/HEAD":     "ref: refs/heads/main\n",
+		"wtadmin/HEAD":      "0123456789012345678901234567890123456789\n",
+		"wtadmin/commondir": "../.git\n",
+	} {
+		if err := os.WriteFile(filepath.Join(ws, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &captureRunner{}
+	b := testBwrapBackend(runner, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	if _, err := b.Run(context.Background(), bwrapTestSpec(t, ws)); err != nil {
+		t.Fatal(err)
+	}
+	argv := runner.spec.Argv
+	start := -1
+	for i := 0; i+2 < len(argv) && start < 0; i++ {
+		if argv[i] == "--bind" && argv[i+1] == ws && argv[i+2] == ws {
+			start = i
+		}
+	}
+	end := slices.Index(argv, "--chdir")
+	if start < 0 || end < start {
+		t.Fatalf("no workspace bind before --chdir in %q", argv)
+	}
+	want := []string{"--bind", "$WS", "$WS"}
+	for _, m := range []string{
+		"--bind .git", "--ro-bind .git/config", "--ro-bind .git/hooks", "--ro-bind .git/info",
+		"--ro-bind .git/modules", "--ro-bind .git/modules/libs", "--bind .git/modules/libs/a",
+		"--ro-bind .git/modules/libs/a/config", "--ro-bind .git/modules/libs/a/hooks",
+		"--bind .git/modules/m", "--ro-bind .git/modules/m/config", "--ro-bind .git/modules/m/hooks",
+		"--ro-bind .git/modules/m/info", "--ro-bind .git/modules/m/modules", "--bind .git/modules/m/modules/inner",
+		"--ro-bind .git/modules/m/modules/inner/config", "--ro-bind .git/modules/m/modules/inner/hooks",
+		"--ro-bind .git/modules/s", "--ro-bind .git/modules/s/hooks", "--ro-bind .git/modules/s/info",
+		"--ro-bind .git/modules/s/objects", "--ro-bind .git/modules/s/refs",
+		"--ro-bind .git/worktrees", "--bind .git/worktrees/wt",
+		"--ro-bind .git/worktrees/wt/commondir", "--ro-bind .git/worktrees/wt/gitdir",
+		"--ro-bind libs/a/.git", "--ro-bind m/.git",
+		"--bind nested/.git", "--ro-bind nested/.git/config", "--ro-bind nested/.git/hooks",
+		"--ro-bind wt/.git",
+	} {
+		flag, rel, _ := strings.Cut(m, " ")
+		want = append(want, flag, "$WS/"+rel, "$WS/"+rel)
+	}
+	got := make([]string, 0, end-start)
+	for _, a := range argv[start:end] {
+		got = append(got, strings.ReplaceAll(a, ws, "$WS"))
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("workspace argv segment changed:\n%s", unifiedDiff("argv",
+			[]byte(strings.Join(want, "\n")+"\n"), []byte(strings.Join(got, "\n")+"\n"), true))
+	}
+}
+
 // TestBwrapPrepareRefusesSymlinkedGitMetadata: a symlinked metadata entry
 // fails prepare (R-13) before anything runs, whether its target exists or
 // not.
