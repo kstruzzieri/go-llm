@@ -332,6 +332,17 @@ func TestHoldGitMachinery(t *testing.T) {
 			modes:  map[string]fs.FileMode{"sub": 0o555, "sub/.git.golem-held-r1": 0o555},
 			exist:  []string{"sub/.git.golem-held-r1/HEAD.golem-held-r1"},
 			before: map[string]string{"sub": "sub/.git"}, after: map[string]string{"sub": ""}},
+		// The setgid and sticky bits are part of the exact mode put back.
+		{name: "a setgid directory without write permission keeps its mode", nonRoot: true,
+			change: `git init -q sub && chmod 02555 sub`,
+			want:   heldInitNotes("sub", "r1"),
+			modes:  map[string]fs.FileMode{"sub": fs.ModeSetgid | 0o555},
+			before: map[string]string{"sub": "sub/.git"}, after: map[string]string{"sub": ""}},
+		{name: "a sticky directory without write permission keeps its mode", nonRoot: true,
+			change: `git init -q sub && chmod 01555 sub`,
+			want:   heldInitNotes("sub", "r1"),
+			modes:  map[string]fs.FileMode{"sub": fs.ModeSticky | 0o555},
+			before: map[string]string{"sub": "sub/.git"}, after: map[string]string{"sub": ""}},
 		// The lock comes after the after-walk here, so the hold opens it up.
 		{name: "a directory locked against search after the walk is held", nonRoot: true,
 			change: `git init -q sub`, between: `chmod 0644 sub`,

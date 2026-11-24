@@ -9,6 +9,8 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -198,6 +201,10 @@ type bwrapBackend struct {
 	runner      commandRunner
 	starter     backgroundStarter
 	collect     func(workspaceRoot string) (roots []string, aliases map[string]string, layoutDirs []string, links map[string]string, err error)
+	// heldMu serializes the post-run checks (holdNewGit). Two at once could
+	// each open up one locked directory, and the second would record the
+	// first's temporary mode as the one to put back.
+	heldMu sync.Mutex
 }
 
 // newBwrapExecBackend constructs the real bwrap backend, failing closed when
@@ -341,20 +348,22 @@ func bwrapRejectInheritableFDs() error {
 // receives a non-nil empty environment — the approved payload environment
 // crosses only as --setenv policy arguments, so loader-control variables can
 // never reach the TCB binaries. The stamped WorkspaceRoot is consumed as-is;
-// re-resolving it here could silently change the policy after approval.
-func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
+// re-resolving it here could silently change the policy after approval. It
+// also returns the workspace walk the mounts came from, the before-layout of
+// the post-run check (holdNewGit).
+func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error) {
 	if len(spec.Argv) == 0 || spec.Path == "" || spec.Dir == "" {
-		return execSpec{}, errors.New("tools: bwrap requires a non-empty argv, executable path, and working directory")
+		return execSpec{}, sandboxGitLayout{}, errors.New("tools: bwrap requires a non-empty argv, executable path, and working directory")
 	}
 	if spec.WorkspaceRoot == "" {
-		return execSpec{}, errors.New("tools: bwrap requires a workspace root in the exec spec")
+		return execSpec{}, sandboxGitLayout{}, errors.New("tools: bwrap requires a workspace root in the exec spec")
 	}
 	if !posixCleanAbs(spec.WorkspaceRoot) || bwrapBroadRoot(spec.WorkspaceRoot) {
-		return execSpec{}, fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
+		return execSpec{}, sandboxGitLayout{}, fmt.Errorf("tools: bwrap workspace root %q must be a canonical non-root path", spec.WorkspaceRoot)
 	}
 	roots, aliases, layoutDirs, links, err := b.collect(spec.WorkspaceRoot)
 	if err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
 	etc := append([]string(nil), bwrapEtcLiterals...)
 	if b.cfg.AllowNetwork {
@@ -362,7 +371,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	}
 	etc, err = safeEtcPolicyPaths(etc, spec.WorkspaceRoot, canonicalHome())
 	if err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
 	// Resolve the approved executable before it becomes a bind source.
 	// --ro-bind resolves its source in the kernel, so binding a symlink
@@ -375,14 +384,14 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	// --argv0 retains the spelling only as inert process-visible data.
 	canonExe, err := filepath.EvalSymlinks(spec.Path)
 	if err != nil {
-		return execSpec{}, fmt.Errorf("tools: bwrap resolve executable target: %w", err)
+		return execSpec{}, sandboxGitLayout{}, fmt.Errorf("tools: bwrap resolve executable target: %w", err)
 	}
 	fi, serr := os.Stat(canonExe)
 	if serr != nil {
-		return execSpec{}, fmt.Errorf("tools: bwrap inspect executable target: %w", serr)
+		return execSpec{}, sandboxGitLayout{}, fmt.Errorf("tools: bwrap inspect executable target: %w", serr)
 	}
 	if !fi.Mode().IsRegular() {
-		return execSpec{}, fmt.Errorf("tools: bwrap executable %q resolves to a non-regular file", spec.Path)
+		return execSpec{}, sandboxGitLayout{}, fmt.Errorf("tools: bwrap executable %q resolves to a non-regular file", spec.Path)
 	}
 	// The resolved target must be the approved object (spec.ExeIdentity,
 	// #553) before it becomes the bind source and the launched path. This is
@@ -391,18 +400,22 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 	// resolution of canonExe; a swap after it stays the documented residual
 	// (#484). A nil identity is refused, never skipped.
 	if spec.ExeIdentity == nil || !os.SameFile(fi, spec.ExeIdentity) {
-		return execSpec{}, errors.New("executable changed since approval; retry")
+		return execSpec{}, sandboxGitLayout{}, errors.New("executable changed since approval; retry")
 	}
 	// The workspace walk rejects an inode linked outside the workspace and
 	// finds the git layout the argv mounts read-only or un-renamable (#721).
 	// It is the last workspace walk before spawn: metadata created after it
 	// is residual R1, and a change racing it is the documented same-UID race.
+	// It takes heldMu, so another job's post-run check cannot have a directory
+	// opened up or half held under it.
+	b.heldMu.Lock()
 	layout, err := inspectSandboxWorkspace(spec.WorkspaceRoot)
+	b.heldMu.Unlock()
 	if err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
 	if err := bwrapRejectSymlinkedGitMetadata(spec.WorkspaceRoot, layout.metadata); err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
@@ -421,7 +434,7 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 			layout.moduleReadOnly, layout.gitFiles),
 	})
 	if err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
 	wrapped := spec
 	wrapped.Env = []string{} // non-nil: the outer prlimit/bwrap chain inherits nothing
@@ -432,27 +445,111 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, error) {
 		wrapped.Path = b.prlimitPath
 	}
 	if err := bwrapRejectInheritableFDs(); err != nil {
-		return execSpec{}, err
+		return execSpec{}, sandboxGitLayout{}, err
 	}
-	return wrapped, nil
+	return wrapped, layout, nil
 }
 
 // Run executes one foreground command inside its per-invocation namespaces.
-// The private tmpfs mounts vanish with the namespace, so no cleanup exists.
+// The private tmpfs mounts vanish with the namespace. Once the command
+// returns, on every path, the post-run check sets aside the git machinery it
+// created, and its notes join the result's, which exec renders on the error
+// paths too.
 func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
-	wrapped, err := b.prepare(spec)
+	wrapped, before, err := b.prepare(spec)
 	if err != nil {
 		return execResult{}, err
 	}
-	return b.runner.Run(ctx, wrapped)
+	res, err := b.runner.Run(ctx, wrapped)
+	res.Notes = append(res.Notes, b.holdNewGit(before)...)
+	return res, err
 }
 
 // Start launches one background command through the same preparation as Run;
-// the manager's group-termination and reap semantics are untouched.
+// the manager's group-termination and reap semantics are untouched. The
+// post-run check runs when the job exits (heldGitProcess). When the starter
+// fails, the child may have run already (unixStarter.Start kills and reaps it
+// when it cannot observe its exit), so the check runs then too, and its notes
+// join the error.
 func (b *bwrapBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
-	wrapped, err := b.prepare(spec)
+	wrapped, before, err := b.prepare(spec)
 	if err != nil {
 		return nil, err
 	}
-	return b.starter.Start(wrapped, stdout, stderr)
+	proc, err := b.starter.Start(wrapped, stdout, stderr)
+	if err != nil {
+		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before), "\n"))
+	}
+	return &heldGitProcess{backgroundProcess: proc, check: func() []string { return b.holdNewGit(before) }}, nil
 }
+
+// holdNewGit is the post-run check (#802): it walks the workspace again,
+// sets aside the git machinery that is new since before (prepare's walk) and
+// returns the notes, warnings included, capped (capHeldNotes). One backend's
+// checks, and its before-walks, run one at a time (heldMu).
+func (b *bwrapBackend) holdNewGit(before sandboxGitLayout) []string {
+	b.heldMu.Lock()
+	defer b.heldMu.Unlock()
+	after := inspectSandboxWorkspaceAfter(before.root)
+	runID := newHeldRunID()
+	return capHeldNotes(holdGitMachinery(after, newGitMachinery(before, after), runID), runID)
+}
+
+// heldNotesMax is the most note lines one post-run check reports; the
+// command decides how many items it plants.
+const heldNotesMax = 50
+
+// capHeldNotes puts every WARNING line first, keeping the order within each
+// kind, and keeps the first heldNotesMax lines. Past that it ends with one
+// line saying how many were dropped, how many of those were WARNINGs, and
+// how to find the held names, which all carry runID.
+func capHeldNotes(notes []string, runID string) []string {
+	var warns, rest []string
+	for _, n := range notes {
+		if strings.HasPrefix(n, "WARNING:") {
+			warns = append(warns, n)
+		} else {
+			rest = append(rest, n)
+		}
+	}
+	out := append(warns, rest...)
+	if len(out) <= heldNotesMax {
+		return out
+	}
+	which := ""
+	if w := len(warns) - heldNotesMax; w > 0 {
+		which = fmt.Sprintf(" (%d of them WARNINGs)", w)
+	}
+	return append(out[:heldNotesMax], fmt.Sprintf("… and %d more held items%s (run %s): their names end in .golem-held-%s",
+		len(out)-heldNotesMax, which, runID, runID))
+}
+
+// newHeldRunID is a fresh run id for held names: eight random hex digits.
+func newHeldRunID() string {
+	var id [4]byte
+	_, _ = rand.Read(id[:]) // crypto/rand.Read never fails
+	return hex.EncodeToString(id[:])
+}
+
+// heldGitProcess runs the post-run check once the background process's Wait
+// returns. PID and Kill delegate unchanged, and the check never changes what
+// Wait returns; its notes are the cleanupNote the manager reads at reap. The
+// inner process (on Linux a *unixProcess) reports no note of its own.
+type heldGitProcess struct {
+	backgroundProcess
+	check   func() []string
+	checked sync.Once
+	note    string // set by the first Wait; read only after Wait returns
+}
+
+// Wait waits for the process, then runs the check, only on the first call,
+// so a second Wait keeps the first check's notes.
+func (p *heldGitProcess) Wait() (int, bool, error) {
+	code, managerKilled, err := p.backgroundProcess.Wait()
+	p.checked.Do(func() { p.note = strings.Join(p.check(), "\n") })
+	return code, managerKilled, err
+}
+
+// cleanupNote implements cleanupReporter: the check's notes, one per line,
+// or "".
+func (p *heldGitProcess) cleanupNote() string { return p.note }

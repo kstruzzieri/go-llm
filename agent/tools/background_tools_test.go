@@ -1035,3 +1035,53 @@ func TestStopCommandInvokeUnknownHandle(t *testing.T) {
 		t.Error("unknown handle must not fabricate a state block")
 	}
 }
+
+// TestMultiLineNotesRender: every line of a multi-line note (the post-run git
+// check's) gets its own "note: " prefix, in results, errors and status; a
+// one-line note's error text is unchanged.
+func TestMultiLineNotesRender(t *testing.T) {
+	notes := []string{"one\ntwo"}
+	if got := renderNotes(notes); got != "note: one\nnote: two\n" {
+		t.Errorf("renderNotes: %q", got)
+	}
+	if got := execErr("failed", notes).Content; !strings.HasSuffix(got, "failed\nnote: one\nnote: two") {
+		t.Errorf("execErr: %q", got)
+	}
+	base := fmt.Errorf("start")
+	if got := withCleanupNote(base, "one\ntwo").Error(); got != "start\nnote: one\nnote: two" {
+		t.Errorf("multi-line error: %q", got)
+	}
+	if got := withCleanupNote(base, "one").Error(); got != "start; one" {
+		t.Errorf("one-line error: %q", got)
+	}
+	st := JobStatus{Handle: "h", Argv: []string{"x"}, Notes: notes}
+	if got, _ := renderStatusResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
+		t.Errorf("status: %q", got)
+	}
+	if got := renderStopResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
+		t.Errorf("stop: %q", got)
+	}
+}
+
+// TestStatusNotesFitTheSmallOutputBudget: notes larger than the small-output
+// budget are cut to the lines that fit, then one line counting the rest, in
+// status and in stop.
+func TestStatusNotesFitTheSmallOutputBudget(t *testing.T) {
+	lines := make([]string, 51)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("held back new git metadata: %03d%s", i, strings.Repeat("x", 400))
+	}
+	st := JobStatus{Handle: "h", Argv: []string{"x"}, Cwd: "/w", ExitKnown: true, Notes: []string{strings.Join(lines, "\n")}}
+	status, truncated := renderStatusResult(st)
+	for name, got := range map[string]string{"status": status, "stop": renderStopResult(st)} {
+		if len(got) > bgSmallOutputCap {
+			t.Errorf("%s: %d bytes, over %d", name, len(got), bgSmallOutputCap)
+		}
+		if !strings.Contains(got, "note: "+lines[0]+"\n") || !strings.HasSuffix(got, " more note lines not shown\n") {
+			t.Errorf("%s:\n%s", name, got)
+		}
+	}
+	if !truncated || !strings.Contains(status, `cwd: "/w"`) {
+		t.Errorf("status truncated %v:\n%s", truncated, status)
+	}
+}

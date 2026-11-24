@@ -904,19 +904,31 @@ func formatExecResult(r execResult) string {
 	return b.String()
 }
 
-// renderNotes renders one "note: " line per backend note; no notes renders "".
+// renderNotes renders one "note: " line per line of each backend note; no
+// notes renders "".
 func renderNotes(notes []string) string {
 	var b strings.Builder
-	for _, n := range notes {
+	for _, n := range noteLines(notes) {
 		b.WriteString("note: " + n + "\n")
 	}
 	return b.String()
 }
 
-// execErr is errResult with one "note: " line per backend note appended, so
-// a timeout, cancellation or spawn failure still reports them (#576).
-func execErr(msg string, notes []string) agent.ToolResult {
+// noteLines splits each note into its lines: a background job's post-run
+// check reports its notes as one multi-line note.
+func noteLines(notes []string) []string {
+	var out []string
 	for _, n := range notes {
+		out = append(out, strings.Split(n, "\n")...)
+	}
+	return out
+}
+
+// execErr is errResult with one "note: " line per line of each backend note
+// appended, so a timeout, cancellation or spawn failure still reports them
+// (#576).
+func execErr(msg string, notes []string) agent.ToolResult {
+	for _, n := range noteLines(notes) {
 		msg += "\nnote: " + n
 	}
 	return errResult(msg)

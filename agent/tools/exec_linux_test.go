@@ -7,13 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // recordingProbe fails the test if the probe runs when construction must have
@@ -1353,5 +1360,481 @@ func TestNewExecBackendBwrapToolchainSentinel(t *testing.T) {
 				t.Fatalf("ValidateSandbox err = %v, want the bwrap refusal naming %s", err, tc.field)
 			}
 		})
+	}
+}
+
+// --- the post-run check for new git machinery (#802) ---
+
+// heldRunIDPattern finds the run id in a hold note's new name.
+var heldRunIDPattern = regexp.MustCompile(`\.golem-held-([^ ]*) \(`)
+
+// heldRunID returns the run id note names, failing the test unless it is
+// eight lowercase hex digits.
+func heldRunID(t *testing.T, note string) string {
+	t.Helper()
+	m := heldRunIDPattern.FindStringSubmatch(note)
+	if m == nil || !regexp.MustCompile(`^[0-9a-f]{8}$`).MatchString(m[1]) {
+		t.Fatalf("no hex run id in %q", note)
+	}
+	return m[1]
+}
+
+// heldInitNotes is the hold's notes for a new repository at rel made by git
+// init: its HEAD first, then its .git.
+func heldInitNotes(rel, id string) []string {
+	return []string{heldNote(rel+"/.git/HEAD", rel+"/.git/HEAD.golem-held-"+id),
+		heldNote(rel+"/.git", rel+"/.git.golem-held-"+id)}
+}
+
+// requireBwrapGit skips without bwrap or a host git; real git, kept inside
+// the workspace by GIT_CEILING_DIRECTORIES, is the oracle for "held".
+func requireBwrapGit(t *testing.T, ws string) {
+	t.Helper()
+	requireBwrapCapability(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", ws)
+}
+
+// bwrapShSpec is a spec for /bin/sh -c script rooted at ws.
+func bwrapShSpec(t *testing.T, ws, script string) execSpec {
+	t.Helper()
+	return execSpec{
+		Path: "/bin/sh", Argv: []string{"/bin/sh", "-c", script}, Dir: ws,
+		Env: []string{"PATH=/usr/bin:/bin", "HOME=" + bwrapTestHome}, WorkspaceRoot: ws,
+		ExeIdentity: execIdentityOf(t, "/bin/sh"), Screen: testScreen(),
+	}
+}
+
+// runBwrapJob starts script as a background job on m and returns its handle.
+func runBwrapJob(t *testing.T, m *BackgroundManager, ws, script string) string {
+	t.Helper()
+	st, err := m.start(context.Background(), bwrapShSpec(t, ws, script), ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Handle
+}
+
+// reapedBwrapJob waits until the job is reaped, checks it exited 0, and
+// returns its status.
+func reapedBwrapJob(t *testing.T, m *BackgroundManager, handle string) JobStatus {
+	t.Helper()
+	select {
+	case <-jobDoneChan(t, m, handle):
+	case <-time.After(90 * time.Second):
+		t.Fatalf("job %s never finished", handle)
+	}
+	st, ok := m.status(handle)
+	if !ok {
+		t.Fatalf("job %s evicted", handle)
+	}
+	if !st.ExitKnown || st.ExitCode != 0 {
+		t.Fatalf("job %s: exit %d (known %v)", handle, st.ExitCode, st.ExitKnown)
+	}
+	return st
+}
+
+// TestBwrapRunHoldsNewGitMachinery: a foreground command's new repository is
+// set aside once it returns, and the notes say so.
+func TestBwrapRunHoldsNewGitMachinery(t *testing.T) {
+	ws := wsTempDir(t)
+	requireBwrapGit(t, ws)
+	res := realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}, ws, []string{"/bin/sh", "-c", "git init -q sub"})
+	if res.ExitCode != 0 {
+		t.Fatalf("git init: exit %d: %s", res.ExitCode, res.Stderr)
+	}
+	if len(res.Notes) == 0 {
+		t.Fatal("no notes")
+	}
+	if want := heldInitNotes("sub", heldRunID(t, res.Notes[0])); !slices.Equal(res.Notes, want) {
+		t.Fatalf("notes:\n got %q\nwant %q", res.Notes, want)
+	}
+	if got := gitDirAt(t, ws, "sub"); got != "" {
+		t.Fatalf("host git in sub finds %q", got)
+	}
+}
+
+// TestBwrapRunLeavesOrdinaryChanges: files and folders, one of them named
+// HEAD, are not git machinery.
+func TestBwrapRunLeavesOrdinaryChanges(t *testing.T) {
+	requireBwrapCapability(t)
+	ws := wsTempDir(t)
+	res := realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}, ws,
+		[]string{"/bin/sh", "-c", "mkdir -p d/e && echo x > d/e/f && echo y > top && mkdir HEAD"})
+	if res.ExitCode != 0 || len(res.Notes) != 0 {
+		t.Fatalf("exit %d, notes %q", res.ExitCode, res.Notes)
+	}
+	for _, p := range []string{"d/e/f", "top", "HEAD"} {
+		if _, err := os.Lstat(filepath.Join(ws, p)); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// plantingRunner stands for a command that plants an empty .git at plant
+// and then times out.
+type plantingRunner struct{ plant string }
+
+func (r plantingRunner) Run(context.Context, execSpec) (execResult, error) {
+	if err := os.MkdirAll(r.plant, 0o755); err != nil {
+		return execResult{}, err
+	}
+	return execResult{TimedOut: true, Notes: []string{"earlier"}}, context.DeadlineExceeded
+}
+
+// TestBwrapRunErrorKeepsHeldNotes: a run that ends in an error is checked
+// too, and its notes ride on the result exec renders for that error.
+func TestBwrapRunErrorKeepsHeldNotes(t *testing.T) {
+	ws := wsTempDir(t)
+	b := testBwrapBackend(plantingRunner{plant: filepath.Join(ws, "sub", ".git")}, &captureStarter{},
+		SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	res, err := b.Run(context.Background(), bwrapTestSpec(t, ws))
+	if !errors.Is(err, context.DeadlineExceeded) || !res.TimedOut {
+		t.Fatalf("err %v, timed out %v", err, res.TimedOut)
+	}
+	if len(res.Notes) != 2 {
+		t.Fatalf("notes %q", res.Notes)
+	}
+	id := heldRunID(t, res.Notes[1])
+	if want := []string{"earlier", heldNote("sub/.git", "sub/.git.golem-held-"+id)}; !slices.Equal(res.Notes, want) {
+		t.Fatalf("notes:\n got %q\nwant %q", res.Notes, want)
+	}
+}
+
+// TestBwrapStartHoldsAtExit: a background job's new repository is set aside
+// when the job exits, and the job's notes say so.
+func TestBwrapStartHoldsAtExit(t *testing.T) {
+	ws := wsTempDir(t)
+	requireBwrapGit(t, ws)
+	m, err := NewSandboxedBackgroundManager(SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Shutdown)
+	st := reapedBwrapJob(t, m, runBwrapJob(t, m, ws, "git init -q sub"))
+	if len(st.Notes) != 1 {
+		t.Fatalf("notes %q", st.Notes)
+	}
+	if want := strings.Join(heldInitNotes("sub", heldRunID(t, st.Notes[0])), "\n"); st.Notes[0] != want {
+		t.Fatalf("note:\n got %q\nwant %q", st.Notes[0], want)
+	}
+	if got := gitDirAt(t, ws, "sub"); got != "" {
+		t.Fatalf("host git in sub finds %q", got)
+	}
+}
+
+// plantThenFailStarter starts the command, lets it run to the end, and then
+// fails, as unixStarter.Start does when it cannot observe a child's exit:
+// that child was started, then killed and reaped inside Start.
+type plantThenFailStarter struct{}
+
+func (plantThenFailStarter) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	p, err := unixStarter{}.Start(spec, stdout, stderr)
+	if err != nil {
+		return nil, err
+	}
+	_, _, _ = p.Wait()
+	return nil, errors.New("observe background process exit: injected")
+}
+
+// TestBwrapStartErrorStillChecks: when the starter fails after the child
+// ran, what it planted is still set aside, and the notes ride on the error.
+func TestBwrapStartErrorStillChecks(t *testing.T) {
+	ws := wsTempDir(t)
+	requireBwrapGit(t, ws)
+	backend, err := newExecBackend(SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := backend.execBackend.(*bwrapBackend)
+	b.starter = plantThenFailStarter{}
+	_, err = b.Start(bwrapShSpec(t, ws, "git init -q sub"), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "observe background process exit: injected") {
+		t.Fatalf("err %v", err)
+	}
+	notes := notesOf(err)
+	if len(notes) != 1 {
+		t.Fatalf("no notes on %v", err)
+	}
+	if want := strings.Join(heldInitNotes("sub", heldRunID(t, notes[0])), "\n"); notes[0] != want {
+		t.Fatalf("note:\n got %q\nwant %q", notes[0], want)
+	}
+	if got := gitDirAt(t, ws, "sub"); got != "" {
+		t.Fatalf("host git in sub finds %q", got)
+	}
+}
+
+// TestBwrapOverlappingJobs: job b plants a repository while job a runs, a
+// moves it, and both exit. The first check to run holds it, and host git then
+// finds nothing at the original, moved or held places.
+func TestBwrapOverlappingJobs(t *testing.T) {
+	ws := wsTempDir(t)
+	requireBwrapGit(t, ws)
+	m, err := NewSandboxedBackgroundManager(SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Shutdown)
+	const wait = `i=0; until [ -e %s ]; do sleep 0.05; i=$((i+1)); [ $i -lt 1200 ] || exit 9; done`
+	a := runBwrapJob(t, m, ws, fmt.Sprintf(wait, "planted")+"; mv sub moved")
+	b := runBwrapJob(t, m, ws, "git init -q sub && touch planted && "+fmt.Sprintf(wait, "moved"))
+	var notes []string
+	for _, h := range []string{a, b} {
+		for _, n := range reapedBwrapJob(t, m, h).Notes {
+			notes = append(notes, strings.Split(n, "\n")...)
+		}
+	}
+	if len(notes) == 0 {
+		t.Fatal("nothing held")
+	}
+	id := heldRunID(t, notes[0])
+	if want := heldInitNotes("moved", id); !slices.Equal(notes, want) {
+		t.Fatalf("notes:\n got %q\nwant %q", notes, want)
+	}
+	if _, err := os.Lstat(filepath.Join(ws, "sub")); err == nil {
+		t.Fatal("sub is still there")
+	}
+	for _, at := range []string{".", "moved", "moved/.git.golem-held-" + id} {
+		if got := gitDirAt(t, ws, at); got != "" {
+			t.Errorf("host git in %q finds %q", at, got)
+		}
+	}
+}
+
+// TestBwrapConcurrentChecksRestoreExactMode: two background jobs' checks run
+// at once over a directory the command locked. The second starts once the
+// first has opened the directory up to read it; were they not serialized,
+// the second would record that temporary mode as the original, to rename in
+// it, and put it back after the first restored the real one. The directory
+// ends with its exact mode.
+func TestBwrapConcurrentChecksRestoreExactMode(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ws := wsTempDir(t)
+	restoreModes(t, ws)
+	b := testBwrapBackend(&captureRunner{}, &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	p1, err := b.Start(bwrapTestSpec(t, ws), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := b.Start(bwrapTestSpec(t, ws), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, ws, `git init -q a && chmod 0 a`)
+
+	var mu sync.Mutex
+	state := 0 // 0: until the first check opens a up; 1: the second check started; 2: after
+	secondIn, firstDone := make(chan struct{}), make(chan struct{})
+	note2 := make(chan string, 1)
+	ownerAccessChmod = func(p string, mode uint32) error {
+		err := unix.Chmod(p, mode)
+		mu.Lock()
+		switch state {
+		case 0: // the first check has opened a up to read it
+			state = 1
+			mu.Unlock()
+			go func() {
+				_, _, _ = p2.Wait()
+				note2 <- cleanupNoteOf(p2)
+			}()
+			select {
+			case <-secondIn:
+			case <-time.After(time.Second): // serialized: the second check waits for the first
+			}
+			mu.Lock()
+			state = 2
+			mu.Unlock()
+		case 1: // the second check changes a mode while the first has a open
+			state = 2
+			mu.Unlock()
+			close(secondIn)
+			<-firstDone
+		default:
+			mu.Unlock()
+		}
+		return err
+	}
+	t.Cleanup(func() { ownerAccessChmod = unix.Chmod })
+
+	_, _, _ = p1.Wait()
+	close(firstDone)
+	note1 := cleanupNoteOf(p1)
+	mu.Lock()
+	never := state == 0
+	mu.Unlock()
+	if never {
+		t.Fatalf("the first check never opened a up; note %q", note1)
+	}
+	// The second check finds the held copy, whose HEAD is renamed too, and
+	// nothing new.
+	if got := <-note2; got != "" {
+		t.Errorf("second note: got %q, want none", got)
+	}
+	if want := strings.Join(heldInitNotes("a", heldRunID(t, note1)), "\n"); note1 != want {
+		t.Errorf("first note:\n got %q\nwant %q", note1, want)
+	}
+	fi, err := os.Lstat(filepath.Join(ws, "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode() & (fs.ModePerm | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky); got != 0 {
+		t.Errorf("mode of a is %v, want 0", got)
+	}
+}
+
+// funcRunner is a commandRunner from a function.
+type funcRunner func(context.Context, execSpec) (execResult, error)
+
+func (f funcRunner) Run(ctx context.Context, spec execSpec) (execResult, error) { return f(ctx, spec) }
+
+// heldSummaryPattern finds the run id in capHeldNotes's summary line.
+var heldSummaryPattern = regexp.MustCompile(`^… and \d+ more held items(?: \(\d+ of them WARNINGs\))? \(run ([0-9a-f]{8})\): `)
+
+// TestBwrapHeldNotesCapped: a run that plants more than the cap gets the cap's
+// lines, every WARNING first, and one summary line with the run id and how
+// many dropped lines were WARNINGs; a path longer than the cap's bytes is cut.
+// The locked directories belong to "another user" (the euid seam), so each
+// is a WARNING the check cannot open up.
+func TestBwrapHeldNotesCapped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	long := strings.Repeat("a", 220)
+	for _, c := range []struct {
+		name           string
+		locked, plants int
+		plant          string // one more planted .git, at this path
+		warns          int    // WARNING lines kept
+		summary        string // with %[1]s for the run id; "" for none
+		want           []string
+	}{
+		{name: "renames past the cap", locked: 3, plants: 60, warns: 3,
+			summary: "… and 13 more held items (run %[1]s): their names end in .golem-held-%[1]s"},
+		{name: "WARNINGs past the cap", locked: 55, plants: 5, warns: 50,
+			summary: "… and 10 more held items (5 of them WARNINGs) (run %[1]s): their names end in .golem-held-%[1]s"},
+		{name: "a long path is cut", plant: long + "/.git",
+			want: []string{heldNote(long[:200]+"…[cut]", long[:200]+"…[cut]")}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ws := wsTempDir(t)
+			restoreModes(t, ws)
+			b := testBwrapBackend(funcRunner(func(context.Context, execSpec) (execResult, error) {
+				for i := range c.locked {
+					runIn(t, ws, fmt.Sprintf("mkdir l%02d && chmod 0 l%02d", i, i))
+				}
+				for i := range c.plants {
+					runIn(t, ws, fmt.Sprintf("mkdir -p p%02d/.git", i))
+				}
+				if c.plant != "" {
+					runIn(t, ws, "mkdir -p "+c.plant)
+				}
+				return execResult{}, nil
+			}), &captureStarter{}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+			ownerAccessEuid = func() int { return os.Geteuid() + 1 }
+			t.Cleanup(func() { ownerAccessEuid = os.Geteuid })
+			res, err := b.Run(context.Background(), bwrapTestSpec(t, ws))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.want != nil {
+				if !slices.Equal(res.Notes, c.want) {
+					t.Fatalf("notes:\n got %q\nwant %q", res.Notes, c.want)
+				}
+				return
+			}
+			if len(res.Notes) != heldNotesMax+1 {
+				t.Fatalf("%d notes, want %d: %q", len(res.Notes), heldNotesMax+1, res.Notes)
+			}
+			last := res.Notes[heldNotesMax]
+			m := heldSummaryPattern.FindStringSubmatch(last)
+			if m == nil || last != fmt.Sprintf(c.summary, m[1]) {
+				t.Fatalf("summary %q, want %q", last, c.summary)
+			}
+			for i, n := range res.Notes[:heldNotesMax] {
+				want := heldNote(fmt.Sprintf("p%02d/.git", i-c.warns), fmt.Sprintf("p%02d/.git.golem-held-%s", i-c.warns, m[1]))
+				if i < c.warns {
+					want = checkWarn(fmt.Sprintf("l%02d", i), "permission denied")
+				}
+				if n != want {
+					t.Errorf("note %d: got %q, want %q", i, n, want)
+				}
+			}
+		})
+	}
+}
+
+// TestHeldGitProcessWaitTwice: the check runs on the first Wait only, and a
+// second Wait keeps its notes.
+func TestHeldGitProcessWaitTwice(t *testing.T) {
+	calls := 0
+	p := &heldGitProcess{backgroundProcess: fakeProcess{}, check: func() []string {
+		calls++
+		if calls > 1 {
+			return nil
+		}
+		return []string{"one", "two"}
+	}}
+	for range 2 {
+		if _, _, err := p.Wait(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 || cleanupNoteOf(p) != "one\ntwo" {
+		t.Fatalf("checks %d, note %q", calls, cleanupNoteOf(p))
+	}
+}
+
+// TestBwrapPrepareWaitsForCheck: a start's before-walk waits while another
+// job's check has a directory opened up, so it never sees that mode.
+func TestBwrapPrepareWaitsForCheck(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	ws := wsTempDir(t)
+	restoreModes(t, ws)
+	ran := make(chan struct{}, 1)
+	b := testBwrapBackend(funcRunner(func(context.Context, execSpec) (execResult, error) {
+		ran <- struct{}{}
+		return execResult{}, nil
+	}), &captureStarter{proc: fakeProcess{}}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	p, err := b.Start(bwrapTestSpec(t, ws), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, ws, `mkdir a && chmod 0 a`)
+	var once sync.Once
+	fired, overlapped := false, false
+	runDone := make(chan struct{})
+	ownerAccessChmod = func(p string, mode uint32) error {
+		err := unix.Chmod(p, mode)
+		once.Do(func() { // the check has a opened up
+			fired = true
+			go func() {
+				_, _ = b.Run(context.Background(), bwrapTestSpec(t, ws))
+				close(runDone)
+			}()
+			select {
+			case <-ran:
+				overlapped = true
+			case <-time.After(time.Second): // serialized: the before-walk waits for the check
+			}
+		})
+		return err
+	}
+	t.Cleanup(func() { ownerAccessChmod = unix.Chmod })
+	_, _, _ = p.Wait()
+	if !fired {
+		t.Fatal("the check never opened a up")
+	}
+	<-runDone
+	if overlapped {
+		t.Fatal("a before-walk ran while a check had a directory opened up")
 	}
 }

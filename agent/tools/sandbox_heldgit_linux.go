@@ -408,9 +408,26 @@ func renameAside(dir int, name, runID string) (string, error) {
 // noteName spells a path for a note: bare, or quoted (quoteArgForPreview)
 // when it holds whitespace, a quote, a backslash, a non-graphic rune or
 // invalid UTF-8, so a planted name cannot end a note line or forge another.
+// A spelling longer than noteNameMax bytes is cut there, at a rune boundary,
+// and ends in noteNameCut.
 func noteName(p string) string {
+	n := quoteArgForPreview(p)
 	if !utf8.ValidString(p) {
-		return strconv.QuoteToGraphic(p)
+		n = strconv.QuoteToGraphic(p)
 	}
-	return quoteArgForPreview(p)
+	if len(n) <= noteNameMax {
+		return n
+	}
+	end := noteNameMax
+	for !utf8.RuneStart(n[end]) {
+		end--
+	}
+	return n[:end] + noteNameCut
 }
+
+// noteNameMax is the longest path spelling a note carries; the command
+// chooses its names.
+const noteNameMax = 200
+
+// noteNameCut marks a path spelling noteName cut.
+const noteNameCut = "…[cut]"

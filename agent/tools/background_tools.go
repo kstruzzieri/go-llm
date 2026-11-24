@@ -623,12 +623,14 @@ func renderStatusResult(st JobStatus) (string, bool) {
 	if st.ExitKnown {
 		tail += fmt.Sprintf("exit_code: %d\n", st.ExitCode)
 	}
-	tail += renderNotes(st.Notes) // inside the budget below
 	cwd := fmt.Sprintf("%q", st.Cwd)
 	const marker = `"[truncated]"`
 	const argvMarker = `["[truncated]"]`
+	// The notes get what is left once cwd and argv could shrink to markers.
+	notes, truncated := renderNotesWithin(st.Notes,
+		bgSmallOutputCap-len(head)-len(tail)-len("cwd: \nargv: \n")-len(marker)-len(argvMarker))
+	tail += notes
 	budget := bgSmallOutputCap - len(head) - len(tail) - len("cwd: \nargv: \n")
-	truncated := false
 	if len(cwd)+len(argvJSON) > budget {
 		if len(cwd)+len(argvMarker) > budget {
 			cwd = marker
@@ -666,6 +668,25 @@ func renderStopResult(st JobStatus) string {
 	if st.ExitKnown {
 		fmt.Fprintf(&b, "exit_code: %d\n", st.ExitCode)
 	}
-	b.WriteString(renderNotes(st.Notes))
+	notes, _ := renderNotesWithin(st.Notes, bgSmallOutputCap-b.Len())
+	b.WriteString(notes)
 	return b.String()
+}
+
+// renderNotesWithin is renderNotes in at most budget bytes: when the notes do
+// not fit, the lines that do are followed by one line saying how many were
+// left out, and it reports true.
+func renderNotesWithin(notes []string, budget int) (string, bool) {
+	if all := renderNotes(notes); len(all) <= budget {
+		return all, false
+	}
+	const moreMax = len("note: … 9999999999 more note lines not shown\n")
+	lines := noteLines(notes)
+	var b strings.Builder
+	i := 0
+	for ; i < len(lines) && b.Len()+len("note: \n")+len(lines[i])+moreMax <= budget; i++ {
+		b.WriteString("note: " + lines[i] + "\n")
+	}
+	fmt.Fprintf(&b, "note: … %d more note lines not shown\n", len(lines)-i)
+	return b.String(), true
 }
