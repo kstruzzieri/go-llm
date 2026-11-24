@@ -35,9 +35,15 @@ func styleFor(w io.Writer, noColor bool) consoleStyle {
 	return styleForOps(realTermOps{}, f, noColor)
 }
 
+type consoleOps interface {
+	IsTerminal(int) bool
+	GetSize(int) (int, int, error)
+	supportsANSI(int) bool
+}
+
 // styleForOps is styleFor with the terminal seam injected. A size error or a
 // non-positive width gives 80; otherwise the width is clamped to at least 40.
-func styleForOps(ops termOps, f *os.File, noColor bool) consoleStyle {
+func styleForOps(ops consoleOps, f *os.File, noColor bool) consoleStyle {
 	fd := int(f.Fd())
 	if !ops.IsTerminal(fd) {
 		return consoleStyle{false, 80}
@@ -46,7 +52,7 @@ func styleForOps(ops termOps, f *os.File, noColor bool) consoleStyle {
 	if err != nil || width < 1 {
 		width = 80
 	}
-	return consoleStyle{colorPermitted(noColor), max(40, width)}
+	return consoleStyle{colorPermitted(noColor) && ops.supportsANSI(fd), max(40, width)}
 }
 
 // paint wraps text in the SGR sequence when color is on.

@@ -241,6 +241,10 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 	indent := strings.Repeat(" ", 2+nameCol+2)
 
 	s := opt.style
+	// Pull a row left only as far as needed to keep its content intact.
+	fitIndent := func(cols int) string {
+		return indent[:min(len(indent), max(0, s.width-cols))]
+	}
 	var b strings.Builder
 	line := func(text string) {
 		b.WriteString(text)
@@ -251,10 +255,27 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 		if len(items) == 0 {
 			return
 		}
-		for i, l := range wrapList(items, indent+label, indent+strings.Repeat(" ", displayCols(label)), s.width) {
+		widest := 0
+		for i, item := range items {
+			cols := displayCols(item)
+			if i+1 < len(items) {
+				cols++ // comma
+			}
+			widest = max(widest, cols)
+		}
+		labelWidth := displayCols(label)
+		pad := fitIndent(labelWidth + widest)
+		if labelWidth+widest > s.width {
+			line(indent + s.paint(sgrCyan, strings.TrimSpace(label)))
+			for _, l := range wrapList(items, fitIndent(widest), fitIndent(widest), s.width) {
+				line(l)
+			}
+			return
+		}
+		for i, l := range wrapList(items, pad+label, pad+strings.Repeat(" ", labelWidth), s.width) {
 			if i == 0 {
 				word := strings.TrimRight(label, " ")
-				l = indent + s.paint(sgrCyan, word) + l[len(indent)+len(word):]
+				l = pad + s.paint(sgrCyan, word) + l[len(pad)+len(word):]
 			}
 			line(l)
 		}
@@ -290,9 +311,9 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 		// The URL is never wrapped or cut: it is the identity being granted.
 		name, url := destinationName(d.Provider()), destinationURL(d)
 		head := "  " + name + strings.Repeat(" ", max(0, nameCol-displayCols(name))) + "  " + url
-		if displayCols(name) > nameCol {
-			line("  " + name)
-			head = indent + url
+		if displayCols(name) > nameCol || displayCols(head) > s.width {
+			line(strings.Repeat(" ", min(2, max(0, s.width-displayCols(name)))) + name)
+			head = fitIndent(displayCols(url)) + url
 		}
 		if d.IsLocal() {
 			line(head)
@@ -308,7 +329,7 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 			}
 			if text := st.text(); displayCols(head)+2+displayCols(text) > s.width {
 				line(head)
-				line(indent + s.paint(sgr, text))
+				line(fitIndent(displayCols(text)) + s.paint(sgr, text))
 			} else {
 				line(head + "  " + s.paint(sgr, text))
 			}
@@ -316,7 +337,8 @@ func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map
 		row(usesLabel, uses[d])
 		row("checks    ", checks[d])
 		if k, ok := keySources[d.Provider()]; ok {
-			line(indent + s.paint(sgrDim, displayField(k)))
+			text := displayField(k)
+			line(fitIndent(displayCols(text)) + s.paint(sgrDim, text))
 		}
 	}
 	if asking {

@@ -15,6 +15,10 @@ type sizeOps struct {
 	err error
 }
 
+type plainConsoleOps struct{ sizeOps }
+
+func (plainConsoleOps) supportsANSI(int) bool    { return false }
+func (sizeOps) supportsANSI(int) bool            { return true }
 func (sizeOps) IsTerminal(int) bool              { return true }
 func (sizeOps) MakeRaw(int) (*term.State, error) { return nil, nil }
 func (sizeOps) Restore(int, *term.State) error   { return nil }
@@ -67,6 +71,9 @@ func TestStyleForColor(t *testing.T) {
 	t.Setenv("TERM", "xterm")
 	if got := styleForOps(sizeOps{120, nil}, f, false); got != (consoleStyle{true, 120}) {
 		t.Fatalf("color permitted: %+v", got)
+	}
+	if got := styleForOps(plainConsoleOps{sizeOps{120, nil}}, f, false); got != (consoleStyle{false, 120}) {
+		t.Fatalf("console without ANSI processing: %+v", got)
 	}
 	if got := styleForOps(sizeOps{120, nil}, f, true); got != (consoleStyle{false, 120}) {
 		t.Fatalf("noColor: %+v", got)

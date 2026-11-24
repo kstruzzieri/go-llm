@@ -580,40 +580,47 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 	// 60 and 61 straddle the opencode header plus its state (61 columns).
 	for _, width := range []int{30, 40, 60, 61, 80, 120} {
 		got := renderString(m, nil, states, manifestOpts{style: consoleStyle{false, width}})
-		if !strings.Contains(got, "  "+longURL+"\n") {
-			t.Errorf("width %d: long URL broken:\n%s", width, got)
+		// Strip padding to check the group order and the unbroken URL and
+		// state independently of how far these rows had to move left.
+		lines := strings.Split(got, "\n")
+		trimmed := make([]string, len(lines))
+		for i, l := range lines {
+			trimmed[i] = strings.TrimSpace(l)
 		}
-		if !strings.Contains(got, "  "+longURL+"\n"+indent+remoteRefused.text()+"\n") {
-			t.Errorf("width %d: state of the over-wide header not on its own line:\n%s", width, got)
+		rows := strings.Join(trimmed, "\n")
+		if !strings.Contains(rows, longURL+"\n"+remoteRefused.text()+"\n") {
+			t.Errorf("width %d: long URL or following state broken:\n%s", width, got)
 		}
 		head := "  opencode          https://opencode.ai/zen/go"
 		inline := head + "  " + remoteNeedsOK.text()
-		fits := displayCols(inline) <= width
-		if fits && !strings.Contains(got, inline+"\n") || !fits && !strings.Contains(got, head+"\n"+indent+remoteNeedsOK.text()+"\n") {
-			t.Errorf("width %d: state placement (fits=%v):\n%s", width, fits, got)
+		if displayCols(inline) <= width {
+			if !strings.Contains(got, inline+"\n") {
+				t.Errorf("width %d: missing inline state:\n%s", width, got)
+			}
+		} else if !strings.Contains(rows, "https://opencode.ai/zen/go\n"+remoteNeedsOK.text()+"\n") {
+			t.Errorf("width %d: state should follow URL:\n%s", width, got)
 		}
-		if !strings.Contains(got, "\n  abcdefghijklmnopqrst\n"+indent+"https://long.example.com") {
-			t.Errorf("width %d: long name did not move the URL to its own line:\n%s", width, got)
-		}
-		// The long name's state follows its URL line, or takes its own line
-		// at the value column when the URL line cannot hold it.
-		urlLine := indent + "https://long.example.com"
+		const longNameURL = "https://long.example.com"
 		flagText := remoteAllowedByFlag.text()
-		if fits := displayCols(urlLine+"  "+flagText) <= width; fits && !strings.Contains(got, "\n"+urlLine+"  "+flagText+"\n") ||
-			!fits && !strings.Contains(got, "\n"+urlLine+"\n"+indent+flagText+"\n") {
-			t.Errorf("width %d: long-name state placement (fits=%v):\n%s", width, fits, got)
+		urlLine := longNameURL + "  " + flagText
+		if displayCols(indent+urlLine) > width {
+			urlLine = longNameURL + "\n" + flagText
 		}
-		lines := strings.Split(got, "\n")
+		if !strings.Contains(rows, "abcdefghijklmnopqrst\n"+urlLine+"\n") {
+			t.Errorf("width %d: long-name state placement:\n%s", width, got)
+		}
 		conts := 0
 		for i, l := range lines {
-			if !strings.HasPrefix(l, indent+"used for  ") {
+			label := strings.Index(l, "used for  ")
+			if label < 0 {
 				continue
 			}
+			col := label + len("used for  ")
 			for _, c := range lines[i+1:] {
-				if !strings.HasPrefix(c, indent+"          ") {
+				if !strings.HasPrefix(c, strings.Repeat(" ", col)) {
 					break
 				}
-				if c[value+10] == ' ' {
+				if strings.HasPrefix(c[col:], " ") {
 					t.Errorf("width %d: continuation not aligned under the first item: %q", width, c)
 				}
 				conts++
@@ -650,6 +657,28 @@ func TestRenderManifestNarrowAndWide(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s missing:\n%s", url, got)
+		}
+	}
+}
+
+func TestRenderManifestFitsFallbackAt50Columns(t *testing.T) {
+	d := admDest(t, "production-cloud", "https://review.invalid")
+	m := testManifest(t,
+		provider.DestinationEdge{Purpose: modelSetUseCase, Destination: d, IsFallback: true},
+		provider.DestinationEdge{Purpose: delegateUseCase, Destination: d, IsFallback: true},
+		provider.DestinationEdge{Purpose: "summarize", Destination: d, IsFallback: true},
+	)
+	got := renderString(m, map[string]string{d.Provider(): "sends api_key from $MOCK_MODEL_KEY"},
+		map[provider.Destination]remoteState{d: remoteRefused}, manifestOpts{style: consoleStyle{false, 50}})
+	if !strings.Contains(got, "code delegation (fallback),") {
+		t.Fatalf("missing fallback purpose:\n%s", got)
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if strings.HasPrefix(l, "──") { // Box-drawing dashes occupy one column here.
+			l = strings.ReplaceAll(l, "─", "-")
+		}
+		if width := displayCols(l); width > 50 {
+			t.Errorf("%d columns: %q", width, l)
 		}
 	}
 }
