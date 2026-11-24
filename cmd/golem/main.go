@@ -915,7 +915,8 @@ func discardIfConsentNotShown(runErr error, stdin *os.File, isTerminal func(int)
 
 func colorEnabled(out *os.File, noColor bool) bool {
 	fd := int(out.Fd())
-	return colorPermitted(noColor) && realTermOps{}.IsTerminal(fd) && realTermOps{}.supportsANSI(fd)
+	ops := consoleTermOps{}
+	return colorPermitted(noColor) && ops.IsTerminal(fd) && ops.supportsANSI(fd)
 }
 
 // colorPermitted holds the flag/environment gates separately from the TTY

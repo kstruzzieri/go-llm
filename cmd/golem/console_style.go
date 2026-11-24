@@ -32,8 +32,11 @@ func styleFor(w io.Writer, noColor bool) consoleStyle {
 	if !ok {
 		return consoleStyle{false, 80}
 	}
-	return styleForOps(realTermOps{}, f, noColor)
+	return styleForOps(consoleTermOps{}, f, noColor)
 }
+
+// consoleTermOps adds output styling to the terminal operations used by the renderer.
+type consoleTermOps struct{ realTermOps }
 
 type consoleOps interface {
 	IsTerminal(int) bool

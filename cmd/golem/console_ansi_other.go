@@ -3,4 +3,4 @@
 package main
 
 // supportsANSI needs no additional console-mode check on a terminal here.
-func (realTermOps) supportsANSI(int) bool { return true }
+func (consoleTermOps) supportsANSI(int) bool { return true }
