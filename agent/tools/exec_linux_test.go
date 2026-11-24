@@ -1497,6 +1497,7 @@ func reapedBwrapJob(t *testing.T, m *BackgroundManager, handle string) JobStatus
 // TestBwrapRunHoldsNewGitMachinery: a foreground command's new repository is
 // set aside once it returns, and the notes say so.
 func TestBwrapRunHoldsNewGitMachinery(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	ws := wsTempDir(t)
 	requireBwrapGit(t, ws)
 	res := realBwrapRun(t, SandboxConfig{Runtime: SandboxRuntimeBwrap}, ws, []string{"/bin/sh", "-c", "git init -q sub"})
@@ -1548,6 +1549,7 @@ func (r plantingRunner) Run(context.Context, execSpec) (execResult, error) {
 // baseline: the check is skipped with a warning and the other checkout's .git
 // is left alone.
 func TestBwrapRunWorkspaceReplaced(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	ws := filepath.Join(wsTempDir(t), "ws")
 	if err := os.Mkdir(ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -1731,6 +1733,7 @@ func TestBwrapQueuedStartCancelled(t *testing.T) {
 // post-run check is closed on every path: a foreground run, a background job
 // once it is waited for, a start that fails, and a prepare that refuses.
 func TestBwrapWorkspacePinReleased(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	openFDs := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
@@ -1785,6 +1788,7 @@ func TestBwrapWorkspacePinReleased(t *testing.T) {
 // TestBwrapRunErrorKeepsHeldNotes: a run that ends in an error is checked
 // too, and its notes ride on the result exec renders for that error.
 func TestBwrapRunErrorKeepsHeldNotes(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	ws := wsTempDir(t)
 	b := testBwrapBackend(plantingRunner{plant: filepath.Join(ws, "sub", ".git")}, &captureStarter{},
 		SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
@@ -1804,6 +1808,7 @@ func TestBwrapRunErrorKeepsHeldNotes(t *testing.T) {
 // TestBwrapStartHoldsAtExit: a background job's new repository is set aside
 // when the job exits, and the job's notes say so.
 func TestBwrapStartHoldsAtExit(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	ws := wsTempDir(t)
 	requireBwrapGit(t, ws)
 	m, err := NewSandboxedBackgroundManager(SandboxConfig{Runtime: SandboxRuntimeBwrap})
@@ -1841,6 +1846,7 @@ func (plantThenFailStarter) Start(spec execSpec, stdout, stderr io.Writer) (back
 // TestBwrapStartErrorStillChecks: when the starter fails after the child
 // ran, what it planted is still set aside, and the notes ride on the error.
 func TestBwrapStartErrorStillChecks(t *testing.T) {
+	// containment: GITMETA-POSTRUN-WIRING
 	ws := wsTempDir(t)
 	requireBwrapGit(t, ws)
 	backend, err := newExecBackend(SandboxConfig{Runtime: SandboxRuntimeBwrap})

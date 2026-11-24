@@ -240,6 +240,7 @@ func snapshotTree(t *testing.T, dir string) map[string]treeEntry {
 // repositories before the hold (the control) and the after ones, or none,
 // after it.
 func TestHoldGitMachinery(t *testing.T) {
+	// containment: GITMETA-POSTRUN-HOLD
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("these rows run real git: %v", err)
 	}
@@ -914,6 +915,7 @@ func TestHoldGitMachinery(t *testing.T) {
 // spelling sorts first. The merged item has the stronger kind and every
 // HEAD; files, which may be hard links, are never merged.
 func TestHoldGitMachineryMergesTwins(t *testing.T) {
+	// containment: GITMETA-POSTRUN-HOLD
 	hooks := gitEntryID{Dev: 1, Ino: 10, Mode: fs.ModeDir}
 	inner := gitEntryID{Dev: 1, Ino: 11, Mode: fs.ModeDir}
 	file := gitEntryID{Dev: 1, Ino: 12}
