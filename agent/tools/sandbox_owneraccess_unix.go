@@ -20,6 +20,7 @@ var (
 	errAccessNotOwned = errors.New("owned by another user")
 	errAccessMoved    = errors.New("it was moved or replaced during the run")
 	errAccessLimit    = errors.New("too many locked directories to open up")
+	errAccessSpecial  = errors.New("its special permission bits could not be restored")
 	errAccessHas      = errors.New("its owner can already do that")
 )
 

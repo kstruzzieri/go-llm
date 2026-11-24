@@ -5,7 +5,10 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,7 +29,8 @@ type ownerAccess struct {
 	root    int // the workspace root, O_PATH; -1 when rootErr
 	rootErr error
 	grants  []accessGrant
-	counted map[[2]uint64]bool // the directories opened up so far
+	counted map[[2]uint64]uint32 // the directories opened up so far
+	screen  *outputScreen        // the command's credential screen, for each path a warning shows
 }
 
 // accessGrant is one mode ownerAccess changed: the kept descriptor, the
@@ -37,13 +41,16 @@ type accessGrant struct {
 	mode uint32
 }
 
-// newOwnerAccess opens root for one walk or hold; close releases it.
-func newOwnerAccess(root string) *ownerAccess {
-	fd, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+// newOwnerAccess duplicates the workspace pin for one walk or hold.
+func newOwnerAccess(pin *os.File) *ownerAccess {
+	if pin == nil {
+		return &ownerAccess{root: -1, rootErr: unix.EBADF}
+	}
+	fd, err := unix.FcntlInt(pin.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		fd = -1
 	}
-	return &ownerAccess{root: fd, rootErr: err, counted: make(map[[2]uint64]bool)}
+	return &ownerAccess{root: fd, rootErr: err, counted: make(map[[2]uint64]uint32)}
 }
 
 // close releases the root descriptor. Call restore first.
@@ -67,6 +74,7 @@ func (a *ownerAccess) grant(dir int, rel string, need uint32) error {
 		return err
 	}
 	key := [2]uint64{uint64(st.Dev), uint64(st.Ino)}
+	_, opened := a.counted[key]
 	switch {
 	case st.Mode&unix.S_IFMT != unix.S_IFDIR:
 		return unix.ENOTDIR
@@ -74,9 +82,11 @@ func (a *ownerAccess) grant(dir int, rel string, need uint32) error {
 		return errAccessNotOwned
 	case st.Mode&need == need:
 		return errAccessHas
+	case st.Mode&unix.S_ISUID != 0 || st.Mode&unix.S_ISGID != 0 && !ownerAccessInGroup(st.Gid):
+		return errAccessSpecial
 	case !a.reaches(rel, &st):
 		return errAccessMoved
-	case !a.counted[key] && len(a.counted) >= ownerAccessLimit:
+	case !opened && len(a.counted) >= ownerAccessLimit:
 		return errAccessLimit
 	}
 	keep, err := unix.FcntlInt(uintptr(dir), unix.F_DUPFD_CLOEXEC, 0)
@@ -88,16 +98,28 @@ func (a *ownerAccess) grant(dir int, rel string, need uint32) error {
 		_ = unix.Close(keep)
 		return err
 	}
-	a.counted[key] = true
+	if !opened {
+		a.counted[key] = mode
+	}
 	a.grants = append(a.grants, accessGrant{fd: keep, rel: rel, mode: mode})
 	return nil
+}
+
+// ownerAccessInGroup checks whether setgid can be restored without relying on
+// capabilities in the filesystem's user namespace. Tests can model a foreign group.
+var ownerAccessInGroup = func(gid uint32) bool {
+	// The invalid gid queries the filesystem gid without changing it.
+	if fsgid, err := unix.SetfsgidRetGid(-1); err == nil && int(gid) == fsgid {
+		return true
+	}
+	groups, err := os.Getgroups()
+	return err == nil && slices.Contains(groups, int(gid))
 }
 
 // restore puts back, newest first, the exact mode (permission, setuid,
 // setgid and sticky bits) of every directory grant opened up, through its
 // kept descriptor, and checks it with fstat. It returns a warning for each
-// mode it could not put back: the kernel drops setgid when the user is not
-// in the directory's group, for one.
+// mode it could not put back.
 func (a *ownerAccess) restore() (warnings []string) {
 	for i := len(a.grants) - 1; i >= 0; i-- {
 		g := a.grants[i]
@@ -110,8 +132,13 @@ func (a *ownerAccess) restore() (warnings []string) {
 			err = fmt.Errorf("it is %04o", st.Mode&0o7777)
 		}
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("WARNING: could not restore the mode of %s to %04o (%v); set it back by hand",
-				noteName(g.rel), g.mode, err))
+			name, ok := screenedName(a.screen, g.rel)
+			if !ok {
+				warnings = append(warnings, "WARNING: could not restore the directory mode at "+withheldPath)
+			} else {
+				warnings = append(warnings, fmt.Sprintf("WARNING: could not restore the mode of %s to %04o (%v); set it back by hand",
+					name, g.mode, err))
+			}
 		}
 		_ = unix.Close(g.fd)
 	}
@@ -139,20 +166,25 @@ func (a *ownerAccess) reaches(rel string, st *unix.Stat_t) bool {
 }
 
 // retry runs op, which works in the directory open at dir, found at dirRel.
-// When the kernel refuses it (EACCES or EPERM, which a mode the command set
-// can cause) and grant gives need, it runs op once more; otherwise it returns
+// When the kernel refuses access (EACCES) and grant gives need, it runs op once more; otherwise it returns
 // op's error, marked when grant found the directory moved or replaced
-// (movedErr).
+// (movedErr) or owned by another user (notOwnedErr), and otherwise followed by
+// the reason grant declined (the limit, a descriptor it could not duplicate).
 func (a *ownerAccess) retry(dir int, dirRel string, need uint32, op func() error) error {
 	err := op()
-	if !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+	if !errors.Is(err, unix.EACCES) {
 		return err
 	}
 	if gerr := a.grant(dir, dirRel, need); gerr != nil {
-		if errors.Is(gerr, errAccessMoved) {
+		switch {
+		case errors.Is(gerr, errAccessSpecial):
+			return gerr
+		case errors.Is(gerr, errAccessMoved):
 			return movedErr{err}
+		case errors.Is(gerr, errAccessNotOwned):
+			return notOwnedErr{err}
 		}
-		return err
+		return fmt.Errorf("%w; %w", err, gerr) // why it could not be opened up, beside why the operation failed
 	}
 	return op()
 }
@@ -173,7 +205,7 @@ func (a *ownerAccess) open(dir int, dirRel, rel string) (int, error) {
 	for _, c := range strings.Split(rel, "/") {
 		next := -1
 		err := a.retry(fd, at, 0o500, func() (err error) {
-			next, err = unix.Openat(fd, c, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			next, err = unix.Openat(fd, holdComponent(fd, c), workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			return err
 		})
 		_ = unix.Close(fd)
@@ -185,22 +217,34 @@ func (a *ownerAccess) open(dir int, dirRel, rel string) (int, error) {
 	return fd, nil
 }
 
-// openUpPath opens up the directory at rel from the root so it can be listed
-// and searched (u+rx), opening up any directory above it whose lookup needs
-// it. It is the after-walk's entry point.
-func (a *ownerAccess) openUpPath(rel string) error {
+// openUpPath tries the walk's read and child lookup in the pinned directory.
+// An empty listing needs no search. Only a denied operation needs a grant.
+func (a *ownerAccess) openUpPath(rel string) (bool, error) {
 	if a.root < 0 {
-		return a.rootErr
+		return false, a.rootErr
 	}
 	fd, err := a.open(a.root, ".", rel)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	if err := a.grant(fd, rel, 0o500); err != nil && !errors.Is(err, errAccessHas) {
-		return err
+	dir, err := os.Open(procFd(fd))
+	if err == nil {
+		defer func() { _ = dir.Close() }()
+		var names []string
+		names, err = dir.Readdirnames(1)
+		if errors.Is(err, io.EOF) {
+			return true, nil
+		}
+		if err == nil {
+			var st unix.Stat_t
+			err = unix.Fstatat(fd, names[0], &st, unix.AT_SYMLINK_NOFOLLOW)
+		}
 	}
-	return nil
+	if errors.Is(err, unix.EACCES) {
+		err = a.grant(fd, rel, 0o500)
+	}
+	return false, err
 }
 
 // movedErr is err, met in a directory the root no longer reaches where it
@@ -213,5 +257,26 @@ func (e movedErr) Error() string { return e.err.Error() }
 // Unwrap gives both err and errAccessMoved to errors.Is.
 func (e movedErr) Unwrap() []error { return []error{e.err, errAccessMoved} }
 
+// notOwnedErr is err, met in a directory another user owns, which is never
+// opened up. Its text is that reason rather than the kernel's, which only
+// says the operation was refused.
+type notOwnedErr struct{ err error }
+
+// Error is errAccessNotOwned's text.
+func (e notOwnedErr) Error() string { return errAccessNotOwned.Error() }
+
+// Unwrap gives both err and errAccessNotOwned to errors.Is.
+func (e notOwnedErr) Unwrap() []error { return []error{e.err, errAccessNotOwned} }
+
 // procFd is the /proc path that reaches the file open at fd.
 func procFd(fd int) string { return "/proc/self/fd/" + strconv.Itoa(fd) }
+
+// originalMode returns the permission bits from before the first temporary grant.
+func (a *ownerAccess) originalMode(st *unix.Stat_t) uint32 {
+	if a != nil {
+		if mode, ok := a.counted[[2]uint64{uint64(st.Dev), uint64(st.Ino)}]; ok {
+			return mode
+		}
+	}
+	return st.Mode
+}

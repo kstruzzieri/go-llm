@@ -11,6 +11,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,11 +21,13 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// sandboxGitLayout is the git metadata inside a workspace at spawn time
-// (#721). Every path is absolute and canonical-parent spelled (the walk's own
-// spelling under the canonical root); every slice is sorted and de-duplicated.
+// sandboxGitLayout records mount candidates or one comparison snapshot. A
+// before-walk collects both in one traversal. Only mount candidates affect
+// pre-spawn policy. Comparison paths use Git's spelling in lookup directories.
 type sandboxGitLayout struct {
 	dotGitDirs    []string // each directory named .git (ASCII case-folded), any depth
 	gitDirs       []string // each submodule / linked-worktree git dir (not named .git)
@@ -39,6 +42,9 @@ type sandboxGitLayout struct {
 
 	// The post-run check (#802) compares two walks of the workspace by these.
 	// No backend mounts them, so recording them changes no mount or refusal.
+	// In the after-walk, which no backend mounts either, dotGitDirs, gitFiles
+	// and dotGitLinks also hold each entry a lookup of .git resolves to
+	// (lookupGitNames), whatever its spelling.
 	dotGitLinks []string // each symbolic link named .git (ASCII case-folded)
 	// layoutHEADs is the HEAD of each directory git would treat as a
 	// repository (noteLayout), anywhere in the workspace, git dirs included;
@@ -53,13 +59,24 @@ type sandboxGitLayout struct {
 	// hooks directory, or a command-made .git/evil. entryKinds decides which
 	// kind such a path counts as.
 	innerLayouts []string
-	// ids is the identity of each entry in dotGitDirs, gitFiles, dotGitLinks,
-	// gitDirs, containers, metadata, repoLayouts and innerLayouts, by path. An
-	// entry that could not be stat'ed has none.
-	ids map[string]gitEntryID
+	// baseline is the comparison snapshot collected alongside the mount inspection.
+	baseline       *sandboxGitLayout
+	containerLinks []string
+	headIDs, ids   map[string]gitEntryID
+	// lookupDirs marks directories where git names are recorded solely by lookup.
+	lookupDirs map[string]bool
+	// Match listed directories to named lookups within the same parent inode.
+	listedDirs map[string]gitDirKey
+	namedDirs  map[gitDirKey]string
+	// unknown records baseline observations that could not be compared.
+	unknown map[string]string
+	// mounted marks metadata protected during this invocation.
+	mounted map[string]bool
 	// unlisted is each directory the after-walk could not list or search
 	// (inspectSandboxWorkspaceAfter); the before-walk fails instead.
-	unlisted []string
+	unlisted       []string
+	unlistedSet    map[string]bool
+	unreadableDirs []string // directories needing the named-lookup fallback
 	// unlistedWhy is the first reason the after-walk recorded for a
 	// directory, by path, with no path in its text.
 	unlistedWhy map[string]string
@@ -69,10 +86,26 @@ type sandboxGitLayout struct {
 	// access opens up, during the after-walk only, a directory the user owns
 	// whose mode keeps the walk out (ownerAccess).
 	access *ownerAccess
+	// lookupPolicies caches each device's Git name lookup policy for this walk.
+	lookupPolicies map[uint64]fsLookupPolicy
 
-	root      string // the workspace root; errors name paths relative to it
-	afterWalk bool   // record unreadable directories in unlisted rather than fail
+	root string // the workspace root; errors name paths relative to it
+	// pin is the root's descriptor, taken by prepare before its walk, through
+	// which the post-run check reaches the workspace; nil outside a bwrap run.
+	pin *os.File
+	// screen is the command's credential screen, through which every path a
+	// held-git note shows passes; nil outside a run.
+	screen    *outputScreen
+	afterWalk bool // record unreadable directories in unlisted rather than fail
+	// collect records what only the post-run check uses: .git links, layouts
+	// and their HEADs (whose contents it reads), container links
+	// and identities. The before-walk does so where that check runs
+	// (postRunCollect); macOS's Seatbelt inspection reads only what it mounts.
+	collect bool
 }
+
+// fsLookupPolicy selects exact listings, named lookups or a per-directory flag check.
+type fsLookupPolicy uint8
 
 // gitEntryID identifies a git entry across the before- and after-walks: an
 // entry with the same identity at another path was moved, not created.
@@ -83,6 +116,11 @@ type gitEntryID struct {
 	// deleted and recreated with another target can get its inode number back
 	// (ext4 and XFS reuse them), so the number alone would call it unchanged.
 	Target string
+}
+
+// gitDirKey identifies a directory entry within the directory that contains it.
+type gitDirKey struct {
+	parent, entry gitEntryID
 }
 
 // inspectSandboxWorkspace walks the workspace before a sandboxed spawn.
@@ -121,17 +159,23 @@ type sandboxLinkShortfall struct {
 	first       string
 }
 
+// Error names the workspace entry linked outside the root.
 func (s *sandboxLinkShortfall) Error() string {
 	return fmt.Sprintf("tools: sandbox workspace entry %q is linked outside the workspace", s.first)
 }
 
 // inspectSandboxWorkspaceWithWalk runs a fresh walk for each attempt.
 func inspectSandboxWorkspaceWithWalk(root string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
+	return inspectSandboxWorkspaceNamed(context.Background(), root, filepath.Base(root), walk)
+}
+
+// inspectSandboxWorkspaceNamed walks root, whose workspace entry is named base.
+func inspectSandboxWorkspaceNamed(ctx context.Context, root, base string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
 	var previous *sandboxLinkShortfall
 	var err error
 	for range sandboxInspectPasses {
 		var layout sandboxGitLayout
-		layout, err = inspectSandboxWorkspaceOnce(root, walk)
+		layout, err = inspectSandboxWorkspaceOnce(ctx, root, base, walk)
 		var short *sandboxLinkShortfall
 		if errors.As(err, &short) && (previous == nil || *previous != *short) {
 			// Another internal name may have moved into an already visited directory.
@@ -146,7 +190,7 @@ func inspectSandboxWorkspaceWithWalk(root string, walk func(string, fs.WalkDirFu
 }
 
 // inspectSandboxWorkspaceOnce is one pass of inspectSandboxWorkspace.
-func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
+func inspectSandboxWorkspaceOnce(ctx context.Context, root, base string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -158,6 +202,10 @@ func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) 
 	}
 
 	layout := sandboxGitLayout{root: root}
+	if postRunCollect {
+		layout.baseline = &sandboxGitLayout{root: root, collect: true}
+		layout.baseline.noteAdministrativeRoot(base)
+	}
 	links := make(map[inode]linkRecord)
 	order := make([]inode, 0)
 	// entryErr fails the pass on entry rel. An entry its parent listed that
@@ -169,6 +217,9 @@ func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) 
 		return fmt.Errorf("tools: sandbox inspect workspace entry %q: %w", rel, err)
 	}
 	err := walk(root, func(name string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		rel, relErr := filepath.Rel(root, name)
 		if relErr != nil {
 			return fmt.Errorf("tools: sandbox inspect workspace links: %w", relErr)
@@ -190,7 +241,14 @@ func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) 
 			}
 			return fmt.Errorf("%w %q: entry type changed", errSandboxWorkspaceChanged, rel)
 		}
-		layout.noteEntry(name, kind)
+		entryBase := filepath.Base(name)
+		if rel == "." {
+			entryBase = base
+		}
+		layout.noteEntry(name, entryBase, kind)
+		if layout.baseline != nil {
+			layout.baseline.visit(name, kind, false)
+		}
 		if info.IsDir() || kind&os.ModeSymlink != 0 {
 			return nil
 		}
@@ -239,53 +297,70 @@ func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc) 
 		}
 	}
 	for _, d := range layout.dotGitDirs {
-		if err := scanGitDir(d, &layout); err != nil {
+		if err := scanGitDir(ctx, d, &layout); err != nil {
 			return sandboxGitLayout{}, err
 		}
+	}
+	if check := layout.baseline; check != nil {
+		if err := check.scanObservedDirs(ctx); err != nil {
+			return sandboxGitLayout{}, err
+		}
+		check.mounted = make(map[string]bool)
+		for _, p := range slices.Concat(layout.metadata, layout.containers, layout.gitDirs) {
+			check.mounted[check.canonical(p)] = true
+		}
+		check.finish()
 	}
 	layout.finish()
 	return layout, nil
 }
 
-// inspectSandboxWorkspaceAfter walks the workspace after a sandboxed command
-// for the post-run check (#802): the same records as the before-walk, but best
-// effort, so it never fails. A directory the user owns whose mode keeps the
-// walk out (a command can chmod its own) is opened up before it is read
-// (openUp) and given its exact mode back when the walk ends, even on a
-// panic; a mode it cannot put back is a warning. A directory it still cannot
-// list or search goes into unlisted, with the reason, the entries it did list
-// are still walked, and in each one it looks up .git (walking it when it is a
-// directory) and the repository-layout names HEAD, objects, refs and
-// commondir by name, as git would. It neither checks hard links nor retries.
-func inspectSandboxWorkspaceAfter(root string) (l sandboxGitLayout) {
-	l = sandboxGitLayout{root: root, afterWalk: true, access: newOwnerAccess(root)}
+// inspectSandboxWorkspaceAfterPinned walks the pinned workspace after execution.
+// It restores temporary owner grants on any exit and reports failed inspections.
+func inspectSandboxWorkspaceAfterPinned(root string, pin *os.File, screen *outputScreen) (l sandboxGitLayout) {
+	l = sandboxGitLayout{root: root, afterWalk: true, collect: true, access: newOwnerAccess(pin), screen: screen}
+	l.access.screen = screen
 	defer func() {
 		l.warnings = append(l.warnings, l.access.restore()...)
 		l.access.close()
 		l.access = nil
 	}()
+	base := filepath.Base(root)
+	if pin != nil {
+		base = filepath.Base(pin.Name())
+	}
+	l.noteAdministrativeRoot(base)
 	l.walkAfter(root)
-	for i := 0; i < len(l.unlisted); i++ { // a lookup can add a deeper unlisted directory
-		u := l.unlisted[i]
-		l.walkAfter(filepath.Join(u, ".git"))
-		l.noteLayout(u)
+	// A directory may allow named lookups even though it cannot be listed.
+	for i := 0; i < len(l.unreadableDirs); i++ {
+		u := l.unreadableDirs[i]
+		fi, err := os.Lstat(u)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		if !l.lookupDirs[filepath.Clean(u)] {
+			l.lookupGitNames(u)
+		}
+		child := filepath.Join(u, ".git")
+		if fi, err := os.Lstat(child); err == nil && fi.IsDir() {
+			l.walkAfter(child)
+		}
 	}
-	for _, d := range l.dotGitDirs {
-		_ = scanGitDir(d, &l) // the after-walk's scan records failures and never returns one
-	}
+	_ = l.scanObservedDirs(context.Background())
 	l.finish()
 	return l
 }
 
 // walkAfter is the after-walk from start, the root or a .git looked up in an
-// unlisted directory. Entry types come from the listing; ids are taken once
-// the walk is done (finish).
+// unlisted directory. Directory entries guide descent and visit records the
+// identities resolved by Git's names.
 func (l *sandboxGitLayout) walkAfter(start string) {
 	_ = filepath.WalkDir(start, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			switch {
 			case entry != nil: // a directory it could not list; what it did list still follows
 				if !errors.Is(err, fs.ErrNotExist) {
+					l.unreadableDirs = append(l.unreadableDirs, name)
 					l.unlist(name, err)
 				}
 			case name == l.root: // the workspace itself could not be read
@@ -293,36 +368,247 @@ func (l *sandboxGitLayout) walkAfter(start string) {
 			} // otherwise a looked-up .git that is absent, inside a directory already unlisted
 			return nil
 		}
-		if entry.IsDir() {
-			l.openUp(name)
-		}
-		l.noteEntry(name, entry.Type())
+		empty := entry.IsDir() && l.openUp(name)
+		l.visit(name, entry.Type(), empty)
 		return nil
 	})
 }
 
-// openUp opens up dir, a directory the walk is about to read, when its owner
-// can neither list it nor search it and access can (ownerAccess). When access
-// declines because dir moved or is past the limit, that is the reason the
-// walk gives if it then cannot read dir.
-func (l *sandboxGitLayout) openUp(dir string) {
+// gitLookupPath is the path the post-run check stats to look up git's own
+// name in dir, as git does: filepath.Join. A test sets it to resolve a name
+// as a casefold directory would, so the lookup finds another spelling.
+var gitLookupPath = func(dir, name string) string { return filepath.Join(dir, name) }
+
+// noteAdministrativeRoot recognizes a workspace opened directly at a Git directory.
+func (l *sandboxGitLayout) noteAdministrativeRoot(base string) {
+	if base != ".git" {
+		return
+	}
+	id, err := lookupID(l.root)
+	if err != nil {
+		l.inspectionError(l.root, l.root, err)
+		return
+	}
+	if id.Mode == fs.ModeDir {
+		p := filepath.Clean(l.root)
+		l.dotGitDirs = append(l.dotGitDirs, p)
+		l.ids = map[string]gitEntryID{p: id}
+	}
+}
+
+// visit records a directory's named lookups or the exact entries listed by its parent.
+func (l *sandboxGitLayout) visit(p string, kind fs.FileMode, empty bool) {
+	parent := filepath.Dir(p)
+	if p != l.root && !l.lookupDirs[parent] {
+		switch filepath.Base(p) {
+		case "HEAD":
+			l.noteLayout(parent)
+		case ".git":
+			l.observeDotGit(parent)
+		}
+	}
+	if !kind.IsDir() {
+		return
+	}
+	if p != l.root && l.lookupDirs[parent] {
+		l.listedDirectory(parent, p)
+	}
+	if !empty && l.usesLookup(p) {
+		l.lookupGitNames(p)
+	}
+}
+
+// lookupGitNames inspects the same names git resolves in dir.
+func (l *sandboxGitLayout) lookupGitNames(dir string) {
+	l.observeDotGit(dir)
+	l.noteLayout(dir)
+}
+
+// observeDotGit records the directory, gitfile or link resolved by the .git lookup.
+func (l *sandboxGitLayout) observeDotGit(dir string) {
+	p, id, ok := l.observe(dir, ".git")
+	if !ok {
+		return
+	}
+	switch id.Mode {
+	case fs.ModeDir:
+		l.dotGitDirs = append(l.dotGitDirs, p)
+	case 0:
+		l.gitFiles = append(l.gitFiles, p)
+	case fs.ModeSymlink:
+		l.dotGitLinks = append(l.dotGitLinks, p)
+	default:
+		delete(l.ids, p)
+	}
+}
+
+// scanObservedDirs collects the administrative structure for each resolved .git.
+func (l *sandboxGitLayout) scanObservedDirs(ctx context.Context) error {
+	for _, dir := range l.dotGitDirs {
+		if err := scanGitDir(ctx, dir, l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// usesLookup also recognizes a directory reached later through Git's spelling.
+func (l *sandboxGitLayout) usesLookup(dir string) bool {
+	p := filepath.Clean(dir)
+	if fold, seen := l.lookupDirs[p]; seen {
+		return fold
+	}
+	if l.lookupDirs == nil {
+		l.lookupDirs = make(map[string]bool)
+	}
+	fold := l.mayFoldNames(dir)
+	l.lookupDirs[p] = fold
+	return fold
+}
+
+// directoryKey identifies the parent and its entry through one parent descriptor.
+func (l *sandboxGitLayout) directoryKey(dir, lookup string) (gitDirKey, error) {
+	if dir == filepath.Clean(l.root) {
+		dir = l.root // keep the trailing /. on a pinned root
+	}
+	fd, err := unix.Open(dir, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return gitDirKey{}, err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	var parent, child unix.Stat_t
+	if err := unix.Fstat(fd, &parent); err != nil {
+		return gitDirKey{}, err
+	}
+	if err := unix.Fstatat(fd, filepath.Base(lookup), &child, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return gitDirKey{}, err
+	}
+	if child.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return gitDirKey{}, errSandboxWorkspaceChanged
+	}
+	return gitDirKey{
+		parent: gitEntryID{Dev: uint64(parent.Dev), Ino: uint64(parent.Ino), Mode: fs.ModeDir},
+		entry:  gitEntryID{Dev: uint64(child.Dev), Ino: uint64(child.Ino), Mode: fs.ModeDir},
+	}, nil
+}
+
+// listedDirectory indexes the listing spelling, including listings reached via an alias.
+func (l *sandboxGitLayout) listedDirectory(dir, p string) gitDirKey {
+	if key, ok := l.listedDirs[p]; ok {
+		return key
+	}
+	key, err := l.directoryKey(dir, p)
+	if err != nil {
+		l.inspectionError(p, dir, err)
+		return gitDirKey{}
+	}
+	if l.listedDirs == nil {
+		l.listedDirs = make(map[string]gitDirKey)
+	}
+	l.listedDirs[p] = key
+	return key
+}
+
+// nameDirectory associates the identity resolved by a lookup with Git's spelling.
+func (l *sandboxGitLayout) nameDirectory(dir, name, lookup string, id gitEntryID) {
+	key, err := l.directoryKey(dir, lookup)
+	if err == nil && key.entry != id {
+		err = errSandboxWorkspaceChanged
+	}
+	if err != nil {
+		l.inspectionError(filepath.Join(dir, name), dir, err)
+		return
+	}
+	if l.namedDirs == nil {
+		l.namedDirs = make(map[gitDirKey]string)
+	}
+	l.namedDirs[key] = name
+}
+
+// observe records a Git lookup under its own name. Descent uses that lookup too.
+func (l *sandboxGitLayout) observe(dir, name string) (string, gitEntryID, bool) {
+	p := filepath.Join(dir, name)
+	lookup := p
+	fold := l.usesLookup(dir)
+	if fold {
+		lookup = gitLookupPath(dir, name)
+	}
+	id, err := lookupID(lookup)
+	if err != nil {
+		l.inspectionError(p, dir, err)
+		return p, gitEntryID{}, false
+	}
+	if l.ids == nil {
+		l.ids = make(map[string]gitEntryID)
+	}
+	l.ids[p] = id
+	if fold && id.Mode == fs.ModeDir {
+		l.nameDirectory(dir, name, lookup, id)
+		return lookup, id, true
+	}
+	return p, id, true
+}
+
+// canonical spells listed directory components by their matching Git lookups.
+func (l *sandboxGitLayout) canonical(p string) string {
+	if len(l.namedDirs) == 0 || p == l.root || p == filepath.Dir(p) {
+		return p
+	}
+	name := l.namedDirs[l.listedDirs[p]]
+	if name == "" {
+		name = filepath.Base(p)
+	}
+	return filepath.Join(l.canonical(filepath.Dir(p)), name)
+}
+
+// inspectionError keeps the before observation unknown or reports the unchecked directory.
+func (l *sandboxGitLayout) inspectionError(p, dir string, err error) {
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if l.afterWalk {
+		l.unlist(dir, err)
+	} else if !errors.Is(err, unix.ENOTDIR) {
+		if l.unknown == nil {
+			l.unknown = make(map[string]string)
+		}
+		p = filepath.Clean(p)
+		if _, seen := l.unknown[p]; !seen {
+			l.unknown[p] = inspectionReason(err)
+		}
+	}
+}
+
+// openUp tries listing the directory and searching its entries before requesting
+// owner access. An empty listing needs no child lookup.
+func (l *sandboxGitLayout) openUp(dir string) (empty bool) {
 	fi, err := os.Lstat(dir)
 	if err != nil || fi.Mode().Perm()&0o500 == 0o500 {
-		return
+		return false
 	}
 	rel, err := filepath.Rel(l.root, dir)
 	if err != nil {
-		return
+		return false
 	}
-	if err := l.access.openUpPath(filepath.ToSlash(rel)); errors.Is(err, errAccessMoved) || errors.Is(err, errAccessLimit) {
+	empty, err = l.access.openUpPath(filepath.ToSlash(rel))
+	if errors.Is(err, errAccessSpecial) {
+		l.unlist(dir, err)
+	} else if errors.Is(err, errAccessMoved) || errors.Is(err, errAccessLimit) || errors.Is(err, errAccessNotOwned) {
 		l.why(dir, err)
 	}
+	return empty
 }
 
 // unlist records dir as a directory the after-walk could not list or search,
 // for the reason err (why).
 func (l *sandboxGitLayout) unlist(dir string, err error) {
-	l.unlisted = append(l.unlisted, dir)
+	if l.unlistedSet == nil {
+		l.unlistedSet = make(map[string]bool)
+	}
+	if !l.unlistedSet[dir] {
+		l.unlistedSet[dir] = true
+		l.unlisted = append(l.unlisted, dir)
+	}
 	l.why(dir, err)
 }
 
@@ -330,83 +616,152 @@ func (l *sandboxGitLayout) unlist(dir string, err error) {
 // without the path a file-system error carries, so a note can spell the path
 // itself.
 func (l *sandboxGitLayout) why(dir string, err error) {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		err = pe.Err
-	}
 	if l.unlistedWhy == nil {
 		l.unlistedWhy = make(map[string]string)
 	}
 	if _, ok := l.unlistedWhy[dir]; !ok {
-		l.unlistedWhy[dir] = err.Error()
+		l.unlistedWhy[dir] = inspectionReason(err)
 	}
 }
 
-// noteEntry records a walked entry: a name folding to .git by its type, and a
-// name folding to HEAD as the cue to test its directory as a repository
-// layout (noteLayout, which looks up the exact names, so a case-insensitive
-// filesystem's spelling counts as git's own lookup would).
-func (l *sandboxGitLayout) noteEntry(name string, kind fs.FileMode) {
-	base := filepath.Base(name)
+// inspectionReason omits any path embedded by a filesystem operation.
+func inspectionReason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err.Error()
+	}
+	return err.Error()
+}
+
+// noteEntry collects the original pre-spawn .git mount candidates.
+func (l *sandboxGitLayout) noteEntry(name, base string, kind fs.FileMode) {
 	if strings.EqualFold(base, ".git") {
 		switch {
 		case kind.IsDir():
 			l.dotGitDirs = append(l.dotGitDirs, name)
 		case kind.IsRegular():
 			l.gitFiles = append(l.gitFiles, name)
-		case kind&fs.ModeSymlink != 0:
-			l.dotGitLinks = append(l.dotGitLinks, name)
 		}
 	}
-	if name != l.root && strings.EqualFold(base, "HEAD") {
-		l.noteLayout(filepath.Dir(name))
-	}
 }
 
-// noteLayout records dir's HEAD in layoutHEADs when git would treat dir as a
-// repository: a valid HEAD (validHEAD) plus either objects and refs, or
-// commondir. That is git's is_git_directory, except that commondir counts
-// without checking where it points. A lookup that fails counts as absent, as
-// in git, so neither walk fails or records anything here.
+// noteLayout records HEAD's identity even in an incomplete layout.
 func (l *sandboxGitLayout) noteLayout(dir string) {
-	has := func(name string) bool {
-		_, err := os.Lstat(filepath.Join(dir, name))
-		return err == nil
+	lookup := func(name string) string {
+		if l.lookupDirs[filepath.Clean(dir)] {
+			return gitLookupPath(dir, name)
+		}
+		return filepath.Join(dir, name)
 	}
-	if head := filepath.Join(dir, "HEAD"); validHEAD(head) && (has("objects") && has("refs") || has("commondir")) {
-		l.layoutHEADs = append(l.layoutHEADs, head)
+	key := filepath.Join(dir, "HEAD")
+	head := lookup("HEAD")
+	id, err := lookupID(head)
+	if err != nil {
+		l.inspectionError(key, dir, err)
+		return
 	}
+	if l.headIDs == nil {
+		l.headIDs = make(map[string]gitEntryID)
+	}
+	l.headIDs[key] = id
+	valid, err := readGitHEAD(head, id)
+	if err != nil {
+		l.inspectionError(key, dir, err)
+		return
+	}
+	if !valid {
+		return
+	}
+	var markerErr error
+	markerFailure := func(name string, err error) {
+		l.inspectionError(filepath.Join(dir, name), dir, err)
+		if markerErr == nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, unix.ENOTDIR) {
+			markerErr = err
+		}
+	}
+	searchable := func(name string) bool {
+		var st unix.Stat_t
+		err := unix.Fstatat(unix.AT_FDCWD, lookup(name), &st, unix.AT_SYMLINK_NOFOLLOW)
+		if err != nil {
+			markerFailure(name, err)
+			return false
+		}
+		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+			markerFailure(name, errors.New("a repository layout marker is a symbolic link"))
+			return false
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			return false
+		}
+		ok, err := searchableMode(l.access, &st)
+		if err != nil {
+			markerFailure(name, err)
+		}
+		return ok
+	}
+	objects := os.Getenv("GIT_OBJECT_DIRECTORY") != "" || searchable("objects")
+	if !objects || !searchable("refs") {
+		var st unix.Stat_t
+		if err := unix.Fstatat(unix.AT_FDCWD, lookup("commondir"), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			markerFailure("commondir", err)
+			if markerErr != nil {
+				l.inspectionError(key, dir, markerErr)
+			}
+			return
+		}
+	}
+	l.layoutHEADs = append(l.layoutHEADs, key)
 }
 
-// validHEAD reports whether git's validate_headref accepts p: a symbolic link
-// whose target starts "refs/", or a regular file whose first 255 bytes start
-// "ref:", whitespace and "refs/", or with 40 hex digits (a SHA-1 object ID, or
-// the start of a SHA-256 one). Anything that cannot be read is not valid. The
-// file is opened non-blocking and without following a link, and must still be
-// a regular file once open, so a swapped-in FIFO cannot stall the walk.
-func validHEAD(p string) bool {
-	fi, err := os.Lstat(p)
+// lookupID identifies a resolved entry without following its final symlink.
+func lookupID(p string) (gitEntryID, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(unix.AT_FDCWD, p, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return gitEntryID{}, err
+	}
+	id := gitEntryID{Dev: uint64(st.Dev), Ino: uint64(st.Ino), Mode: statType(uint32(st.Mode))}
+	if id.Mode == fs.ModeSymlink {
+		target, err := gitReadlink(p)
+		if err != nil {
+			return gitEntryID{}, err
+		}
+		id.Target = target
+	}
+	return id, nil
+}
+
+// gitReadlink and openGitHEAD allow tests to inject lookup and read failures.
+var gitReadlink = os.Readlink
+var openGitHEAD = os.OpenFile
+
+// readGitHEAD checks the observed entry against Git's HEAD syntax. A missing
+// file returns ENOENT, invalid content returns false, and an inspection
+// failure retains its error. Named pipes and other special files are skipped.
+func readGitHEAD(p string, id gitEntryID) (bool, error) {
+	if id.Mode == fs.ModeSymlink {
+		return strings.HasPrefix(id.Target, "refs/"), nil
+	}
+	if !id.Mode.IsRegular() {
+		return false, nil
+	}
+	f, err := openGitHEAD(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
-		return false
-	}
-	if fi.Mode()&fs.ModeSymlink != 0 {
-		target, err := os.Readlink(p)
-		return err == nil && strings.HasPrefix(target, "refs/")
-	}
-	if !fi.Mode().IsRegular() {
-		return false
-	}
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return false
+		return false, err
 	}
 	defer func() { _ = f.Close() }()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return false
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return false, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return false, nil
+	}
+	if uint64(st.Dev) != id.Dev || uint64(st.Ino) != id.Ino {
+		return false, errSandboxWorkspaceChanged
 	}
 	b, err := io.ReadAll(io.LimitReader(f, 255))
 	if err != nil {
-		return false
+		return false, err
 	}
 	if i := bytes.IndexByte(b, 0); i >= 0 { // git compares C strings
 		b = b[:i]
@@ -414,18 +769,18 @@ func validHEAD(p string) bool {
 	if rest, ok := bytes.CutPrefix(b, []byte("ref:")); ok {
 		// git's isspace (sane_ctype): space, \t, \n and \r, not \v or \f.
 		if bytes.HasPrefix(bytes.TrimLeft(rest, " \t\n\r"), []byte("refs/")) {
-			return true
+			return true, nil
 		}
 	}
 	if len(b) < 40 {
-		return false
+		return false, nil
 	}
 	for _, c := range b[:40] {
 		if strings.IndexByte("0123456789abcdefABCDEF", c) < 0 {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // finish sorts and de-duplicates every list, files each of layoutHEADs'
@@ -441,8 +796,59 @@ func (l *sandboxGitLayout) finish() {
 			*s = slices.Compact(*s)
 		}
 	}
-	sortCompact(&l.dotGitDirs, &l.gitDirs, &l.containers, &l.intermediates, &l.gitFiles, &l.metadata,
-		&l.moduleReadOnly, &l.dotGitLinks, &l.layoutHEADs)
+	lists := []*[]string{&l.dotGitDirs, &l.gitDirs, &l.containers, &l.intermediates, &l.gitFiles, &l.metadata,
+		&l.moduleReadOnly, &l.dotGitLinks, &l.layoutHEADs, &l.containerLinks}
+	if len(l.namedDirs) != 0 {
+		for _, m := range []*map[string]gitEntryID{&l.ids, &l.headIDs} {
+			keys := make(map[string]gitEntryID, len(*m))
+			for p, id := range *m {
+				keys[l.canonical(p)] = id
+			}
+			*m = keys
+		}
+	}
+	if l.collect {
+		if l.ids == nil {
+			l.ids = make(map[string]gitEntryID)
+		}
+		recordDir := func(dir string) {
+			key := l.canonical(dir)
+			if _, ok := l.ids[key]; ok {
+				return
+			}
+			p := dir
+			if dir == filepath.Clean(l.root) {
+				p = l.root
+			}
+			id, err := lookupID(p)
+			if err != nil {
+				l.inspectionError(dir, filepath.Dir(dir), err)
+				return
+			}
+			if id.Mode != fs.ModeDir {
+				l.inspectionError(dir, filepath.Dir(dir), errSandboxWorkspaceChanged)
+				return
+			}
+			l.ids[key] = id
+		}
+		for _, h := range l.layoutHEADs {
+			recordDir(filepath.Dir(h))
+		}
+		for _, p := range l.gitDirs {
+			recordDir(p)
+		}
+	}
+	if len(l.namedDirs) != 0 {
+		for _, list := range lists {
+			for i, p := range *list {
+				(*list)[i] = l.canonical(p)
+			}
+		}
+	}
+	sortCompact(lists...)
+	if !l.collect {
+		return
+	}
 	var tree pathTree
 	dirs := make([]int, len(l.layoutHEADs))
 	for i, h := range l.layoutHEADs {
@@ -457,32 +863,16 @@ func (l *sandboxGitLayout) finish() {
 		}
 	}
 	sortCompact(&l.repoLayouts, &l.innerLayouts)
-	l.ids = make(map[string]gitEntryID)
-	for _, list := range [][]string{l.dotGitDirs, l.gitFiles, l.dotGitLinks, l.gitDirs, l.containers, l.metadata,
-		l.repoLayouts, l.innerLayouts} {
-		for _, p := range list {
-			if _, done := l.ids[p]; done {
-				continue // in an earlier list too: a .git, git dir, metadata entry or container that is also a layout
-			}
-			fi, err := os.Lstat(p)
-			if err != nil {
-				if l.afterWalk && !errors.Is(err, fs.ErrNotExist) {
-					l.unlist(filepath.Dir(p), err)
-				}
-				continue
-			}
-			st, ok := fi.Sys().(*syscall.Stat_t)
-			if !ok {
-				continue
-			}
-			id := gitEntryID{Dev: uint64(st.Dev), Ino: uint64(st.Ino), Mode: fi.Mode().Type()}
-			if id.Mode&fs.ModeSymlink != 0 {
-				id.Target, _ = os.Readlink(p) // unreadable: no target, which matches no real one
-			}
-			l.ids[p] = id
+	if len(l.unknown) > 0 && len(l.namedDirs) > 0 {
+		keys := make(map[string]string, len(l.unknown))
+		for p, why := range l.unknown {
+			keys[l.canonical(p)] = why
 		}
+		l.unknown = keys
 	}
+	l.lookupDirs, l.namedDirs, l.listedDirs, l.unlistedSet, l.unreadableDirs = nil, nil, nil, nil, nil
 	sortCompact(&l.unlisted)
+	l.lookupPolicies = nil
 }
 
 // pathTree numbers clean absolute paths and all their ancestors once, so a
@@ -565,18 +955,42 @@ func (t *pathTree) up(i int, marked []bool) int {
 // config, ...; not a file inside hooks or info) is the exception on bwrap: it
 // fails the spawn (bwrapRejectSymlinkedGitMetadata), because its mount would
 // cover the target and leave the link replaceable.
-func scanGitDir(d string, out *sandboxGitLayout) error {
+func scanGitDir(ctx context.Context, d string, out *sandboxGitLayout) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for _, name := range []string{"hooks", "info", "config", "config.worktree", "commondir", "gitdir"} {
+		if out.collect {
+			if p, _, ok := out.observe(d, name); ok {
+				out.metadata = append(out.metadata, p)
+			}
+			continue
+		}
 		p := filepath.Join(d, name)
 		if _, err := os.Lstat(p); err == nil {
 			out.metadata = append(out.metadata, p)
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			if err := out.unreadable(p, d, err); err != nil {
-				return err
-			}
+			return out.scanErr(p, err)
 		}
 	}
-	worktrees := filepath.Join(d, "worktrees")
+	container := func(name string) string {
+		if !out.collect {
+			return filepath.Join(d, name)
+		}
+		p, id, ok := out.observe(d, name)
+		if ok {
+			switch id.Mode {
+			case fs.ModeSymlink:
+				out.containerLinks = append(out.containerLinks, p)
+			case fs.ModeDir:
+				return p
+			default:
+				delete(out.ids, p)
+			}
+		}
+		return ""
+	}
+	worktrees := container("worktrees")
 	entries, ok, err := out.listDir(worktrees)
 	if err != nil {
 		return err
@@ -588,19 +1002,25 @@ func scanGitDir(d string, out *sandboxGitLayout) error {
 				continue
 			}
 			c := filepath.Join(worktrees, e.Name())
+			if out.collect && out.usesLookup(worktrees) {
+				key := out.listedDirectory(worktrees, c)
+				if n := out.namedDirs[key]; n != "" {
+					c = gitLookupPath(worktrees, n)
+				}
+			}
 			out.gitDirs = append(out.gitDirs, c)
-			if err := scanGitDir(c, out); err != nil {
+			if err := scanGitDir(ctx, c, out); err != nil {
 				return err
 			}
 		}
 	}
-	modules := filepath.Join(d, "modules")
+	modules := container("modules")
 	entries, ok, err = out.listDir(modules)
 	if err != nil || !ok {
 		return err
 	}
 	out.containers = append(out.containers, modules)
-	return out.descendModules(modules, entries)
+	return out.descendModules(ctx, modules, entries)
 }
 
 // descendModules classifies each child directory c of dir, a modules
@@ -618,12 +1038,40 @@ func scanGitDir(d string, out *sandboxGitLayout) error {
 // submodule git dir itself named hooks or info (.git/modules/hooks,
 // libs/Hooks) whose HEAD a command deleted is caught by clause 2 and made
 // read-only whole, so its own hooks cannot be planted at the next spawn.
-func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) error {
+func (l *sandboxGitLayout) descendModules(ctx context.Context, dir string, entries []fs.DirEntry) error {
+	fold := l.collect && l.usesLookup(dir)
+	if fold {
+		for _, name := range []string{"hooks", "info"} {
+			lookup := gitLookupPath(dir, name)
+			id, err := lookupID(lookup)
+			if err != nil {
+				l.inspectionError(filepath.Join(dir, name), dir, err)
+			} else if id.Mode == fs.ModeDir {
+				l.nameDirectory(dir, name, lookup, id)
+			}
+		}
+	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !e.IsDir() {
 			continue
 		}
 		c := filepath.Join(dir, e.Name())
+		name := e.Name()
+		readOnly := name == "hooks" || name == "info"
+		if fold {
+			key := l.listedDirectory(dir, c)
+			n := l.namedDirs[key]
+			readOnly = n == "hooks" || n == "info"
+			if n != "" {
+				c = gitLookupPath(dir, n)
+			}
+		} else if !l.collect {
+			readOnly = len(name) == len("hooks") && strings.EqualFold(name, "hooks") ||
+				len(name) == len("info") && strings.EqualFold(name, "info")
+		}
 		kids, ok, err := l.listDir(c)
 		if err != nil {
 			return err
@@ -631,22 +1079,28 @@ func (l *sandboxGitLayout) descendModules(dir string, entries []fs.DirEntry) err
 		if !ok {
 			continue
 		}
-		name := e.Name()
+		hasHEAD := false
+		if l.collect && l.usesLookup(c) {
+			id, err := lookupID(gitLookupPath(c, "HEAD"))
+			hasHEAD = err == nil && id.Mode != fs.ModeDir
+			if err != nil {
+				l.inspectionError(c, c, err)
+			}
+		} else {
+			hasHEAD = slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return k.Name() == "HEAD" && !k.IsDir() })
+		}
 		switch {
-		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return k.Name() == "HEAD" && !k.IsDir() }):
+		case hasHEAD:
 			l.gitDirs = append(l.gitDirs, c)
-			err = scanGitDir(c, l)
-		// Equal byte length keeps the fold ASCII: the non-ASCII runes that fold
-		// to an ASCII letter (Kelvin K, long s) are multi-byte.
-		case len(name) == len("hooks") && strings.EqualFold(name, "hooks"),
-			len(name) == len("info") && strings.EqualFold(name, "info"):
+			err = scanGitDir(ctx, c, l)
+		case readOnly:
 			l.moduleReadOnly = append(l.moduleReadOnly, c)
 		case slices.ContainsFunc(kids, func(k fs.DirEntry) bool { return !k.IsDir() && !hostLitter(k.Name()) }):
 			l.gitDirs = append(l.gitDirs, c)
-			err = scanGitDir(c, l)
+			err = scanGitDir(ctx, c, l)
 		default:
 			l.intermediates = append(l.intermediates, c)
-			err = l.descendModules(c, kids)
+			err = l.descendModules(ctx, c, kids)
 		}
 		if err != nil {
 			return err
@@ -671,6 +1125,9 @@ func hostLitter(name string) bool {
 // when p is absent or not a directory. In the after-walk, a directory it
 // cannot read is still a directory: ok, with no entries.
 func (l *sandboxGitLayout) listDir(p string) (entries []fs.DirEntry, ok bool, err error) {
+	if p == "" {
+		return nil, false, nil
+	}
 	info, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
@@ -698,6 +1155,10 @@ func (l *sandboxGitLayout) listDir(p string) (entries []fs.DirEntry, ok bool, er
 // records dir, the directory it could not list or search, and carries on.
 func (l *sandboxGitLayout) unreadable(p, dir string, err error) error {
 	if !l.afterWalk {
+		if l.collect {
+			l.inspectionError(p, dir, err)
+			return nil
+		}
 		return l.scanErr(p, err)
 	}
 	l.unlist(dir, err)
@@ -711,4 +1172,45 @@ func (l *sandboxGitLayout) scanErr(p string, err error) error {
 		rel = filepath.ToSlash(r)
 	}
 	return fmt.Errorf("tools: sandbox inspect git metadata %q: %w", rel, err)
+}
+
+// statType is st_mode's file type in fs.FileMode type bits, as os.Lstat
+// spells it (gitEntryID.Mode).
+func statType(m uint32) fs.FileMode {
+	switch m & unix.S_IFMT {
+	case unix.S_IFDIR:
+		return fs.ModeDir
+	case unix.S_IFLNK:
+		return fs.ModeSymlink
+	case unix.S_IFIFO:
+		return fs.ModeNamedPipe
+	case unix.S_IFSOCK:
+		return fs.ModeSocket
+	case unix.S_IFCHR:
+		return fs.ModeDevice | fs.ModeCharDevice
+	case unix.S_IFBLK:
+		return fs.ModeDevice
+	}
+	return 0 // a regular file
+}
+
+// searchableMode tests the applicable search bit before temporary owner grants.
+func searchableMode(access *ownerAccess, st *unix.Stat_t) (bool, error) {
+	mode := access.originalMode(st)
+	switch uid := os.Geteuid(); {
+	case uid == 0:
+		return true, nil
+	case uint32(uid) == st.Uid:
+		return mode&0o100 != 0, nil
+	case uint32(os.Getegid()) == st.Gid:
+		return mode&0o010 != 0, nil
+	}
+	groups, err := os.Getgroups()
+	if err != nil {
+		return false, err
+	}
+	if slices.Contains(groups, int(st.Gid)) {
+		return mode&0o010 != 0, nil
+	}
+	return mode&0o001 != 0, nil
 }

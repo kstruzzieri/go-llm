@@ -3,7 +3,7 @@
 package tools
 
 // Setting aside the git machinery a sandboxed command created (#802). Each
-// item newGitMachinery found is renamed in place, from a parent opened one
+// item compareGitMachinery found is renamed in place, from a parent opened one
 // component at a time without following a symbolic link, after its identity
 // is rechecked, and never over an existing name. A directory whose mode
 // refuses the work (a command can chmod its own directories) is opened up
@@ -29,15 +29,19 @@ import (
 const heldNameTries = 100
 
 // heldGitBeforeRename is a test seam, nil in production. When set, it runs
-// just before each rename, once the entry's parent is pinned and its identity
-// rechecked, with the entry's root-relative path.
+// just before each rename attempt, once the entry's parent is pinned and its
+// identity rechecked for that attempt, with the entry's root-relative path.
 var heldGitBeforeRename func(rel string)
+
+// holdComponent passes the lookup spelling directly to the kernel. Tests may
+// emulate a directory with casefold semantics at the descriptor boundary.
+var holdComponent = func(_ int, name string) string { return name }
 
 // errHeldChanged reports an entry that is no longer the one the after-walk
 // recorded.
 var errHeldChanged = errors.New("a different entry is there now")
 
-// holdGitMachinery sets aside items, newGitMachinery's diff of the walks
+// reportGitHolds sets aside items, compareGitMachinery's diff of the walks
 // ending in after (the after-walk of after.root), naming each held entry
 // <name>.golem-held-<runID>; runID must be one path component. Every item's
 // Path and InnerHEADs, and every unlisted directory, is absolute, as the walks
@@ -55,19 +59,19 @@ var errHeldChanged = errors.New("a different entry is there now")
 // more after ownerAccess opens that directory up, and every mode it changed
 // is put back once the item is done, even on a panic. Two items with one
 // directory's identity are one directory under two spellings, held once
-// (mergeHeldDirs); an item gone from its path after this run set aside the
-// same identity at the same name in another spelling is done.
+// (mergeHeldDirs).
 //
-// It returns one note per rename, in order, so undoing them runs backwards;
+// It reports one note per rename, in order, so undoing them runs backwards;
 // one warning per failure, which skips the rest of that item but not the
 // other items; one warning per mode it could not put back; then one warning
 // per directory the after-walk could not check, and the after-walk's own
 // warnings. Paths in notes are relative to the root, quoted when a name could
 // break or forge a line (noteName).
-func holdGitMachinery(after sandboxGitLayout, items []heldItem, runID string) (notes []string) {
-	acc := newOwnerAccess(after.root)
+func reportGitHolds(after sandboxGitLayout, items []heldItem, runID string, note func(string, bool)) {
+	acc := newOwnerAccess(after.pin)
 	defer acc.close()
-	h := &holder{acc: acc, rootPath: after.root, runID: runID, renamed: make(map[gitEntryID][]string)}
+	acc.screen = after.screen
+	h := &holder{acc: acc, rootPath: after.root, runID: runID, screen: after.screen, note: note}
 	for _, it := range mergeHeldDirs(items) {
 		r, in := h.rel(it.Path)
 		var err error
@@ -89,20 +93,26 @@ func holdGitMachinery(after sandboxGitLayout, items []heldItem, runID string) (n
 		if why == "" {
 			why = "it could not be read"
 		}
-		h.notes = append(h.notes, "WARNING: could not check "+noteName(r)+" for new git metadata ("+why+
-			"); do not run git in it or below it until you have checked it")
+		name, ok := screenedName(h.screen, r)
+		if !ok {
+			h.note("WARNING: could not check for new git metadata at "+withheldPath, false)
+			continue
+		}
+		h.note("WARNING: could not check "+name+" for new git metadata ("+why+
+			"); do not run git in it or below it until you have checked it", false)
 	}
-	return append(h.notes, after.warnings...)
+	for _, w := range after.warnings {
+		note(w, false)
+	}
 }
 
-// holder is one holdGitMachinery call: its ownerAccess, the notes so far, and
-// the root-relative paths it renamed whole, by identity.
+// holder carries the pinned root, run ID and screened note sink for one check.
 type holder struct {
 	acc      *ownerAccess
 	rootPath string
 	runID    string
-	notes    []string
-	renamed  map[gitEntryID][]string
+	note     func(string, bool)
+	screen   *outputScreen // the command's credential screen, for every path a note shows
 }
 
 // rel spells p relative to the root; in is false unless p is absolute and
@@ -124,14 +134,23 @@ func (h *holder) warn(r string, err error) {
 		errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
 		moved = " (it was moved or replaced during the run)"
 	}
-	h.notes = append(h.notes, "WARNING: could not set aside new git metadata at "+noteName(r)+moved+
-		" ("+err.Error()+"); do not run git in that directory until you have checked it")
+	name, ok := screenedName(h.screen, r)
+	if !ok {
+		h.note("WARNING: could not set aside new git metadata at "+withheldPath, false)
+		return
+	}
+	h.note("WARNING: could not set aside new git metadata at "+name+moved+
+		" ("+err.Error()+"); do not run git in that directory until you have checked it", false)
 }
 
 // holdRestoring holds it, found at r, and then puts back every mode the hold
 // opened up for it, even on a panic, noting any it could not.
 func (h *holder) holdRestoring(it heldItem, r string) error {
-	defer func() { h.notes = append(h.notes, h.acc.restore()...) }()
+	defer func() {
+		for _, w := range h.acc.restore() {
+			h.note(w, false)
+		}
+	}()
 	return h.hold(it, r)
 }
 
@@ -160,11 +179,6 @@ func (h *holder) hold(it heldItem, r string) error {
 			return fmt.Errorf("open the folder holding it: %w", err)
 		}
 		if err := same(); err != nil {
-			if errors.Is(err, unix.ENOENT) && slices.ContainsFunc(h.renamed[it.ID], func(p string) bool {
-				return strings.EqualFold(p, r)
-			}) {
-				return nil // this name, spelled another way, is already set aside
-			}
 			return err
 		}
 	}
@@ -186,31 +200,31 @@ func (h *holder) hold(it heldItem, r string) error {
 			return errHeldChanged
 		}
 	}
-	for _, hd := range it.InnerHEADs {
+	for _, observed := range it.InnerHEADs {
+		hd := observed.Path
 		hr, err := filepath.Rel(it.Path, hd)
 		if err != nil || hr == ".." || strings.HasPrefix(hr, "../") {
 			hp, _ := h.rel(hd)
 			h.warn(hp, errors.New("outside the item"))
 			continue
 		}
-		if err := h.holdHEAD(dir, r, hr); err != nil {
+		if observed.ID == (gitEntryID{}) {
+			h.warn(path.Join(r, hr), errors.New("HEAD identity unavailable"))
+			continue
+		}
+		if err := h.holdHEAD(dir, r, hr, observed); err != nil {
 			h.warn(path.Join(r, hr), err)
 		}
 	}
 	if it.Kind == heldRepoLayout {
 		return nil
 	}
-	if err := h.rename(parent, dirRel, name, same); err != nil {
-		return err
-	}
-	h.renamed[it.ID] = append(h.renamed[it.ID], r)
-	return nil
+	return h.rename(parent, dirRel, name, same, func(n string) error { return recheck(parent, n, it.ID) })
 }
 
-// holdHEAD sets aside the HEAD at hr under the item open at dir, found at r.
-// The after-walk records no HEAD's identity, so the check is its type: a
-// regular file or a symbolic link, the two git reads as HEAD.
-func (h *holder) holdHEAD(dir int, r, hr string) error {
+// holdHEAD renames the observed HEAD through its pinned parent. Every retry
+// checks the recorded identity, including for HEADs beneath a respelled directory.
+func (h *holder) holdHEAD(dir int, r, hr string, observed heldHEAD) error {
 	atRel := path.Join(r, path.Dir(hr))
 	at, err := h.acc.open(dir, r, path.Dir(hr))
 	if err != nil {
@@ -218,40 +232,66 @@ func (h *holder) holdHEAD(dir int, r, hr string) error {
 	}
 	defer func() { _ = unix.Close(at) }()
 	name := path.Base(hr)
-	return h.rename(at, atRel, name, func() error {
-		return h.acc.retry(at, atRel, 0o500, func() error {
-			var st unix.Stat_t
-			if err := unix.Fstatat(at, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-				return err
-			}
-			if t := st.Mode & unix.S_IFMT; t != unix.S_IFREG && t != unix.S_IFLNK {
-				return errHeldChanged
-			}
-			return nil
-		})
-	})
+	is := func(n string) error { return recheck(at, n, observed.ID) }
+	return h.renameNoting(at, atRel, name, observed.Preexisting, func() error {
+		return h.acc.retry(at, atRel, 0o500, func() error { return is(name) })
+	}, is)
 }
 
 // rename sets aside name in the directory open at dir, found at dirRel, once
-// check accepts what is there, and notes the rename.
-func (h *holder) rename(dir int, dirRel, name string, check func() error) error {
+// check accepts what is there, and notes the rename. is checks that the entry
+// under a given name in dir is the one to hold, with no permission retry: it
+// runs before every rename attempt (after an opened-up parent, after a taken
+// name) and, on the held name, after the rename.
+func (h *holder) rename(dir int, dirRel, name string, check func() error, is func(name string) error) error {
+	return h.renameNoting(dir, dirRel, name, false, check, is)
+}
+
+// renameNoting is rename; pre makes its note the WARNING for a HEAD that was
+// there before the run.
+func (h *holder) renameNoting(dir int, dirRel, name string, pre bool, check func() error, is func(string) error) error {
 	if err := check(); err != nil {
 		return err
 	}
 	r := path.Join(dirRel, name)
-	if heldGitBeforeRename != nil {
-		heldGitBeforeRename(r)
-	}
 	var to string
 	err := h.acc.retry(dir, dirRel, 0o300, func() (err error) {
-		to, err = renameAside(dir, name, h.runID)
+		to, err = renameAside(dir, name, h.runID, func() error {
+			if err := is(name); err != nil {
+				return err
+			}
+			if heldGitBeforeRename != nil {
+				heldGitBeforeRename(r)
+			}
+			return nil
+		})
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	h.notes = append(h.notes, "held back new git metadata: "+noteName(r)+" → "+
-		noteName(path.Join(dirRel, to))+" (rename it back to restore)")
+	// Something swapped in between the last check and the rename was renamed
+	// in its place: the note says where it went, and the warning says so.
+	swapped := is(to)
+	from, fromOK := screenedName(h.screen, r)
+	held, heldOK := screenedName(h.screen, path.Join(dirRel, to))
+	switch {
+	case !fromOK || !heldOK:
+		what := "held back new git metadata"
+		if pre {
+			what = "moved a HEAD that was there before the run"
+		}
+		h.note("WARNING: "+what+" at "+withheldPath+" (its name now ends in .golem-held-"+h.runID+
+			"; rename it back to restore)", true)
+	case pre:
+		h.note("WARNING: moved a HEAD that was there before the run: "+from+" → "+held+
+			" (the command made its folder a repository; rename it back once you have checked the folder)", true)
+	default:
+		h.note("held back new git metadata: "+from+" → "+held+" (rename it back to restore)", true)
+	}
+	if swapped != nil {
+		return fmt.Errorf("%w; what was renamed is not what was checked", errHeldChanged)
+	}
 	return nil
 }
 
@@ -287,12 +327,13 @@ func mergeHeldDirs(items []heldItem) []heldItem {
 		}
 		heads := slices.Clone(keep.InnerHEADs)
 		for _, h := range other.InnerHEADs {
-			if r, err := filepath.Rel(other.Path, h); err == nil {
-				heads = append(heads, filepath.Join(keep.Path, r))
+			if r, err := filepath.Rel(other.Path, h.Path); err == nil {
+				h.Path = filepath.Join(keep.Path, r)
+				heads = append(heads, h)
 			}
 		}
-		slices.Sort(heads)
-		keep.InnerHEADs = slices.Compact(heads)
+		slices.SortStableFunc(heads, func(a, b heldHEAD) int { return strings.Compare(a.Path, b.Path) })
+		keep.InnerHEADs = slices.CompactFunc(heads, func(a, b heldHEAD) bool { return a.Path == b.Path })
 		merged[it.ID] = keep
 	}
 	// last is, for each directory with several spellings, the index of the
@@ -339,6 +380,7 @@ func mergeHeldDirs(items []heldItem) []heldItem {
 // its old inode number back. A failed lookup returns its error.
 func recheck(dir int, name string, id gitEntryID) error {
 	var st unix.Stat_t
+	name = holdComponent(dir, name)
 	if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return err
 	}
@@ -363,38 +405,22 @@ func sameStat(st *unix.Stat_t, id gitEntryID) bool {
 	return uint64(st.Dev) == id.Dev && uint64(st.Ino) == id.Ino && statType(st.Mode) == id.Mode
 }
 
-// statType is st_mode's file type in fs.FileMode type bits, as os.Lstat
-// spells it (gitEntryID.Mode).
-func statType(m uint32) fs.FileMode {
-	switch m & unix.S_IFMT {
-	case unix.S_IFDIR:
-		return fs.ModeDir
-	case unix.S_IFLNK:
-		return fs.ModeSymlink
-	case unix.S_IFIFO:
-		return fs.ModeNamedPipe
-	case unix.S_IFSOCK:
-		return fs.ModeSocket
-	case unix.S_IFCHR:
-		return fs.ModeDevice | fs.ModeCharDevice
-	case unix.S_IFBLK:
-		return fs.ModeDevice
-	}
-	return 0 // a regular file
-}
-
 // renameAside renames name in dir to name.golem-held-<runID>, or to the first
 // free one of its -2, -3, ... forms (heldNameTries names in all), and returns
 // the name used. Each try is promoteRename's renameat2(RENAME_NOREPLACE), so
 // nothing is ever replaced; only a taken name (EEXIST) moves on to the next.
-func renameAside(dir int, name, runID string) (string, error) {
+// check runs before every try, so each try renames only an entry it accepted.
+func renameAside(dir int, name, runID string, check func() error) (string, error) {
 	held := name + ".golem-held-" + runID
 	for n := 1; n <= heldNameTries; n++ {
 		to := held
 		if n > 1 {
 			to += "-" + strconv.Itoa(n)
 		}
-		err := promoteRename(dir, name, dir, to)
+		if err := check(); err != nil {
+			return "", err
+		}
+		err := promoteRename(dir, holdComponent(dir, name), dir, holdComponent(dir, to))
 		if err == nil {
 			return to, nil
 		}
@@ -403,6 +429,23 @@ func renameAside(dir int, name, runID string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w (tried %d names)", unix.EEXIST, heldNameTries)
+}
+
+// withheldPath stands in a note for a path the credential screen flags or
+// cannot screen (screenedName).
+const withheldPath = "a path withheld by the credential screen"
+
+// screenedName returns noteName(p) and true, or withheldPath and false when
+// either the original path or its displayed bytes trigger the credential screen.
+func screenedName(screen *outputScreen, p string) (string, bool) {
+	if screen == nil || !screen.allowsPath(p) {
+		return withheldPath, false
+	}
+	display := noteName(p)
+	if display != p && !screen.allowsPath(display) {
+		return withheldPath, false
+	}
+	return display, true
 }
 
 // noteName spells a path for a note: bare, or quoted (quoteArgForPreview)

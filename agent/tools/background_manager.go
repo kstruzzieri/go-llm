@@ -254,7 +254,12 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, backend resolvedEx
 	stdout := newTailRing(backgroundRingCap)
 	stderr := newTailRing(backgroundRingCap)
 	outStream, errStream := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
-	proc, err := backend.Start(spec, outStream, errStream)
+	var proc backgroundProcess
+	if cs, ok := backend.execBackend.(contextStarter); ok {
+		proc, err = cs.StartContext(ctx, spec, outStream, errStream)
+	} else {
+		proc, err = backend.Start(spec, outStream, errStream)
+	}
 	if err != nil {
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)

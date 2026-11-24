@@ -584,11 +584,13 @@ func (t *StopCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.To
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// Early return by contract: the kill is already issued; the manager
 			// finishes reaping on its own.
-			return agent.ToolResult{Content: renderStopResult(st)}, nil
+			content, truncated := renderStopResult(st)
+			return agent.ToolResult{Content: content, Truncated: truncated}, nil
 		}
 		return errResult(err.Error()), nil
 	}
-	return agent.ToolResult{Content: renderStopResult(st)}, nil
+	content, truncated := renderStopResult(st)
+	return agent.ToolResult{Content: content, Truncated: truncated}, nil
 }
 
 // renderStopPreview is the human approval preview for stop_command:
@@ -661,16 +663,18 @@ func renderTailResult(stream string, chunk tailChunk) string {
 	return b.String()
 }
 
-func renderStopResult(st JobStatus) string {
+// renderStopResult is stop_command's result text, and whether its notes
+// were cut to fit the small output budget.
+func renderStopResult(st JobStatus) (string, bool) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "handle: %s\n", st.Handle)
 	fmt.Fprintf(&b, "state: %s\n", st.State)
 	if st.ExitKnown {
 		fmt.Fprintf(&b, "exit_code: %d\n", st.ExitCode)
 	}
-	notes, _ := renderNotesWithin(st.Notes, bgSmallOutputCap-b.Len())
+	notes, truncated := renderNotesWithin(st.Notes, bgSmallOutputCap-b.Len())
 	b.WriteString(notes)
-	return b.String()
+	return b.String(), truncated
 }
 
 // renderNotesWithin is renderNotes in at most budget bytes: when the notes do

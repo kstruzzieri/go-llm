@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -52,6 +51,15 @@ func entryIDOf(t *testing.T, p string) gitEntryID {
 	return id
 }
 
+// collectForCheck makes the before-walk record what the post-run check uses
+// for the rest of the test, as it does on Linux, so the shared check code
+// runs on every platform (postRunCollect).
+func collectForCheck(t *testing.T) {
+	was := postRunCollect
+	postRunCollect = true
+	t.Cleanup(func() { postRunCollect = was })
+}
+
 // relAll spells each path relative to root.
 func relAll(t *testing.T, root string, ps []string) []string {
 	t.Helper()
@@ -68,34 +76,22 @@ func relAll(t *testing.T, root string, ps []string) []string {
 
 const validHEADBody = `printf 'ref: refs/heads/main\n'`
 
-// recreateWithReusedInode replaces the symlink at rel with one to target that
-// has the same inode number, as a command can by retrying: each attempt that
-// gets another inode is set aside so the next draws a fresh one. It skips the
-// test when the filesystem never reuses the inode (APFS does not).
-func recreateWithReusedInode(rel, target string) func(t *testing.T, root string) {
-	return func(t *testing.T, root string) {
-		t.Helper()
-		p := filepath.Join(root, rel)
-		spare := filepath.Join(root, "spare")
-		if err := os.Mkdir(spare, 0o755); err != nil {
-			t.Fatal(err)
+// TestGitEntryIdentityIncludesTarget compares two observations of a reused inode.
+func TestGitEntryIdentityIncludesTarget(t *testing.T) {
+	// containment: GITMETA-POSTRUN-DIFF
+	const p = "/ws/sub/.git"
+	layout := func(target string) sandboxGitLayout {
+		return sandboxGitLayout{dotGitLinks: []string{p}, ids: map[string]gitEntryID{
+			p: {Dev: 1, Ino: 3, Mode: fs.ModeSymlink, Target: target},
+		}}
+	}
+	for _, tc := range []struct {
+		target string
+		count  int
+	}{{"original", 0}, {"replacement", 1}} {
+		if got := newGitMachinery(layout("original"), layout(tc.target)); len(got) != tc.count {
+			t.Errorf("target %q: got %+v, want %d holds", tc.target, got, tc.count)
 		}
-		old := entryIDOf(t, p).Ino
-		if err := os.Remove(p); err != nil {
-			t.Fatal(err)
-		}
-		for i := range 256 {
-			if err := os.Symlink(target, p); err != nil {
-				t.Fatal(err)
-			}
-			if entryIDOf(t, p).Ino == old {
-				return
-			}
-			if err := os.Rename(p, filepath.Join(spare, strconv.Itoa(i))); err != nil {
-				t.Fatal(err)
-			}
-		}
-		t.Skip("the filesystem did not reuse the inode")
 	}
 }
 
@@ -118,10 +114,10 @@ func hardLinkNoFollow(rel, to string) func(t *testing.T, root string) {
 // before-walk, runs change, takes the after-walk, and diffs the two. Only the
 // topmost new git machinery is held, each item once, with the HEADs of the
 // new repository layouts at or under it; moved entries, ordinary files and a
-// HEAD git would reject are not held. The after-walk may open up no
-// directory here (ownerAccessEuid stands for another user), so the unlisted
-// row pins its best-effort path; TestHoldGitMachinery covers opening up.
+// HEAD git would reject are left alone.
 func TestNewGitMachinery(t *testing.T) {
+	// containment: GITMETA-POSTRUN-DIFF
+	collectForCheck(t)
 	ownerAccessEuid = func() int { return os.Geteuid() + 1 }
 	t.Cleanup(func() { ownerAccessEuid = os.Geteuid })
 	type held struct {
@@ -135,7 +131,6 @@ func TestNewGitMachinery(t *testing.T) {
 		changeFn            func(t *testing.T, root string) // runs after change
 		want                []held
 		unlisted            []string
-		nonRoot             bool // the row makes a directory unreadable; root ignores that
 	}{
 		{name: "unchanged"},
 		{name: "ordinary files and folders",
@@ -159,6 +154,8 @@ func TestNewGitMachinery(t *testing.T) {
 			want:   []held{{"nested/.git/config", heldGitMetadata, nil}}},
 		{name: "new commondir in a submodule git dir", change: `echo ../evil > .git/modules/m/commondir`,
 			want: []held{{".git/modules/m/commondir", heldGitMetadata, nil}}},
+		{name: "new worktrees symlink", setup: `rm -rf .git/worktrees`, change: `ln -s ../elsewhere .git/worktrees`,
+			want: []held{{".git/worktrees", heldGitContainer, nil}}},
 		{name: "new worktrees container", setup: `rm -rf .git/worktrees`,
 			change: `mkdir -p .git/worktrees/wt2 && ` + validHEADBody + ` > .git/worktrees/wt2/HEAD && ` +
 				`echo ../.. > .git/worktrees/wt2/commondir && echo /x > .git/worktrees/wt2/gitdir`,
@@ -220,10 +217,7 @@ func TestNewGitMachinery(t *testing.T) {
 				validHEADBody + ` > .git/modules/.git/modules/HEAD`,
 			want: []held{{".git/modules/.git/hooks", heldGitMetadata, nil},
 				{".git/modules/.git/modules", heldGitContainer, []string{".git/modules/.git/modules/HEAD"}}}},
-		// At spawn a/sub/hooks is only a layout, which nothing mounts. The
-		// command turns a into an intermediate and a/sub into a git dir, then
-		// replaces a/sub/hooks: now metadata at a baseline path under the
-		// unchanged .git. It was never mounted, so it is not a host-side change.
+		// A baseline layout reclassified as metadata is ineligible for the host-side exception.
 		{name: "baseline layout replaced as metadata",
 			setup: `mkdir -p .git/modules/a/objects .git/modules/a/refs .git/modules/a/sub/hooks/objects ` +
 				`.git/modules/a/sub/hooks/refs && ` + validHEADBody + ` > .git/modules/a/HEAD && ` +
@@ -238,18 +232,12 @@ func TestNewGitMachinery(t *testing.T) {
 		{name: "second name for an existing .git symlink", setup: link,
 			changeFn: hardLinkNoFollow("link/.git", "other/.git"),
 			want:     []held{{"other/.git", heldDotGitLink, nil}}},
-		{name: "new .GIT directory", change: `mkdir -p src/.GIT/hooks`,
-			want: []held{{"src/.GIT", heldDotGitDir, nil}}},
 		{name: "baseline .git symlink replaced by a .git directory", setup: link,
 			change: `rm link/.git && mkdir -p link/.git/hooks`,
 			want:   []held{{"link/.git", heldDotGitDir, nil}}},
 		{name: "baseline .git symlink replaced by a .git file", setup: link,
 			change: `rm link/.git && echo 'gitdir: ../evil' > link/.git`,
 			want:   []held{{"link/.git", heldDotGitFile, nil}}},
-		// The same path, type and (reused) inode, but another target.
-		{name: "baseline .git symlink recreated with another target", setup: link,
-			changeFn: recreateWithReusedInode("link/.git", "../evil"),
-			want:     []held{{"link/.git", heldDotGitLink, nil}}},
 		// A baseline identity in another kind's slot is not a move.
 		{name: "baseline .git symlink renamed into an absent commondir", setup: link,
 			change: `mv link/.git nested/.git/commondir`,
@@ -274,14 +262,8 @@ func TestNewGitMachinery(t *testing.T) {
 			change: `mv nested t && mv other nested && mv t other && echo '[core]' > nested/.git/config.new && ` +
 				`mv nested/.git/config.new nested/.git/config`,
 			want: []held{{"nested/.git/config", heldGitMetadata, nil}}},
-		{name: "unlisted new directory containing .git", nonRoot: true,
-			change: `mkdir -p hidden/.git/objects hidden/.git/refs && ` + validHEADBody + ` > hidden/.git/HEAD && chmod 300 hidden`,
-			want:   []held{{"hidden/.git", heldDotGitDir, []string{"hidden/.git/HEAD"}}}, unlisted: []string{"hidden"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.nonRoot && os.Geteuid() == 0 {
-				t.Skip("root ignores directory permissions")
-			}
 			root := canonGitTempDir(t)
 			restoreModes(t, root)
 			writeGitFixture(t, root)
@@ -301,7 +283,9 @@ func TestNewGitMachinery(t *testing.T) {
 				r := relAll(t, root, []string{h.Path})[0]
 				var heads []string
 				if len(h.InnerHEADs) > 0 {
-					heads = relAll(t, root, h.InnerHEADs)
+					for _, hd := range h.InnerHEADs {
+						heads = append(heads, relAll(t, root, []string{hd.Path})[0])
+					}
 				}
 				gotHeld = append(gotHeld, held{r, h.Kind, heads})
 				if want := entryIDOf(t, h.Path); h.ID != want {
@@ -333,7 +317,7 @@ func TestNewGitMachineryValidHEAD(t *testing.T) {
 		{"symbolic ref after a vertical tab", writeBody("ref:\vrefs/heads/main\n"), false}, // not git's isspace
 		{"symbolic ref with trailing junk", writeBody("ref: refs/heads/main junk\x01\n"), true},
 		{"oversized, valid start", writeBody("ref: refs/heads/main\n" + strings.Repeat("x", 1<<20)), true},
-		{"valid ref after 255 bytes", writeBody(strings.Repeat("x", 255) + "ref: refs/heads/main\n"), false},
+		{"valid ref after 255 bytes", writeBody("ref:" + strings.Repeat(" ", 251) + "refs/heads/main\n"), false},
 		{"NUL before ref", writeBody("\x00ref: refs/heads/main\n"), false},
 		{"SHA-1 object ID", writeBody(hex40 + "\n"), true},
 		{"SHA-256 object ID", writeBody(hex40 + hex40[:24] + "\n"), true},
@@ -381,7 +365,7 @@ func TestNewGitMachinerySynthetic(t *testing.T) {
 				innerLayouts: []string{"/ws/.git/hooks"}, layoutHEADs: []string{"/ws/.git/hooks/HEAD"},
 				ids: map[string]gitEntryID{"/ws/.git": dir(1), "/ws/.git/hooks": dir(7)}},
 			want: []heldItem{{Path: "/ws/.git/hooks", ID: dir(7), Kind: heldGitMetadata,
-				InnerHEADs: []string{"/ws/.git/hooks/HEAD"}}}},
+				InnerHEADs: []heldHEAD{{Path: "/ws/.git/hooks/HEAD"}}}}},
 		// An identity recorded for a path in no kind list (a list added to ids
 		// but not to entryKinds) gets no host-side exemption: the layout
 		// replaced at its baseline path keeps its HEAD in the held hooks.
@@ -392,7 +376,7 @@ func TestNewGitMachinerySynthetic(t *testing.T) {
 				layoutHEADs: []string{"/ws/.git/hooks/x/HEAD"},
 				ids:         map[string]gitEntryID{"/ws/.git": dir(1), "/ws/.git/hooks": dir(60), "/ws/.git/hooks/x": dir(51)}},
 			want: []heldItem{{Path: "/ws/.git/hooks", ID: dir(60), Kind: heldGitMetadata,
-				InnerHEADs: []string{"/ws/.git/hooks/x/HEAD"}}}},
+				InnerHEADs: []heldHEAD{{Path: "/ws/.git/hooks/x/HEAD"}}}}},
 		// Nor is such an entry a move: two unknown kinds do not match.
 		{name: "entry with no kind at another path",
 			before: sandboxGitLayout{root: "/ws", dotGitDirs: []string{"/ws/.git"},
@@ -401,7 +385,7 @@ func TestNewGitMachinerySynthetic(t *testing.T) {
 				layoutHEADs: []string{"/ws/.git/hooks/x/HEAD"},
 				ids:         map[string]gitEntryID{"/ws/.git": dir(1), "/ws/.git/hooks": dir(60), "/ws/.git/hooks/x": dir(50)}},
 			want: []heldItem{{Path: "/ws/.git/hooks", ID: dir(60), Kind: heldGitMetadata,
-				InnerHEADs: []string{"/ws/.git/hooks/x/HEAD"}}}},
+				InnerHEADs: []heldHEAD{{Path: "/ws/.git/hooks/x/HEAD"}}}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := newGitMachinery(c.before, c.after); !reflect.DeepEqual(got, c.want) {
@@ -411,21 +395,19 @@ func TestNewGitMachinerySynthetic(t *testing.T) {
 	}
 }
 
-// TestEntryKindPrecedence pins, for every pair of kinds, what one new path
-// listed under both counts as (.git entry > metadata > container > git dir >
-// layout) and how it is held: whole, hiding the new .git file below it, or,
-// as a git dir, not at all, which leaves that file held on its own. A layout
-// alone is held by its HEAD only (TestNewGitMachinery); it never wins a pair.
-// A pair that cannot share a path says why, and the table names every pair.
-// Metadata and containers share a path with a git dir under a .git that is
-// also an intermediate (a .git in a modules container holding only
-// directories): its hooks or modules child with a HEAD is both.
+// TestEntryKindPrecedence checks all overlapping roles for a single entry.
+// Every independently discoverable nested gitfile is held before its parent.
 func TestEntryKindPrecedence(t *testing.T) {
+	// containment: GITMETA-POSTRUN-DIFF
 	const p, child = "/ws/.git/p", "/ws/.git/p/x/.git"
 	dir := gitEntryID{Dev: 1, Ino: 10, Mode: fs.ModeDir}
 	file := gitEntryID{Dev: 1, Ino: 11}
 	whole := func(k heldKind, heads ...string) []heldItem {
-		return []heldItem{{Path: p, ID: dir, Kind: k, InnerHEADs: heads}}
+		var observed []heldHEAD
+		for _, p := range heads {
+			observed = append(observed, heldHEAD{Path: p})
+		}
+		return []heldItem{{Path: child, ID: file, Kind: heldDotGitFile}, {Path: p, ID: dir, Kind: k, InnerHEADs: observed}}
 	}
 	const (
 		oneType = "a path has one type: a directory, a regular file or a symlink"
@@ -517,6 +499,7 @@ func writeBody(body string) func(string) error {
 // directories (bare, and HEAD with commondir) and one inside .git, without
 // adding them to any mounted list.
 func TestInspectSandboxWorkspaceAfterMatchesBefore(t *testing.T) {
+	collectForCheck(t)
 	root := canonGitTempDir(t)
 	writeGitFixture(t, root)
 	runIn(t, root, `mkdir -p link bare.git/objects bare.git/refs/heads wtadmin .git/evil/objects .git/evil/refs && `+
@@ -526,6 +509,7 @@ func TestInspectSandboxWorkspaceAfterMatchesBefore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	before = *before.baseline
 	for _, c := range []struct {
 		field     string
 		got, want []string
@@ -572,6 +556,8 @@ func TestInspectSandboxWorkspaceAfterMatchesBefore(t *testing.T) {
 		}
 	}
 	after.afterWalk = false
+	after.screen = nil
+	before.mounted = nil
 	if !reflect.DeepEqual(after, before) {
 		t.Errorf("after-walk differs on an unchanged tree:\n got %+v\nwant %+v", after, before)
 	}
@@ -694,7 +680,7 @@ func BenchmarkGitLayoutFinishDeep(b *testing.B) {
 		b.Run(fmt.Sprintf("depth=%d", d), func(b *testing.B) {
 			_, after := syntheticMachinery(filepath.Join(b.TempDir(), "absent")+strings.Repeat("/c", d), 10_000)
 			for b.Loop() {
-				l := sandboxGitLayout{root: after.root, dotGitDirs: slices.Clone(after.dotGitDirs),
+				l := sandboxGitLayout{root: after.root, collect: true, dotGitDirs: slices.Clone(after.dotGitDirs),
 					layoutHEADs: slices.Clone(after.layoutHEADs)}
 				l.finish()
 			}
@@ -710,12 +696,309 @@ func BenchmarkGitLayoutFinish(b *testing.B) {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			_, after := syntheticMachinery(filepath.Join(b.TempDir(), "absent"), 2*n)
 			for b.Loop() {
-				l := sandboxGitLayout{root: after.root, dotGitDirs: slices.Clone(after.dotGitDirs),
+				l := sandboxGitLayout{root: after.root, collect: true, dotGitDirs: slices.Clone(after.dotGitDirs),
 					layoutHEADs: slices.Clone(after.layoutHEADs)}
 				l.finish()
 				if len(l.repoLayouts) != n {
 					b.Fatalf("repoLayouts %d, want %d", len(l.repoLayouts), n)
 				}
+			}
+		})
+	}
+}
+
+// TestLayoutMarkersRequireDirectories distinguishes files, directories and symlinks.
+func TestLayoutMarkersRequireDirectories(t *testing.T) {
+	for _, c := range []struct {
+		name, setup     string
+		layout, warning bool
+	}{
+		{"executable files", "touch objects refs && chmod 755 objects refs", false, false},
+		{"linked object directory", "mkdir refs target && ln -s target objects", false, true},
+		{"linked refs directory", "mkdir objects target && ln -s target refs", false, true},
+		{"directories", "mkdir objects refs", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("GIT_OBJECT_DIRECTORY", "")
+			root := canonGitTempDir(t)
+			runIn(t, root, validHEADBody+" > HEAD && "+c.setup)
+			l := inspectSandboxWorkspaceAfter(root)
+			if (len(l.layoutHEADs) == 1) != c.layout || (len(l.unlisted) > 0) != c.warning {
+				t.Errorf("HEADs %v warnings %v", l.layoutHEADs, l.unlisted)
+			}
+		})
+	}
+}
+
+// TestGitInspectionFailures distinguishes disappearance, lookup failure and changed file type.
+func TestGitInspectionFailures(t *testing.T) {
+	root := canonGitTempDir(t)
+	p := filepath.Join(root, "HEAD")
+	runIn(t, root, "ln -s refs/main HEAD")
+	old := gitReadlink
+	t.Cleanup(func() { gitReadlink = old })
+	for _, err := range []error{unix.ENOENT, unix.EIO} {
+		gitReadlink = func(string) (string, error) { return "", err }
+		l := sandboxGitLayout{root: root, afterWalk: true}
+		l.noteLayout(root)
+		if len(l.headIDs) != 0 || (len(l.unlisted) > 0) != (err == unix.EIO) {
+			t.Errorf("%v: ids %v, warnings %v", err, l.headIDs, l.unlisted)
+		}
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBody("ref: refs/main")(p); err != nil {
+		t.Fatal(err)
+	}
+	open := openGitHEAD
+	t.Cleanup(func() { openGitHEAD = open })
+	openGitHEAD = func(string, int, fs.FileMode) (*os.File, error) { return os.Open(root) }
+	if valid, err := readGitHEAD(p, entryIDOf(t, p)); valid || err != nil {
+		t.Errorf("directory after open: %v, %v", valid, err)
+	}
+}
+
+// validHEAD reports whether the inspected path contains a Git-valid HEAD.
+func validHEAD(p string) bool {
+	id, err := lookupID(p)
+	if err != nil {
+		return false
+	}
+	valid, err := readGitHEAD(p, id)
+	return err == nil && valid
+}
+
+// inspectSandboxWorkspaceAfter inspects a test workspace using an empty credential screen.
+func inspectSandboxWorkspaceAfter(root string) sandboxGitLayout {
+	pin, err := os.OpenFile(root, workspaceSearchFlags|unix.O_NOFOLLOW, 0)
+	if err == nil {
+		defer func() { _ = pin.Close() }()
+	}
+	return inspectSandboxWorkspaceAfterPinned(root, pin, testScreen())
+}
+
+// BenchmarkGitMachineryHardLinks measures unchanged names sharing one identity.
+func BenchmarkGitMachineryHardLinks(b *testing.B) {
+	for _, n := range []int{1000, 10000} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			l := sandboxGitLayout{ids: make(map[string]gitEntryID, n)}
+			for i := range n {
+				p := fmt.Sprintf("/w/%d/.git", i)
+				l.gitFiles = append(l.gitFiles, p)
+				l.ids[p] = gitEntryID{Dev: 1, Ino: 2}
+			}
+			for b.Loop() {
+				if got := newGitMachinery(l, l); len(got) != 0 {
+					b.Fatal("held unchanged names")
+				}
+			}
+		})
+	}
+}
+
+// TestMovedHEADObservations keeps each HEAD's identity and provenance across moves.
+func TestMovedHEADObservations(t *testing.T) {
+	before := sandboxGitLayout{headIDs: make(map[string]gitEntryID)}
+	after := sandboxGitLayout{dotGitDirs: []string{"/w/.git"}, ids: map[string]gitEntryID{"/w/.git": {Ino: 10, Mode: fs.ModeDir}}, headIDs: make(map[string]gitEntryID)}
+	for i := range 200 {
+		p := fmt.Sprintf("/w/.git/%03d/HEAD", i)
+		id := gitEntryID{Dev: 1, Ino: uint64(100 + i)}
+		if i%2 == 0 {
+			before.headIDs[fmt.Sprintf("/w/old/%03d/HEAD", i)] = id
+		}
+		after.headIDs[p] = id
+		after.layoutHEADs = append(after.layoutHEADs, p)
+	}
+	items := newGitMachinery(before, after)
+	if len(items) != 1 || len(items[0].InnerHEADs) != len(after.headIDs) {
+		t.Fatalf("incomplete HEAD observations")
+	}
+	for i, h := range items[0].InnerHEADs {
+		if h.ID != after.headIDs[h.Path] || h.Preexisting != (i%2 == 0) {
+			t.Fatalf("incorrect HEAD observation %v", h)
+		}
+	}
+}
+
+// TestFinalLayoutLookupErrors distinguishes a vanished directory from an incomplete inspection.
+func TestFinalLayoutLookupErrors(t *testing.T) {
+	root := canonGitTempDir(t)
+	runIn(t, root, "touch file")
+	for _, c := range []struct {
+		path   string
+		warned bool
+	}{{"missing", false}, {"file/child", true}} {
+		p := filepath.Join(root, c.path)
+		l := sandboxGitLayout{root: root, afterWalk: true, collect: true, gitDirs: []string{p}}
+		l.finish()
+		if _, ok := l.ids[p]; ok || (len(l.unlisted) > 0) != c.warned {
+			t.Errorf("lookup %q: ids %v, warnings %v", c.path, l.ids, l.unlisted)
+		}
+	}
+}
+
+// TestLookupKeysIgnoreListedHardLinks checks both the complete key set and the recorded link identity.
+func TestLookupKeysIgnoreListedHardLinks(t *testing.T) {
+	// containment: GITMETA-POSTRUN-DIFF
+	root := canonGitTempDir(t)
+	runIn(t, root, "ln -s elsewhere .GIT")
+	original := gitLookupPath
+	gitLookupPath = func(dir, name string) string {
+		if name == ".git" {
+			return filepath.Join(dir, ".GIT")
+		}
+		return filepath.Join(dir, name)
+	}
+	t.Cleanup(func() { gitLookupPath = original })
+	for _, links := range []bool{false, true} {
+		if links {
+			hardLinkNoFollow(".GIT", "ordinary")(t, root)
+		}
+		l := sandboxGitLayout{root: root, collect: true, lookupDirs: map[string]bool{root: true}}
+		l.lookupGitNames(root)
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			l.visit(filepath.Join(root, e.Name()), e.Type(), false)
+		}
+		l.finish()
+		key := filepath.Join(root, ".git")
+		if len(l.dotGitLinks) != 1 || l.dotGitLinks[0] != key || len(l.ids) != 1 || l.ids[key] != entryIDOf(t, filepath.Join(root, ".GIT")) {
+			t.Fatalf("ordinary link present %v: names %v, identities %v", links, l.dotGitLinks, l.ids)
+		}
+	}
+}
+
+// TestLayoutWithExternalObjects recognizes host discovery when an object directory is configured.
+func TestLayoutWithExternalObjects(t *testing.T) {
+	root := canonGitTempDir(t)
+	runIn(t, root, "mkdir refs && "+validHEADBody+" > HEAD")
+	for _, tc := range []struct {
+		objects string
+		count   int
+	}{{"", 0}, {t.TempDir(), 1}} {
+		t.Setenv("GIT_OBJECT_DIRECTORY", tc.objects)
+		if got := inspectSandboxWorkspaceAfter(root); len(got.layoutHEADs) != tc.count {
+			t.Errorf("HEADs %v, want %d", got.layoutHEADs, tc.count)
+		}
+	}
+}
+
+// TestGitWorkspaceAdministrativeRoot checks new metadata in an administrative workspace.
+func TestGitWorkspaceAdministrativeRoot(t *testing.T) {
+	collectForCheck(t)
+	root := filepath.Join(canonGitTempDir(t), ".git")
+	if err := os.Mkdir(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	before, err := inspectSandboxWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, root, "mkdir hooks")
+	items := newGitMachinery(before, inspectSandboxWorkspaceAfter(root))
+	if len(items) != 1 || items[0].Path != filepath.Join(root, "hooks") {
+		t.Fatalf("new metadata: %v", items)
+	}
+}
+
+// TestNewGitMachineryUnlistableParent finds a named .git when the parent permits only search.
+func TestNewGitMachineryUnlistableParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary owner permissions")
+	}
+	collectForCheck(t)
+	original := ownerAccessEuid
+	ownerAccessEuid = func() int { return os.Geteuid() + 1 }
+	t.Cleanup(func() { ownerAccessEuid = original })
+	root := canonGitTempDir(t)
+	restoreModes(t, root)
+	before, err := inspectSandboxWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runIn(t, root, "mkdir -p hidden/.git/objects hidden/.git/refs && "+validHEADBody+" > hidden/.git/HEAD && chmod 300 hidden")
+	after := inspectSandboxWorkspaceAfter(root)
+	items := newGitMachinery(before, after)
+	dir := filepath.Join(root, "hidden/.git")
+	if !slices.Equal(after.unlisted, []string{filepath.Dir(dir)}) || len(items) != 1 || items[0].Path != dir || len(items[0].InnerHEADs) != 1 || items[0].InnerHEADs[0].Path != dir+"/HEAD" {
+		t.Fatalf("unlisted %v, items %v", after.unlisted, items)
+	}
+}
+
+// newGitMachinery returns the entries selected by the comparison.
+func newGitMachinery(before, after sandboxGitLayout) []heldItem {
+	return compareGitMachinery(before, after, nil)
+}
+
+// TestUnknownGitBaselineKeepsEntries checks failed observations and a known-new sibling.
+func TestUnknownGitBaselineKeepsEntries(t *testing.T) {
+	collectForCheck(t)
+	for _, tc := range []struct {
+		name, setup, path, change string
+	}{
+		{"link target", "ln -s elsewhere .git", ".git", ""},
+		{"enclosing entry", "ln -s elsewhere .git", ".git", "mv .git old-link && mkdir -p .git/hooks"},
+		{"layout HEAD", "mkdir -p repo/objects repo/refs && " + validHEADBody + " > repo/HEAD", "repo/HEAD", "mkdir -p repo/nested/.git"},
+		{"metadata target", "mkdir .git && ln -s elsewhere .git/info", ".git/info", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonGitTempDir(t)
+			runIn(t, root, tc.setup)
+			path := filepath.Join(root, tc.path)
+			link, open := gitReadlink, openGitHEAD
+			t.Cleanup(func() { gitReadlink, openGitHEAD = link, open })
+			gitReadlink = func(p string) (string, error) {
+				if p == path {
+					return "", unix.EIO
+				}
+				return link(p)
+			}
+			openGitHEAD = func(p string, flag int, mode fs.FileMode) (*os.File, error) {
+				if p == path {
+					return nil, unix.EIO
+				}
+				return open(p, flag, mode)
+			}
+			before, err := inspectSandboxWorkspace(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitReadlink, openGitHEAD = link, open
+			runIn(t, root, tc.change)
+			runIn(t, root, "mkdir other && touch other/.git")
+			got := newGitMachinery(before, inspectSandboxWorkspaceAfter(root))
+			if len(got) != 1 || got[0].Path != filepath.Join(root, "other/.git") {
+				t.Fatalf("holds %v, want only other/.git", got)
+			}
+		})
+	}
+}
+
+// TestListedGitDirectoryMatchesLookupIdentity gives the named lookup and listing
+// different spellings of the same directory while preserving its parent and inode.
+func TestListedGitDirectoryMatchesLookupIdentity(t *testing.T) {
+	for _, listed := range []string{".git", ".GIT"} {
+		t.Run(listed, func(t *testing.T) {
+			root := canonGitTempDir(t)
+			runIn(t, root, "mkdir -p .git/refs .git/objects && "+validHEADBody+" > .git/HEAD")
+			l := sandboxGitLayout{root: root, collect: true, lookupDirs: map[string]bool{root: true}}
+			l.observeDotGit(root)
+			lookup := filepath.Join(root, ".git")
+			path := filepath.Join(root, listed)
+			if path != lookup {
+				if err := os.Rename(lookup, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			l.walkAfter(path)
+			l.finish()
+			if len(l.ids) != 1 || l.ids[lookup] != entryIDOf(t, path) ||
+				!slices.Equal(l.layoutHEADs, []string{filepath.Join(lookup, "HEAD")}) {
+				t.Fatalf("directory identities %v, layout HEADs %v", l.ids, l.layoutHEADs)
 			}
 		})
 	}

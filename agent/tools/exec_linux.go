@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -201,11 +203,39 @@ type bwrapBackend struct {
 	runner      commandRunner
 	starter     backgroundStarter
 	collect     func(workspaceRoot string) (roots []string, aliases map[string]string, layoutDirs []string, links map[string]string, err error)
-	// heldMu serializes the post-run checks (holdNewGit). Two at once could
-	// each open up one locked directory, and the second would record the
-	// first's temporary mode as the one to put back.
-	heldMu sync.Mutex
+	// held serializes the post-run checks (holdNewGit) and the before-walks
+	// (lockHeld, unlockHeld). Two checks at once could each open up one locked
+	// directory, and the second would record the first's temporary mode as
+	// the one to put back. It is a one-slot channel, made on first use
+	// (heldOnce), so a start waiting behind a check can give up when its
+	// admission context ends.
+	held          chan struct{}
+	heldOnce      sync.Once
+	heldContended func() // test observer called when the lock is already occupied
 }
+
+// lockHeld takes the post-run check's lock, or returns ctx's error if ctx
+// ends first.
+func (b *bwrapBackend) lockHeld(ctx context.Context) error {
+	b.heldOnce.Do(func() { b.held = make(chan struct{}, 1) })
+	select {
+	case b.held <- struct{}{}:
+		return nil
+	default:
+		if b.heldContended != nil {
+			b.heldContended()
+		}
+	}
+	select {
+	case b.held <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// unlockHeld releases the lock lockHeld took.
+func (b *bwrapBackend) unlockHeld() { <-b.held }
 
 // newBwrapExecBackend constructs the real bwrap backend, failing closed when
 // the config requests ceilings bwrap cannot enforce or when the active
@@ -352,6 +382,12 @@ func bwrapRejectInheritableFDs() error {
 // also returns the workspace walk the mounts came from, the before-layout of
 // the post-run check (holdNewGit).
 func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error) {
+	return b.prepareContext(context.Background(), spec)
+}
+
+// prepareContext is prepare under ctx: a wait for another job's post-run
+// check, and the before-walk itself, end with ctx's error once ctx ends.
+func (b *bwrapBackend) prepareContext(ctx context.Context, spec execSpec) (execSpec, sandboxGitLayout, error) {
 	if len(spec.Argv) == 0 || spec.Path == "" || spec.Dir == "" {
 		return execSpec{}, sandboxGitLayout{}, errors.New("tools: bwrap requires a non-empty argv, executable path, and working directory")
 	}
@@ -406,16 +442,38 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error
 	// finds the git layout the argv mounts read-only or un-renamable (#721).
 	// It is the last workspace walk before spawn: metadata created after it
 	// is residual R1, and a change racing it is the documented same-UID race.
-	// It takes heldMu, so another job's post-run check cannot have a directory
+	// It takes held, so another job's post-run check cannot have a directory
 	// opened up or half held under it.
-	b.heldMu.Lock()
-	layout, err := inspectSandboxWorkspace(spec.WorkspaceRoot)
-	b.heldMu.Unlock()
+	// The root is pinned first, so the post-run check can tell whether the
+	// path still names the directory this walk saw (pinWorkspace).
+	pin, err := pinWorkspace(spec.WorkspaceRoot)
 	if err != nil {
+		return execSpec{}, sandboxGitLayout{}, fmt.Errorf("tools: pin sandbox workspace: %w", err)
+	}
+	pinnedRoot := procFd(int(pin.Fd())) + "/."
+	fail := func(err error) (execSpec, sandboxGitLayout, error) {
+		_ = pin.Close()
 		return execSpec{}, sandboxGitLayout{}, err
 	}
-	if err := bwrapRejectSymlinkedGitMetadata(spec.WorkspaceRoot, layout.metadata); err != nil {
-		return execSpec{}, sandboxGitLayout{}, err
+	if err := b.lockHeld(ctx); err != nil {
+		return fail(err)
+	}
+	layout, err := inspectSandboxWorkspaceNamed(ctx, pinnedRoot, filepath.Base(spec.WorkspaceRoot), filepath.WalkDir)
+	b.unlockHeld()
+	if err != nil {
+		return fail(err)
+	}
+	layout.pin, layout.root = pin, spec.WorkspaceRoot
+	if err := bwrapRejectSymlinkedGitMetadata(pinnedRoot, layout.metadata); err != nil {
+		return fail(err)
+	}
+	// bwrap's mount sources and destinations use the approved workspace path.
+	mountPaths := func(paths []string) []string {
+		for i, p := range paths {
+			rel, _ := filepath.Rel(pinnedRoot, p)
+			paths[i] = filepath.Join(spec.WorkspaceRoot, rel)
+		}
+		return paths
 	}
 	args, err := buildBwrapArgs(bwrapPolicy{
 		workspaceRoot:     spec.WorkspaceRoot,
@@ -429,12 +487,12 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error
 		payloadEnv:        sandboxChildEnv(spec.Env, "/tmp"),
 		allowNetwork:      b.cfg.AllowNetwork,
 		tmpfsSizeBytes:    b.capBytes,
-		gitWritable:       slices.Concat(layout.dotGitDirs, layout.gitDirs),
-		gitReadOnly: slices.Concat(layout.containers, layout.intermediates, layout.metadata,
-			layout.moduleReadOnly, layout.gitFiles),
+		gitWritable:       mountPaths(slices.Concat(layout.dotGitDirs, layout.gitDirs)),
+		gitReadOnly: mountPaths(slices.Concat(layout.containers, layout.intermediates, layout.metadata,
+			layout.moduleReadOnly, layout.gitFiles)),
 	})
 	if err != nil {
-		return execSpec{}, sandboxGitLayout{}, err
+		return fail(err)
 	}
 	wrapped := spec
 	wrapped.Env = []string{} // non-nil: the outer prlimit/bwrap chain inherits nothing
@@ -445,9 +503,50 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error
 		wrapped.Path = b.prlimitPath
 	}
 	if err := bwrapRejectInheritableFDs(); err != nil {
-		return execSpec{}, sandboxGitLayout{}, err
+		return fail(err)
+	}
+	if !sameWorkspaceRoot(layout) {
+		return fail(errors.New("tools: sandbox workspace moved or replaced before spawn"))
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
 	}
 	return wrapped, layout, nil
+}
+
+// pinWorkspace opens the approved workspace without following a final link.
+func pinWorkspace(root string) (*os.File, error) {
+	fd, err := unix.Open(root, workspaceSearchFlags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), root), nil
+}
+
+// sameWorkspaceRoot reports whether the approved path still resolves to its pin.
+func sameWorkspaceRoot(l sandboxGitLayout) bool {
+	var pinned, now unix.Stat_t
+	return l.pin != nil && unix.Fstat(int(l.pin.Fd()), &pinned) == nil && unix.Lstat(l.root, &now) == nil &&
+		pinned.Dev == now.Dev && pinned.Ino == now.Ino
+}
+
+// workspaceRebound reports a changed workspace path using the command's screen.
+func workspaceRebound(l sandboxGitLayout, screen *outputScreen) string {
+	if sameWorkspaceRoot(l) {
+		return ""
+	}
+	name, ok := screenedName(screen, l.root)
+	if !ok {
+		return "WARNING: skipped the post-run git check at " + withheldPath
+	}
+	return "WARNING: the workspace was moved or replaced during the run; the post-run git check was skipped (" + name + ")"
+}
+
+// closePin releases l's pinned root, if any.
+func closePin(l sandboxGitLayout) {
+	if l.pin != nil {
+		_ = l.pin.Close()
+	}
 }
 
 // Run executes one foreground command inside its per-invocation namespaces.
@@ -456,12 +555,13 @@ func (b *bwrapBackend) prepare(spec execSpec) (execSpec, sandboxGitLayout, error
 // created, and its notes join the result's, which exec renders on the error
 // paths too.
 func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
-	wrapped, before, err := b.prepare(spec)
+	wrapped, before, err := b.prepareContext(ctx, spec)
 	if err != nil {
 		return execResult{}, err
 	}
+	defer closePin(before)
 	res, err := b.runner.Run(ctx, wrapped)
-	res.Notes = append(res.Notes, b.holdNewGit(before)...)
+	res.Notes = append(res.Notes, b.holdNewGit(before, spec.Screen)...)
 	return res, err
 }
 
@@ -472,56 +572,117 @@ func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, erro
 // when it cannot observe its exit), so the check runs then too, and its notes
 // join the error.
 func (b *bwrapBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
-	wrapped, before, err := b.prepare(spec)
+	return b.StartContext(context.Background(), spec, stdout, stderr)
+}
+
+// StartContext is Start under ctx, the start's admission context: while the
+// start waits for another job's post-run check or walks the workspace, and
+// just before it spawns, an ended ctx ends it with ctx's error, so a start
+// cancelled while queued never launches. Once spawned, the job has its own
+// lifetime.
+func (b *bwrapBackend) StartContext(ctx context.Context, spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error) {
+	wrapped, before, err := b.prepareContext(ctx, spec)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		closePin(before)
 		return nil, err
 	}
 	proc, err := b.starter.Start(wrapped, stdout, stderr)
 	if err != nil {
-		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before), "\n"))
+		defer closePin(before)
+		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before, spec.Screen), "\n"))
 	}
-	return &heldGitProcess{backgroundProcess: proc, check: func() []string { return b.holdNewGit(before) }}, nil
+	return &heldGitProcess{backgroundProcess: proc, check: func() []string {
+		defer closePin(before)
+		return b.holdNewGit(before, spec.Screen)
+	}}, nil
 }
 
 // holdNewGit is the post-run check (#802): it walks the workspace again,
 // sets aside the git machinery that is new since before (prepare's walk) and
-// returns the notes, warnings included, capped (capHeldNotes). One backend's
-// checks, and its before-walks, run one at a time (heldMu).
-func (b *bwrapBackend) holdNewGit(before sandboxGitLayout) []string {
-	b.heldMu.Lock()
-	defer b.heldMu.Unlock()
-	after := inspectSandboxWorkspaceAfter(before.root)
+// returns the notes, warnings included, capped (heldNotes). One backend's
+// checks, and its before-walks, run one at a time (held). When the
+// workspace path no longer names the directory prepare pinned, before the
+// after-walk or after it, the check holds nothing and says so: the baseline
+// is another directory's. The hold reaches the workspace through the pin.
+// Every path a note shows passes through screen, the command's credential
+// screen, first (screenedName): one it flags, or cannot screen, is withheld.
+func (b *bwrapBackend) holdNewGit(before sandboxGitLayout, screen *outputScreen) []string {
+	_ = b.lockHeld(context.Background()) // never fails: the background context never ends
+	defer b.unlockHeld()
+	if w := workspaceRebound(before, screen); w != "" {
+		return []string{w}
+	}
 	runID := newHeldRunID()
-	return capHeldNotes(holdGitMachinery(after, newGitMachinery(before, after), runID), runID)
+	after := inspectSandboxWorkspaceAfterPinned(before.baseline.root, before.pin, screen)
+	if w := workspaceRebound(before, screen); w != "" {
+		var notes heldNotes
+		notes.add(w, false)
+		for _, msg := range after.warnings {
+			notes.add(msg, false)
+		}
+		return notes.lines(runID)
+	}
+	after.pin = before.pin
+	var notes heldNotes
+	items := compareGitMachinery(before, after, func(p, why string) {
+		rel, _ := filepath.Rel(after.root, p)
+		name, ok := screenedName(screen, rel)
+		if !ok {
+			notes.add("WARNING: could not check for new git metadata at "+withheldPath, false)
+			return
+		}
+		notes.add("WARNING: could not compare "+name+" with its state before the run ("+why+
+			"); do not run git there until you have checked it", false)
+	})
+	reportGitHolds(after, items, runID, notes.add)
+	return notes.lines(runID)
 }
 
 // heldNotesMax is the most note lines one post-run check reports; the
 // command decides how many items it plants.
 const heldNotesMax = 50
 
-// capHeldNotes puts every WARNING line first, keeping the order within each
-// kind, and keeps the first heldNotesMax lines. Past that it ends with one
-// line saying how many were dropped, how many of those were WARNINGs, and
-// how to find the held names, which all carry runID.
-func capHeldNotes(notes []string, runID string) []string {
-	var warns, rest []string
-	for _, n := range notes {
-		if strings.HasPrefix(n, "WARNING:") {
-			warns = append(warns, n)
-		} else {
-			rest = append(rest, n)
+// heldNotes retains a bounded sample for each priority and counts every detail.
+type heldNotes struct {
+	warnings, details     []string
+	total, warningCount   int
+	omittedWarningRenames int
+}
+
+// add counts the note even when its priority already has a full sample.
+func (n *heldNotes) add(line string, renamed bool) {
+	n.total++
+	sample := &n.details
+	if strings.HasPrefix(line, "WARNING:") {
+		n.warningCount++
+		if renamed && n.warningCount >= heldNotesMax {
+			n.omittedWarningRenames++
 		}
+		sample = &n.warnings
 	}
-	out := append(warns, rest...)
-	if len(out) <= heldNotesMax {
+	if len(*sample) < heldNotesMax {
+		*sample = append(*sample, line)
+	}
+}
+
+// lines reserves the final line for counts on overflow.
+func (n *heldNotes) lines(runID string) []string {
+	out := append(n.warnings, n.details...)
+	if n.total <= heldNotesMax {
 		return out
 	}
-	which := ""
-	if w := len(warns) - heldNotesMax; w > 0 {
-		which = fmt.Sprintf(" (%d of them WARNINGs)", w)
+	const keep = heldNotesMax - 1
+	omitted := n.total - keep
+	warnings := max(0, n.warningCount-keep)
+	renames := omitted - warnings + n.omittedWarningRenames
+	summary := fmt.Sprintf("… and %d more notes (%d reporting renames, %d with warnings, run %s)", omitted, renames, warnings, runID)
+	if renames > 0 {
+		summary += "; look for *.golem-held-" + runID + "* to find renamed entries"
 	}
-	return append(out[:heldNotesMax], fmt.Sprintf("… and %d more held items%s (run %s): their names end in .golem-held-%s",
-		len(out)-heldNotesMax, which, runID, runID))
+	return append(out[:keep], summary)
 }
 
 // newHeldRunID is a fresh run id for held names: eight random hex digits.
@@ -546,7 +707,10 @@ type heldGitProcess struct {
 // so a second Wait keeps the first check's notes.
 func (p *heldGitProcess) Wait() (int, bool, error) {
 	code, managerKilled, err := p.backgroundProcess.Wait()
-	p.checked.Do(func() { p.note = strings.Join(p.check(), "\n") })
+	p.checked.Do(func() {
+		p.note = strings.Join(p.check(), "\n")
+		p.check = nil // drops the before-walk's snapshot, which the job no longer needs
+	})
 	return code, managerKilled, err
 }
 

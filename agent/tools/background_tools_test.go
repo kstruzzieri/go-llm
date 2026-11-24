@@ -1058,7 +1058,7 @@ func TestMultiLineNotesRender(t *testing.T) {
 	if got, _ := renderStatusResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
 		t.Errorf("status: %q", got)
 	}
-	if got := renderStopResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
+	if got, _ := renderStopResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
 		t.Errorf("stop: %q", got)
 	}
 }
@@ -1072,16 +1072,53 @@ func TestStatusNotesFitTheSmallOutputBudget(t *testing.T) {
 		lines[i] = fmt.Sprintf("held back new git metadata: %03d%s", i, strings.Repeat("x", 400))
 	}
 	st := JobStatus{Handle: "h", Argv: []string{"x"}, Cwd: "/w", ExitKnown: true, Notes: []string{strings.Join(lines, "\n")}}
-	status, truncated := renderStatusResult(st)
-	for name, got := range map[string]string{"status": status, "stop": renderStopResult(st)} {
-		if len(got) > bgSmallOutputCap {
-			t.Errorf("%s: %d bytes, over %d", name, len(got), bgSmallOutputCap)
+	status, statusCut := renderStatusResult(st)
+	stop, stopCut := renderStopResult(st)
+	for _, c := range []struct {
+		name string
+		got  string
+		cut  bool
+	}{{"status", status, statusCut}, {"stop", stop, stopCut}} {
+		if len(c.got) > bgSmallOutputCap {
+			t.Errorf("%s: %d bytes, over %d", c.name, len(c.got), bgSmallOutputCap)
 		}
-		if !strings.Contains(got, "note: "+lines[0]+"\n") || !strings.HasSuffix(got, " more note lines not shown\n") {
-			t.Errorf("%s:\n%s", name, got)
+		if !c.cut {
+			t.Errorf("%s: not reported as truncated", c.name)
+		}
+		// The notes kept are the first ones, in order, then one line with the
+		// exact count of the rest.
+		at := strings.Index(c.got, "note: ")
+		if at < 0 {
+			t.Fatalf("%s has no notes:\n%s", c.name, c.got)
+		}
+		kept := strings.Split(strings.TrimSuffix(c.got[at:], "\n"), "\n")
+		n := len(kept) - 1
+		if n < 1 {
+			t.Fatalf("%s kept no note:\n%s", c.name, c.got)
+		}
+		for i, l := range kept[:n] {
+			if l != "note: "+lines[i] {
+				t.Errorf("%s: note %d is %.60q, want line %d", c.name, i, l, i)
+			}
+		}
+		if want := fmt.Sprintf("note: … %d more note lines not shown", len(lines)-n); kept[n] != want {
+			t.Errorf("%s: last line %q, want %q", c.name, kept[n], want)
 		}
 	}
-	if !truncated || !strings.Contains(status, `cwd: "/w"`) {
-		t.Errorf("status truncated %v:\n%s", truncated, status)
+	if !strings.Contains(status, `cwd: "/w"`) {
+		t.Errorf("status:\n%s", status)
+	}
+}
+
+// TestStopCommandReturnsNoteTruncation checks the tool-facing flag on a completed job.
+func TestStopCommandReturnsNoteTruncation(t *testing.T) {
+	f := newBGJobFixture(t, []string{"cmd"}, "/w")
+	f.finish(t)
+	f.m.mu.Lock()
+	f.m.jobs[f.handle].notes = []string{strings.Repeat("metadata detail\n", 500)}
+	f.m.mu.Unlock()
+	res := mustInvoke(t, NewStopCommand(f.m), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
+	if !res.Truncated || !strings.Contains(res.Content, "more note lines not shown") {
+		t.Errorf("stop truncation %v, result %.80q", res.Truncated, res.Content)
 	}
 }

@@ -1341,3 +1341,33 @@ func TestBwrapNarrowWorkspacePathSocketReachable(t *testing.T) {
 		t.Fatalf("workspace pathname socket unreachable from the narrowed command (limitation contract changed): %s", result)
 	}
 }
+
+// TestBwrapVerifierHoldsRepository verifies the rendered note and the final directory.
+func TestBwrapVerifierHoldsRepository(t *testing.T) {
+	requireBwrapCapability(t)
+	cfg := SandboxConfig{Runtime: SandboxRuntimeBwrap}
+	root := canonGitTempDir(t)
+	slot := newTestSlot(t, root, cfg)
+	cmd, err := NewSandboxedVerifyCommand(mustWorkspace(t, root), cfg, []string{"/bin/sh", "-c", "mkdir -p fixture/.git"}, "", 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := slot.Set(cmd); err != nil {
+		t.Fatal(err)
+	}
+	out, err := slot.Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := heldRunID(t, out)
+	held := "fixture/.git.golem-held-" + id
+	if !strings.Contains(out, "status: passed") || !strings.Contains(out, "note: "+heldNote("fixture/.git", held)) {
+		t.Fatalf("observation %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(root, held)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "fixture/.git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original disposition: %v", err)
+	}
+}
