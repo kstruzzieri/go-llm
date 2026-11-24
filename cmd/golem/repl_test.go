@@ -953,6 +953,67 @@ func TestREPL_AllowWriteDeniedWriteSkips(t *testing.T) {
 	}
 }
 
+// A tool approval whose question cannot be printed ends the REPL (exit 1):
+// the write does not run, the "y" typed for it stays unread, and no later
+// goal is read. The approver's error reaches runREPL through the real agent
+// runtime with its chain intact.
+func TestREPL_ApprovalQuestionWriteFailureEndsTheREPL(t *testing.T) {
+	root := t.TempDir()
+	writeCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "w1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "write_file",
+				Arguments: json.RawMessage(`{"path":"out.txt","content":"hello\n"}`),
+			},
+		}},
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: writeCall}, {Response: provider.ChatResponse{Content: "wrote it"}}}}
+	sess := newWriteEnabledTestSession(t, caller, root)
+
+	// The scanner prints both prompts to a writer that fails: a goal read
+	// ignores that, an answer read cannot.
+	src := &countingModelSource{inner: newScannerSource(strings.NewReader("write out.txt\ny\nnext goal\n"), failWriter{})}
+	var out strings.Builder
+	err := runREPL(context.Background(), src, &out, nil, sess)
+	checkREPLEndedUnshown(t, err, src, 1, "y")
+	if _, err := os.Stat(filepath.Join(root, "out.txt")); !os.IsNotExist(err) {
+		t.Error("the write ran without an approval anyone saw")
+	}
+	if caller.i != 1 {
+		t.Errorf("model calls = %d, want 1: the run ends at the approval", caller.i)
+	}
+}
+
+// After /grants clear the next goal re-runs admission. When its section
+// cannot be shown, the REPL ends (exit 1) before the goal runs, reading no
+// answer and no further goal, and nothing is installed, local included.
+func TestREPL_ReadmissionSectionWriteFailureEndsTheREPL(t *testing.T) {
+	adm, _ := newTestAdmission(t, admEdges(t), nil, true, &fakePrompt{answer: true})
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{Content: "ran"}}}}
+	sess := newTestSession(t, caller, t.TempDir())
+	sess.destAdmission = adm
+	slash(t, sess, "/grants clear")
+	adm.setReplOut(failWriter{})
+	src := newCountingSource(sess, "test prompt\nyes\nnext goal\n")
+
+	var out strings.Builder
+	err := runREPL(context.Background(), src, &out, nil, sess)
+	checkREPLEndedUnshown(t, err, src, 0, "yes")
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Errorf("err = %v, want ErrDestinationDenied as well", err)
+	}
+	if caller.i != 0 || len(src.goals()) != 0 {
+		t.Errorf("goal ran after the failure: model calls %d, recorded %q", caller.i, src.goals())
+	}
+	if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Errorf("gate installed after the refused re-admission: Bind = %v", err)
+	}
+}
+
 func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSession {
 	t.Helper()
 	readTools, err := buildTools(root, nil)

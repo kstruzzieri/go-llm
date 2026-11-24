@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -102,6 +107,164 @@ func TestLineSourcePromptYN(t *testing.T) {
 	}
 }
 
+// flakyWriter fails every write while failing is set, then passes through.
+type flakyWriter struct {
+	failing *atomic.Bool
+	w       io.Writer
+}
+
+func (f flakyWriter) Write(p []byte) (int, error) {
+	if f.failing.Load() {
+		return 0, errors.New("transient write failure")
+	}
+	return f.w.Write(p)
+}
+
+// countingReader counts Read calls on the stream under a line source, so a
+// test can prove a source read nothing.
+type countingReader struct {
+	r     io.Reader
+	reads atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.r.Read(p)
+}
+
+// readerFunc adapts a function to io.Reader.
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
+// promptThenFail passes writes through until one carries the prompt, then
+// fails every write, so the failure lands in a read already under way.
+type promptThenFail struct {
+	prompt string
+	seen   atomic.Bool
+}
+
+func (w *promptThenFail) Write(p []byte) (int, error) {
+	// x/term flushes an empty buffer before every read; it hides nothing.
+	if w.seen.Load() && len(p) > 0 {
+		return 0, errors.New("section write failed")
+	}
+	if strings.Contains(string(p), w.prompt) {
+		w.seen.Store(true)
+	}
+	return len(p), nil
+}
+
+// A REPL question that fails to print is never answered, in either line
+// source: the typed-ahead "y" yields false and errConsentNotShown, never
+// consent, and the REPL ends on the error. When the prompt itself fails,
+// neither source reads anything (no read waits on a question nobody saw, and
+// none is left for a Ctrl-C to park), so the typed-ahead line stays unread.
+// When a later write in the editor's answer window fails, every way the
+// window ends returns the error, and a paste already begun is read through
+// its end marker first.
+func TestLineSourcePromptYNPromptWriteFails(t *testing.T) {
+	check := func(t *testing.T, src lineSource) {
+		t.Helper()
+		got, err := lineSourcePromptYN(src)(context.Background(), "allow? ")
+		if got || !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("lineSourcePromptYN with a failing writer = %v, %v; want false and errConsentNotShown", got, err)
+		}
+		if !strings.Contains(err.Error(), "the question could not be shown") || !strings.Contains(err.Error(), "section write failed") {
+			t.Errorf("error does not say the question was not shown: %v", err)
+		}
+	}
+	t.Run("scanner", func(t *testing.T) {
+		in := &countingReader{r: strings.NewReader("y\nhello\n")}
+		src := newScannerSource(in, failWriter{})
+		check(t, src)
+		if n := in.reads.Load(); n != 0 {
+			t.Errorf("stdin reads after the failed prompt = %d, want 0", n)
+		}
+		// The answer line was left unread: whoever reads next gets it. In
+		// the REPL nothing does, because the session ends.
+		line, ok, err := src.ReadGoal(context.Background(), promptText)
+		if line != "y" || !ok || err != nil {
+			t.Errorf("next read = %q, %v, %v; want the unread \"y\"", line, ok, err)
+		}
+	})
+	t.Run("scanner EOF", func(t *testing.T) {
+		// Input ends right after the failed prompt: the error comes back and
+		// nothing waits for a line that will never arrive.
+		check(t, newScannerSource(strings.NewReader(""), failWriter{}))
+	})
+	// The editor's prompt fails: whatever is typed ahead, nothing is read.
+	for _, tc := range []struct{ name, in string }{
+		{"editor typed answer", "y\rhello\r"},
+		{"editor EOF", ""},
+		{"editor Ctrl-C", "\x03"},
+		{"editor invalid UTF-8", "\xb2\r"},
+		{"editor oversized paste", pasteOn + strings.Repeat("a", maxGoalBytes+2) + pasteOff},
+		{"editor pasted answer", pasteOn + "y\nmore" + pasteOff + "\r"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := &countingReader{r: strings.NewReader(tc.in)}
+			f := newEditorFixture(t, editorOpts{in: in, out: failWriter{}})
+			check(t, f.src)
+			if n := in.reads.Load(); n != 0 {
+				t.Errorf("stdin reads after the failed prompt = %d, want 0", n)
+			}
+		})
+	}
+	t.Run("editor no typeahead", func(t *testing.T) {
+		// Nothing typed yet: the editor must not wait on a keystroke for a
+		// question nobody saw.
+		f := newEditorFixture(t, editorOpts{in: readerFunc(func([]byte) (int, error) {
+			t.Error("stdin read for a question that did not print")
+			return 0, io.EOF
+		}), out: failWriter{}})
+		check(t, f.src)
+	})
+	// The prompt printed and a later write in the window failed: the read is
+	// under way when the failure lands.
+	t.Run("editor failure mid-read", func(t *testing.T) {
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\rhello\r"), out: &promptThenFail{prompt: "allow? "}})
+		check(t, f.src)
+		// The line read for the question is discarded; the next is not.
+		line, ok, err := f.readGoal(t)
+		if line != "hello" || !ok || err != nil {
+			t.Errorf("goal read after the refused answer = %q, %v, %v; want \"hello\"", line, ok, err)
+		}
+	})
+	for _, tc := range []struct{ name, in string }{
+		// A long pasted answer: before the drain moved ahead of the check,
+		// most of it stayed in the input queue, and after golem exited the
+		// shell ran it.
+		{"editor paste drained", pasteOn + "y\n" + strings.Repeat("echo PWNED\n", 1000) + pasteOff},
+		{"editor paste then EOF", pasteOn + "y\nmore"},
+		{"editor oversized paste mid-read", pasteOn + strings.Repeat("a", maxGoalBytes+2) + pasteOff},
+		{"editor invalid UTF-8 in paste", pasteOn + "y\n\xb2\n" + pasteOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := strings.NewReader(tc.in)
+			f := newEditorFixture(t, editorOpts{in: in, out: &promptThenFail{prompt: "allow? "}})
+			check(t, f.src)
+			if n := in.Len(); n != 0 {
+				t.Errorf("%d of %d input bytes left unread, want 0", n, len(tc.in))
+			}
+		})
+	}
+	t.Run("editor recovers", func(t *testing.T) {
+		// One transient failure fails only its own question: each read
+		// window starts with no recorded write error.
+		var failing atomic.Bool
+		failing.Store(true)
+		f := newEditorFixture(t, editorOpts{in: strings.NewReader("y\ry\r"), out: flakyWriter{&failing, io.Discard}})
+		if line, ok, err := f.src.ReadAnswer(context.Background(), "allow? "); err == nil {
+			t.Fatalf("answer while the writer fails = %q, %v, nil; want an error", line, ok)
+		}
+		failing.Store(false)
+		if line, ok, err := f.src.ReadAnswer(context.Background(), "allow? "); line != "y" || !ok || err != nil {
+			t.Errorf("answer after the writer recovered = %q, %v, %v; want \"y\", true, nil", line, ok, err)
+		}
+	})
+}
+
 func TestLineSourcePromptYNRejectedAnswerDeniesWithoutConsumingTypeahead(t *testing.T) {
 	f := newEditorFixture(t, editorOpts{in: strings.NewReader("bad\xb2\ry\r")})
 	got, err := lineSourcePromptYN(f.src)(context.Background(), "allow? ")
@@ -195,8 +358,8 @@ func TestAdmissionRendersDedupedManifestWithEdges(t *testing.T) {
 		t.Errorf("remote destination rendered %d times, want exactly 1 (deduped): %s", n, got)
 	}
 	for _, want := range []string{
-		"llamacpp", "opencode", "local", "remote",
-		"agent (fallback)", "summarize", "model-refresh",
+		"llamacpp", "opencode", "On this machine (allowed automatically)", "\nRemote\n",
+		"chat (fallback)", "summaries", "model list",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("manifest missing %q:\n%s", want, got)
@@ -336,6 +499,435 @@ func TestAdmissionPartialAllowlistStillFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "other.example.com") {
 		t.Errorf("diagnostic does not name the uncovered destination: %v", err)
+	}
+}
+
+// remoteRow matches one remote header line of the model-server section: name,
+// URL and its state on one line (the test writer is 80 columns).
+var remoteRow = regexp.MustCompile(`(?m)^  (\S+)\s+(https?://\S+)  (` + remoteStateAlternation() + `)$`)
+
+// remoteStateAlternation is the regexp alternation of every state's copy.
+func remoteStateAlternation() string {
+	var alts []string
+	for _, st := range []remoteState{remoteNeedsOK, remoteAllowedByFlag, remoteAllowedEarlier, remoteNotAllowed, remoteRefused} {
+		alts = append(alts, regexp.QuoteMeta(st.text()))
+	}
+	return strings.Join(alts, "|")
+}
+
+// assertRows checks each remote's full header line (name, URL and state), that
+// no other remote row is drawn, and that the remotes reading "needs your OK"
+// are exactly the question's names.
+func assertRows(t *testing.T, step, section, question string, want, urls map[string]string) {
+	t.Helper()
+	got := map[string]string{}
+	for _, m := range remoteRow.FindAllStringSubmatch(section, -1) {
+		got[m[1]] = m[3]
+	}
+	if !maps.Equal(got, want) {
+		t.Errorf("%s: row states %v, want %v:\n%s", step, got, want, section)
+	}
+	var needs []string
+	for name, state := range want {
+		line := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(name) + `\s+` + regexp.QuoteMeta(urls[name]) + `  ` + regexp.QuoteMeta(state) + `$`)
+		if !line.MatchString(section) {
+			t.Errorf("%s: no header line for %q with URL %s and state %q:\n%s", step, name, urls[name], state, section)
+		}
+		if state == "needs your OK" {
+			needs = append(needs, name)
+		}
+	}
+	slices.Sort(needs)
+	names := strings.TrimSuffix(strings.TrimPrefix(question, "Send data to "), " (remote) during this session? [y/N] ")
+	asked := strings.Split(strings.ReplaceAll(names, " and ", ", "), ", ")
+	slices.Sort(asked)
+	if !slices.Equal(needs, asked) {
+		t.Errorf("%s: rows needing OK %v, question names %v", step, needs, asked)
+	}
+}
+
+// R3-8: across a session the question names exactly the remotes a yes would
+// admit: never a flag-covered one, never one granted earlier in the
+// generation, and after a revoke every remote the user withdrew, sorted.
+func TestConsentSequenceAsksForExactlyUncovered(t *testing.T) {
+	ctx := context.Background()
+	flagged := admDest(t, "flagged", "https://flagged.example.com")
+	startup := []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "summarize", Destination: flagged},
+		{Purpose: "planning", Destination: admDest(t, "granted", "https://granted.example.com")},
+	}
+	fresh := []provider.DestinationEdge{{Purpose: "verify", Destination: admDest(t, "fresh", "https://fresh.example.com")}}
+	newer := []provider.DestinationEdge{{Purpose: "extract", Destination: admDest(t, "newer", "https://newer.example.com")}}
+
+	adm, out := newTestAdmission(t, startup, []string{flagged.String()}, true, &fakePrompt{})
+	urls := map[string]string{
+		"flagged": flagged.BaseURL(),
+		"granted": "https://granted.example.com",
+		"fresh":   "https://fresh.example.com",
+		"newer":   "https://newer.example.com",
+	}
+	const (
+		needs   = "needs your OK"
+		byFlag  = "allowed by -allow-destination"
+		earlier = "allowed earlier this session"
+	)
+	var asked []string
+	adm.setPrompt(func(_ context.Context, q string) (bool, error) {
+		asked = append(asked, q)
+		return true, nil
+	})
+	// check compares every question asked so far, then binds every edge the
+	// session has admitted.
+	check := func(step string, wantAsked []string, admitted []provider.DestinationEdge) {
+		t.Helper()
+		if !slices.Equal(asked, wantAsked) {
+			t.Fatalf("after %s the questions were\n%q\nwant\n%q", step, asked, wantAsked)
+		}
+		for _, e := range admitted {
+			if _, err := adm.gate.Bind(ctx, e.Purpose, e.Destination.Provider()); err != nil {
+				t.Errorf("after %s, %q -> %s not admitted: %v", step, e.Purpose, e.Destination, err)
+			}
+		}
+	}
+
+	q1 := "Send data to granted (remote) during this session? [y/N] "
+	q2 := "Send data to fresh (remote) during this session? [y/N] "
+	q3 := "Send data to fresh, granted and newer (remote) during this session? [y/N] "
+
+	start := out.Len()
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("ensure", []string{q1}, startup)
+	assertRows(t, "ensure", out.String()[start:], q1,
+		map[string]string{"flagged": byFlag, "granted": needs}, urls)
+
+	start = out.Len()
+	if _, err := adm.extend(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	assertRows(t, "extend", out.String()[start:], q2,
+		map[string]string{"flagged": byFlag, "granted": earlier, "fresh": needs}, urls)
+	all := append(slices.Clone(startup), fresh...)
+	check("extend", []string{q1, q2}, all)
+
+	adm.revoke()
+	for _, e := range all {
+		if _, err := adm.gate.Bind(ctx, e.Purpose, e.Destination.Provider()); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("after revoke, %q -> %s still binds: %v", e.Purpose, e.Destination, err)
+		}
+	}
+
+	start = out.Len()
+	if _, err := adm.extend(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	check("revoke then extend", []string{q1, q2, q3}, append(all, newer...))
+	assertRows(t, "revoke then extend", out.String()[start:], q3,
+		map[string]string{"flagged": byFlag, "granted": needs, "fresh": needs, "newer": needs}, urls)
+}
+
+// R3-8: pinning replaces a provider's destination with the discovered
+// loopback one, so from then on it is local: after a revoke the re-admission
+// never asks about it, and the section shows only the pinned URL, not the
+// remote it replaced.
+func TestConsentPinnedLoopbackNeverAsked(t *testing.T) {
+	ctx := context.Background()
+	configured := admDest(t, "llamacpp", "https://llamacpp.example.com")
+	pinned := admDest(t, "llamacpp", "http://127.0.0.1:8091")
+	p := &fakePrompt{answer: true}
+	adm, out := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: configured},
+		{Purpose: provider.DestinationPurposeModelRefresh, Destination: configured},
+		{Purpose: "summarize", Destination: admDest(t, "other", "https://other.example.com")},
+	}, nil, true, p)
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if want := "Send data to llamacpp and other (remote) during this session? [y/N] "; p.seen != want {
+		t.Fatalf("startup question = %q, want %q", p.seen, want)
+	}
+	if err := adm.pinLoopback("llamacpp", pinned); err != nil {
+		t.Fatal(err)
+	}
+
+	adm.revoke()
+	start := out.Len()
+	if err := adm.ensure(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertRows(t, "re-admission", out.String()[start:], "Send data to other (remote) during this session? [y/N] ",
+		map[string]string{"other": "needs your OK"}, map[string]string{"other": "https://other.example.com"})
+	if want := "Send data to other (remote) during this session? [y/N] "; p.calls != 2 || p.seen != want {
+		t.Errorf("re-admission asked %d question(s), last %q; want 2 in all, last %q", p.calls, p.seen, want)
+	}
+	section := out.String()[start:]
+	if !strings.Contains(section, pinned.BaseURL()) || strings.Contains(section, configured.BaseURL()) {
+		t.Errorf("re-admission section must show only the pinned URL %s, never %s:\n%s", pinned.BaseURL(), configured.BaseURL(), section)
+	}
+	// The pinned provider sits under the local group, with no state.
+	if i, j := strings.Index(section, "Remote"), strings.Index(section, pinned.BaseURL()); i < 0 || j < 0 || j > i {
+		t.Errorf("pinned URL not under the local group, before Remote:\n%s", section)
+	}
+	for _, l := range strings.Split(section, "\n") {
+		if strings.Contains(l, pinned.BaseURL()) && strings.TrimRight(l, " ") != "  llamacpp  "+pinned.BaseURL() {
+			t.Errorf("pinned row carries a state or odd shape: %q", l)
+		}
+	}
+	for _, purpose := range []string{"agent", provider.DestinationPurposeModelRefresh} {
+		if _, err := adm.gate.Bind(ctx, purpose, "llamacpp"); err != nil {
+			t.Errorf("pinned edge %q not re-admitted: %v", purpose, err)
+		}
+	}
+}
+
+// The pin receipt names the provider and URL through the section's
+// formatters, so a key outside [A-Za-z0-9._-] is quoted, never raw.
+func TestPinLoopbackReceiptQuotesTheName(t *testing.T) {
+	key := "n\u00e9v"
+	adm, out := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, key, "http://127.0.0.1:8090")},
+	}, nil, false, &fakePrompt{})
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.pinLoopback(key, admDest(t, key, "http://127.0.0.1:8091")); err != nil {
+		t.Fatal(err)
+	}
+	if want := `destination pinned: "n\u00e9v" -> http://127.0.0.1:8091 (discovered)` + "\n"; !strings.HasSuffix(out.String(), want) {
+		t.Errorf("pin receipt: want suffix %q, got:\n%s", want, out.String())
+	}
+}
+
+// The noninteractive denial keeps its exact bytes: it names the FIRST
+// uncovered remote in manifest order (zeta, reached by "agent"), not the
+// first in the question's sorted order (alpha), and never reads an answer.
+func TestConsentNoninteractiveErrorUnchanged(t *testing.T) {
+	p := &fakePrompt{answer: true} // must not be consulted
+	adm, _ := newTestAdmission(t, []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "agent", Destination: admDest(t, "zeta", "https://zeta.example.com"), IsFallback: true},
+		{Purpose: "summarize", Destination: admDest(t, "alpha", "https://alpha.example.com")},
+	}, nil, false, p)
+
+	err := adm.ensure(context.Background())
+	const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
+	if err == nil || err.Error() != want {
+		t.Fatalf("denial = %v\nwant     %s", err, want)
+	}
+	if !errors.Is(err, provider.ErrDestinationDenied) {
+		t.Errorf("denial %v does not match ErrDestinationDenied", err)
+	}
+	if p.calls != 0 {
+		t.Errorf("noninteractive denial consulted the prompt %d times", p.calls)
+	}
+}
+
+// failWriter refuses every write, as a closed or broken stream does.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("section write failed") }
+
+// A section that fails to print is never followed by the question: the
+// admission refuses (ErrDestinationDenied and errConsentNotShown, saying why),
+// reads nothing in the REPL or at startup, and installs nothing. ensure (the
+// re-admission after /grants clear) and extend share the rule.
+// Where no question would be asked, a failed write changes nothing: nothing
+// uncovered admits as before, and a refusal keeps its exact bytes.
+func TestConsentSectionWriteFailureFailsClosed(t *testing.T) {
+	// repl binds the REPL writer as run() does; the startup shape leaves it
+	// unbound and draws on Out.
+	newAdm := func(t *testing.T, edges []provider.DestinationEdge, interactive, repl bool, p *fakePrompt) *destinationAdmission {
+		t.Helper()
+		adm, err := newDestinationAdmission(destinationAdmissionConfig{
+			Gate: provider.NewDestinationGate(), Edges: edges,
+			Interactive: interactive, PromptYN: p.ask, Out: failWriter{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repl {
+			adm.setReplOut(failWriter{})
+		}
+		return adm
+	}
+	checkRefused := func(t *testing.T, err error, p *fakePrompt) {
+		t.Helper()
+		if !errors.Is(err, provider.ErrDestinationDenied) || !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("err = %v, want ErrDestinationDenied and errConsentNotShown", err)
+		}
+		for _, want := range []string{"model-server section could not be shown", "section write failed"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err %q does not say %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "\n") {
+			t.Errorf("err is not one line: %q", err)
+		}
+		// Nothing is read: no discard read waits on a question nobody saw.
+		if p.calls != 0 {
+			t.Errorf("after the section failed to print: %d reads, want 0", p.calls)
+		}
+	}
+
+	t.Run("ensure asking", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, admEdges(t), true, true, p)
+		checkRefused(t, adm.ensure(context.Background()), p)
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("gate installed after a refused admission: Bind = %v", err)
+		}
+	})
+
+	t.Run("startup asking", func(t *testing.T) {
+		// No REPL writer bound: the startup writer failed, and the refusal is
+		// fatal.
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, admEdges(t), true, false, p)
+		checkRefused(t, adm.ensure(context.Background()), p)
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("gate installed after a refused startup admission: Bind = %v", err)
+		}
+	})
+
+	t.Run("extend asking", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		local := admDest(t, "llamacpp", "http://127.0.0.1:8090")
+		adm := newAdm(t, []provider.DestinationEdge{{Purpose: "agent", Destination: local}}, true, true, p)
+		// Nothing uncovered: the failed write does not stop a local admission.
+		if err := adm.ensure(context.Background()); err != nil {
+			t.Fatalf("local-only ensure with a failing writer: %v", err)
+		}
+		remote := admDest(t, "opencode", "https://opencode.ai/zen/go")
+		_, err := adm.extend(context.Background(), []provider.DestinationEdge{{Purpose: "summarize", Destination: remote}})
+		checkRefused(t, err, p)
+		if _, err := adm.gate.Bind(context.Background(), "summarize", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("remote admitted after a refused extension: Bind = %v", err)
+		}
+		if _, err := adm.gate.Bind(context.Background(), "agent", "llamacpp"); err != nil {
+			t.Errorf("the refused extension dropped the installed generation: %v", err)
+		}
+	})
+
+	t.Run("refusing keeps the denial bytes", func(t *testing.T) {
+		p := &fakePrompt{answer: true}
+		adm := newAdm(t, []provider.DestinationEdge{
+			{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+			{Purpose: "agent", Destination: admDest(t, "zeta", "https://zeta.example.com"), IsFallback: true},
+			{Purpose: "summarize", Destination: admDest(t, "alpha", "https://alpha.example.com")},
+		}, false, false, p)
+		err := adm.ensure(context.Background())
+		const want = `provider: destination zeta/https://zeta.example.com not admitted for agent; pass -allow-destination "zeta/https://zeta.example.com" to permit it`
+		if err == nil || err.Error() != want {
+			t.Fatalf("denial = %v\nwant     %s", err, want)
+		}
+		if errors.Is(err, errConsentNotShown) {
+			t.Error("a refusal that asks nothing reads as a question not shown")
+		}
+		if p.calls != 0 {
+			t.Errorf("refusing path asked %d times", p.calls)
+		}
+	})
+}
+
+// After setReplOut, a re-admission (the next goal after /grants clear) draws
+// its section on the REPL writer, before the question is asked, and nothing
+// more reaches the startup writer.
+func TestReadmissionSectionOnReplWriter(t *testing.T) {
+	var errBuf, replBuf strings.Builder
+	var atPrompt []string
+	adm, err := newDestinationAdmission(destinationAdmissionConfig{
+		Gate: provider.NewDestinationGate(), Edges: admEdges(t), Interactive: true, Out: &errBuf,
+		PromptYN: func(_ context.Context, _ string) (bool, error) {
+			atPrompt = append(atPrompt, replBuf.String())
+			return true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errBuf.String(), "\u2500\u2500 model servers") {
+		t.Fatalf("startup section not on Out:\n%s", errBuf.String())
+	}
+	startup := errBuf.String()
+
+	adm.setReplOut(&replBuf)
+	adm.revoke()
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(atPrompt) != 2 {
+		t.Fatalf("asked %d times, want 2", len(atPrompt))
+	}
+	const row = "\n  opencode  https://opencode.ai/zen/go  needs your OK\n"
+	if s := atPrompt[1]; !strings.Contains(s, "\u2500\u2500 model servers") || !strings.Contains(s, row) {
+		t.Errorf("re-admission section not on the REPL writer before the question:\n%s", s)
+	}
+	if got := errBuf.String(); got != startup {
+		t.Errorf("the startup writer got more after setReplOut:\n%s", got[len(startup):])
+	}
+}
+
+// oneByteReader serves r one byte per Read and fails the test if asked for
+// more: a larger buffer is read-ahead the line editor would lose.
+type oneByteReader struct {
+	t *testing.T
+	r *strings.Reader
+}
+
+func (o oneByteReader) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		o.t.Errorf("Read asked for %d bytes, want 1", len(p))
+	}
+	return o.r.Read(p[:min(1, len(p))])
+}
+
+func TestStartupPromptYN(t *testing.T) {
+	question := consentQuestion([]provider.Destination{admDest(t, "opencode", "https://opencode.ai/zen/go")})
+	for _, tc := range []struct {
+		in, rest string
+		want     bool
+		wantErr  bool
+	}{
+		{in: "y\nhello\n", rest: "hello\n", want: true},
+		{in: "yes\n", want: true},
+		{in: "Y\n", want: true},
+		{in: "n\n", want: false},
+		{in: "y", want: false, wantErr: true},
+	} {
+		t.Run(strconv.Quote(tc.in), func(t *testing.T) {
+			in := strings.NewReader(tc.in)
+			var out strings.Builder
+			got, err := startupPromptYN(oneByteReader{t, in}, &out)(context.Background(), question)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("answer %q = %v, %v; want %v, error %v", tc.in, got, err, tc.want, tc.wantErr)
+			}
+			if out.String() != question {
+				t.Errorf("prompt written %q, want %q", out.String(), question)
+			}
+			if rest, _ := io.ReadAll(in); string(rest) != tc.rest {
+				t.Errorf("left %q unread, want %q", rest, tc.rest)
+			}
+		})
+	}
+	// Whatever the prompt, even an empty one, a failed write means nothing is
+	// read, and the error marks a question not shown (so run discards the
+	// typed-ahead line) while keeping the write error.
+	for _, prompt := range []string{question, ""} {
+		t.Run("prompt write fails "+strconv.Quote(prompt), func(t *testing.T) {
+			in := strings.NewReader("y\n")
+			got, err := startupPromptYN(oneByteReader{t, in}, errWriter{})(context.Background(), prompt)
+			if got || !errors.Is(err, errConsentNotShown) || !errors.Is(err, errBrokenTestWriter) {
+				t.Errorf("= %v, %v; want false and errConsentNotShown wrapping the write error", got, err)
+			}
+			if in.Len() != 2 {
+				t.Errorf("read %d bytes after the prompt failed to print", 2-in.Len())
+			}
+		})
 	}
 }
 
@@ -520,8 +1112,8 @@ func TestReplGrantsClearRevokesDestinations(t *testing.T) {
 	if _, err := adm.gate.Bind(context.Background(), "agent", "opencode"); !errors.Is(err, provider.ErrDestinationDenied) {
 		t.Error("/grants clear left destination authority in place")
 	}
-	if !strings.Contains(out.String(), "destination") {
-		t.Errorf("/grants clear output does not mention destinations: %s", out.String())
+	if got, want := out.String(), "session grants cleared (destination grants revoked)\n"; got != want {
+		t.Errorf("/grants clear output = %q, want %q", got, want)
 	}
 
 	// /new and /clear do NOT revoke destination authority (D12): re-admit,
@@ -547,6 +1139,85 @@ func TestReplGrantsStatusShowsDestinations(t *testing.T) {
 	dispatchSlash(context.Background(), &out, sess, "/grants")
 	if !strings.Contains(out.String(), "opencode") {
 		t.Errorf("/grants status does not show destination grants: %s", out.String())
+	}
+}
+
+// grantsEdges: a local server, a remote the flags cover, and a remote only an
+// interactive yes admits.
+func grantsEdges(t *testing.T) []provider.DestinationEdge {
+	t.Helper()
+	return []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "agent", Destination: admDest(t, "approved", "https://approved.example.com"), IsFallback: true},
+		{Purpose: "summarize", Destination: admDest(t, "flagged", "https://flagged.example.com")},
+	}
+}
+
+// /grants lists each remote's state as the session holds it, and after
+// /grants clear says so: every destination, local and flagged included, is
+// out of the gate until the next admission.
+func TestGrantsListingStates(t *testing.T) {
+	p := &fakePrompt{answer: true}
+	adm, _ := newTestAdmission(t, grantsEdges(t), []string{"flagged/https://flagged.example.com"}, true, p)
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{grants: newApprovalGrants(), destAdmission: adm}
+	const (
+		approved = "\n  approved  https://approved.example.com"
+		flagged  = "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n"
+		cleared  = "access cleared by /grants clear; the next admission asks about every remote\n-allow-destination does not cover\n"
+	)
+
+	before := slash(t, sess, "/grants")
+	for _, want := range []string{approved + "  allowed earlier this session\n", flagged} {
+		if !strings.Contains(before, want) {
+			t.Errorf("/grants after a yes missing %q:\n%s", want, before)
+		}
+	}
+	if strings.Contains(before, cleared) {
+		t.Errorf("/grants shows the cleared line before any clear:\n%s", before)
+	}
+
+	slash(t, sess, "/grants clear")
+	after := slash(t, sess, "/grants")
+	for _, want := range []string{cleared, approved + "  not allowed (cleared)\n", flagged} {
+		if !strings.Contains(after, want) {
+			t.Errorf("/grants after clear missing %q:\n%s", want, after)
+		}
+	}
+	// Why the cleared line exists: nothing binds until the next admission,
+	// not even the servers the listing still calls allowed.
+	for _, b := range [][2]string{{"agent", "llamacpp"}, {"summarize", "flagged"}, {"agent", "approved"}} {
+		if _, err := adm.gate.Bind(context.Background(), b[0], b[1]); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("Bind(%s, %s) after /grants clear = %v, want ErrDestinationDenied", b[0], b[1], err)
+		}
+	}
+}
+
+// Startup with every remote covered by -allow-destination asks nothing, even
+// with a prompt bound, and the rows say which flag admitted them.
+func TestStartupFlagsOnlyAsksNothing(t *testing.T) {
+	p := &fakePrompt{answer: false}
+	edges := []provider.DestinationEdge{
+		{Purpose: "agent", Destination: admDest(t, "llamacpp", "http://127.0.0.1:8090")},
+		{Purpose: "summarize", Destination: admDest(t, "flagged", "https://flagged.example.com")},
+	}
+	adm, out := newTestAdmission(t, edges, []string{"flagged/https://flagged.example.com"}, true, p)
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatalf("flag-covered startup: %v", err)
+	}
+	if p.calls != 0 {
+		t.Errorf("flag-covered startup asked %d questions, want none", p.calls)
+	}
+	got := out.String()
+	if !strings.Contains(got, "\n  flagged   https://flagged.example.com  allowed by -allow-destination\n") {
+		t.Errorf("flagged row missing its state:\n%s", got)
+	}
+	for _, unwanted := range []string{"needs your OK", "Send data to"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("flag-covered startup shows %q:\n%s", unwanted, got)
+		}
 	}
 }
 
@@ -624,11 +1295,11 @@ func TestAdmissionExtendAdmitsNewRemoteWithOneConsent(t *testing.T) {
 		t.Errorf("extend consulted the prompt %d times, want exactly 1 (one decision for the complete proposal)", p.calls)
 	}
 
-	// The question says "the remote destinations listed above", so the
-	// surface extend wrote must be the PROPOSED manifest: approving a grant
-	// for a destination the user was never shown is consent to nothing.
+	// The question names the remotes a yes admits, so the surface extend
+	// wrote must be the PROPOSED manifest: approving a grant for a
+	// destination the user was never shown is consent to nothing.
 	proposed := out.String()[startupRender:]
-	for _, want := range []string{"cloud", "https://cloud.example.com", "remote", "agent (fallback)", "model-refresh"} {
+	for _, want := range []string{"cloud", "https://cloud.example.com", "\nRemote\n", "chat (fallback)", "model list"} {
 		if !strings.Contains(proposed, want) {
 			t.Errorf("consent surface written by extend missing %q:\n%s", want, proposed)
 		}
@@ -1049,7 +1720,7 @@ func TestAdmissionExtendAfterRevoke(t *testing.T) {
 		if p.calls != 2 {
 			t.Errorf("prompt consulted %d times across startup and re-admission, want 2 (one decision each)", p.calls)
 		}
-		if n := strings.Count(out.String(), "destinations:"); n != 2 {
+		if n := strings.Count(out.String(), "\u2500\u2500 model servers"); n != 2 {
 			t.Errorf("manifest rendered %d times, want 2 (one per publication, not one per stage):\n%s", n, out.String())
 		}
 		for _, e := range append(admEdges(t), localCandidate...) {
@@ -1314,33 +1985,5 @@ func TestKeySourceLines(t *testing.T) {
 	}
 	if got := keySourceLines(nil); got != nil {
 		t.Errorf("keySourceLines(nil) = %v, want nil", got)
-	}
-}
-
-func TestRenderManifestKeySourceLines(t *testing.T) {
-	m, err := provider.NewDestinationManifest(
-		provider.DestinationEdge{Purpose: "agent", Destination: admDest(t, "lit", "http://127.0.0.1:8090")},
-		provider.DestinationEdge{Purpose: "chat", Destination: admDest(t, "none", "http://127.0.0.1:8091")},
-		provider.DestinationEdge{Purpose: "summarize", Destination: admDest(t, "ref", "https://one.example.com")},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out strings.Builder
-	renderManifest(&out, m, map[string]string{
-		"ref": "sends api_key from $CANARY_VAR",
-		"lit": "sends a literal api_key",
-	})
-	want := "destinations:\n" +
-		"  lit  http://127.0.0.1:8090  (local, auto-admitted)\n" +
-		"      agent\n" +
-		"      sends a literal api_key\n" +
-		"  none  http://127.0.0.1:8091  (local, auto-admitted)\n" +
-		"      chat\n" +
-		"  ref  https://one.example.com  (remote)\n" +
-		"      summarize\n" +
-		"      sends api_key from $CANARY_VAR\n"
-	if out.String() != want {
-		t.Errorf("rendered block:\n%s\nwant:\n%s", out.String(), want)
 	}
 }

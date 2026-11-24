@@ -275,6 +275,9 @@ func newModelSwitchFixture(t *testing.T, remoteURL string) modelSwitchFixture {
 	// developer's real config out of the run.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// An inherited GO_LLM_BASE_URL would replace the fixture's local primary
+	// at startup; set to "" it still counts as an override, so unset it.
+	unsetenvForTest(t, sourceEnvBaseURL)
 	primary := newModelBackend(t, "primary", "agent-model", "agent-model-b", "weak-model")
 	alt := newModelBackend(t, "alt", "alt-model")
 	providers := fmt.Sprintf(`"primary": {"base_url": %q, "api_format": "openai-compat", "timeout": "5s"},
@@ -616,6 +619,25 @@ func (c *countingModelSource) goals() []string {
 	return append([]string(nil), c.recorded...)
 }
 
+// checkREPLEndedUnshown asserts runREPL ended on errConsentNotShown with exit
+// status 1 after reading one goal line and the given number of answers, and
+// that the line typed for the question is still the next unread line.
+func checkREPLEndedUnshown(t *testing.T, err error, src *countingModelSource, answers int64, unread string) {
+	t.Helper()
+	if !errors.Is(err, errConsentNotShown) || exitCodeFor(err) != 1 {
+		t.Fatalf("runREPL = %v (exit %d), want errConsentNotShown and exit 1", err, exitCodeFor(err))
+	}
+	if n := src.goalReads.Load(); n != 1 {
+		t.Errorf("ReadGoal calls = %d, want 1: nothing is read after the failure", n)
+	}
+	if n := src.answers.Load(); n != answers {
+		t.Errorf("ReadAnswer calls = %d, want %d", n, answers)
+	}
+	if line, _, _ := src.inner.ReadGoal(context.Background(), ""); line != unread {
+		t.Errorf("next unread line = %q, want %q: no answer is read or discarded", line, unread)
+	}
+}
+
 // newCountingSource wires a scripted scanner behind the counting seam and
 // points destination consent at it, exactly as run() does for the real REPL.
 func newCountingSource(sess *replSession, script string) *countingModelSource {
@@ -714,6 +736,70 @@ func TestModelSetScriptedRemoteConsentConsumesExactlyOneLine(t *testing.T) {
 		}
 		if got := fx.alt.chats.Load(); got != altBefore {
 			t.Errorf("alt served %d requests, want it untouched at %d", got, altBefore)
+		}
+	})
+}
+
+// TestModelSetSectionWriteFailureEndsTheREPL is the scripted consent sequence
+// with a REPL writer that refuses every write: the section cannot be shown, so
+// the REPL ends (exit 1) without reading an answer or another goal. Neither
+// "yes" nor "test prompt" runs as a goal, nothing is switched or admitted,
+// and the "yes" typed for the question is still unread.
+func TestModelSetSectionWriteFailureEndsTheREPL(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		src := newCountingSource(sess, "/model set cloudrole\nyes\ntest prompt\n")
+		sess.destAdmission.setReplOut(failWriter{})
+		before := snapshotModelTuple(sess).withoutTurnState()
+		altBefore, primaryBefore := fx.alt.chats.Load(), fx.primary.chats.Load()
+		err := runREPL(t.Context(), src, io.Discard, nil, sess)
+		checkREPLEndedUnshown(t, err, src, 0, "yes")
+		if !errors.Is(err, provider.ErrDestinationDenied) || !strings.Contains(err.Error(), "model-server section could not be shown") {
+			t.Errorf("err = %v, want the denial saying the section could not be shown", err)
+		}
+		if len(src.goals()) != 0 {
+			t.Errorf("recorded goals = %q, want none", src.goals())
+		}
+		if fx.primary.chats.Load() != primaryBefore || fx.alt.chats.Load() != altBefore {
+			t.Errorf("chat requests after the failure: primary %d, alt %d; want none", fx.primary.chats.Load()-primaryBefore, fx.alt.chats.Load()-altBefore)
+		}
+		if after := snapshotModelTuple(sess).withoutTurnState(); !reflect.DeepEqual(before, after) {
+			t.Errorf("the refused switch changed the model:\nbefore %+v\nafter  %+v", before, after)
+		}
+		if _, err := sess.destAdmission.gate.Bind(context.Background(), modelSetUseCase, "cloud"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("cloud admitted after the refused switch: Bind = %v", err)
+		}
+	})
+}
+
+// TestModelSetQuestionWriteFailureEndsTheREPL: the section prints, but the
+// question's prompt, which the line source prints, does not. The REPL ends the
+// same way: the answer read returns at once, reading nothing.
+func TestModelSetQuestionWriteFailureEndsTheREPL(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		// No REPL writer is bound here, so the section goes to the startup
+		// writer, which works; only the line source's output fails.
+		src := &countingModelSource{inner: newScannerSource(strings.NewReader("/model set cloudrole\nyes\ntest prompt\n"), failWriter{})}
+		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
+		before := snapshotModelTuple(sess).withoutTurnState()
+		altBefore, primaryBefore := fx.alt.chats.Load(), fx.primary.chats.Load()
+		err := runREPL(t.Context(), src, io.Discard, nil, sess)
+		checkREPLEndedUnshown(t, err, src, 1, "yes")
+		if !strings.Contains(err.Error(), "the question could not be shown") {
+			t.Errorf("err = %v, want it to say the question could not be shown", err)
+		}
+		if len(src.goals()) != 0 {
+			t.Errorf("recorded goals = %q, want none", src.goals())
+		}
+		if fx.primary.chats.Load() != primaryBefore || fx.alt.chats.Load() != altBefore {
+			t.Errorf("chat requests after the failure: primary %d, alt %d; want none", fx.primary.chats.Load()-primaryBefore, fx.alt.chats.Load()-altBefore)
+		}
+		if after := snapshotModelTuple(sess).withoutTurnState(); !reflect.DeepEqual(before, after) {
+			t.Errorf("the refused switch changed the model:\nbefore %+v\nafter  %+v", before, after)
+		}
+		if _, err := sess.destAdmission.gate.Bind(context.Background(), modelSetUseCase, "cloud"); !errors.Is(err, provider.ErrDestinationDenied) {
+			t.Errorf("cloud admitted after the refused switch: Bind = %v", err)
 		}
 	})
 }
@@ -1595,18 +1681,14 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 	}
 	var atPrompt string
 	stderr := fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
-		out, ok := sess.destAdmission.out.(*os.File)
-		if !ok {
-			t.Fatalf("admission Out is %T, want the run's stderr file", sess.destAdmission.out)
-		}
-		src := newScannerSource(strings.NewReader("yes\n"), io.Discard)
+		// Bound as run() binds the REPL: the section and the question share
+		// the line source's writer, read here before the answer is.
+		var replOut strings.Builder
+		sess.destAdmission.setReplOut(&replOut)
+		src := newScannerSource(strings.NewReader("yes\n"), &replOut)
 		inner := lineSourcePromptYN(src)
 		sess.destAdmission.setPrompt(func(ctx context.Context, prompt string) (bool, error) {
-			b, err := os.ReadFile(out.Name())
-			if err != nil {
-				t.Fatal(err)
-			}
-			atPrompt = string(b)
+			atPrompt = replOut.String()
 			return inner(ctx, prompt)
 		})
 		got := slash(t, sess, "/model set cloudrole")
@@ -1617,11 +1699,79 @@ func TestModelSetExtensionShowsKeySource(t *testing.T) {
 			t.Errorf("canary leaked into slash output: %q", got)
 		}
 	})
-	if !strings.Contains(atPrompt, "      sends api_key from $CANARY_VAR\n") {
+	// Anchored to the cloud block: the header line, then the value-column
+	// rows down to the key line.
+	if !strings.Contains(atPrompt, "\n  cloud    https://model-switch.invalid/v1  needs your OK\n"+
+		"           used for  chat\n"+
+		"           checks    model list\n"+
+		"           sends api_key from $CANARY_VAR\n") {
 		t.Errorf("extension consent screen missing the key source:\n%s", atPrompt)
 	}
 	if strings.Contains(atPrompt, canary) || strings.Contains(stderr, canary) {
 		t.Errorf("canary leaked into captured output:\n%s", stderr)
+	}
+}
+
+// TestModelSetSectionOnAnswerWriter drives the real REPL through run(): the
+// /model set consent section is drawn on the line source's writer (stdout)
+// before the question is asked there, and none of it reaches stderr. Both
+// orientations run, so neither stream's kind (pipe or file) picks the writer.
+func TestModelSetSectionOnAnswerWriter(t *testing.T) {
+	const question = "Send data to cloud (remote) during this session? [y/N] "
+	const cloudRow = "\n  cloud    https://model-switch.invalid/v1  needs your OK\n"
+	for _, stdoutPipe := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stdout pipe %v", stdoutPipe), func(t *testing.T) {
+			fx := newModelSwitchFixture(t, remoteModelURL)
+			stdin, outFile, errFile := runTestFiles(t)
+			if _, err := stdin.WriteString("/model set cloudrole\nyes\n"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			pr, pw, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+			piped := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(pr)
+				piped <- string(b)
+			}()
+			stdout, stderr := pw, errFile
+			if !stdoutPipe {
+				stdout, stderr = outFile, pw
+			}
+			runErr := run([]string{"-config", fx.configPath, "-root", fx.root,
+				"-no-probe", "-no-cap-probe", "-no-memory", "-no-rag", "-no-project-context",
+				"-no-git-context", "-no-auto-index", "-no-editor", "-no-session"}, stdin, stdout, stderr)
+			_ = pw.Close()
+			outText, errText := <-piped, readRunTestFile(t, errFile)
+			if !stdoutPipe {
+				outText, errText = readRunTestFile(t, outFile), outText
+			}
+			if runErr != nil {
+				t.Fatalf("run = %v\nstdout:\n%s\nstderr:\n%s", runErr, outText, errText)
+			}
+			q := strings.Index(outText, question)
+			if q < 0 {
+				t.Fatalf("question not asked on stdout:\n%s", outText)
+			}
+			s := strings.Index(outText, "\u2500\u2500 model servers")
+			if s < 0 || s > q || !strings.Contains(outText[s:q], cloudRow) {
+				t.Errorf("section not on stdout before the question:\n%s", outText)
+			}
+			var leaks []string
+			for _, leak := range []string{"model-switch.invalid", "needs your OK", "\nRemote\n", question} {
+				if strings.Contains(errText, leak) {
+					leaks = append(leaks, leak)
+				}
+			}
+			if len(leaks) > 0 {
+				t.Errorf("stderr carries %q of the /model set section:\n%s", leaks, errText)
+			}
+		})
 	}
 }
 

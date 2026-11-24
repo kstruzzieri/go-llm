@@ -198,7 +198,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.BoolVar(&full, "full", false, "clean rebuild (drop the existing index first)")
 	fs.BoolVar(&progressive, "progressive", false, "generate opt-in L0/L1 progressive source summaries")
-	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
+	noColor := fs.Bool("no-color", false, "disable ANSI color in the model-server section")
 	var allowDest stringSliceFlag
 	fs.Var(&allowDest, "allow-destination", "admit a remote model destination: \"<provider>/<canonical base URL>\" (repeatable; this command never prompts)")
 	if err := parseQuietly(fs, args, errOut); err != nil {
@@ -228,7 +228,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 	if err != nil {
 		return err
 	}
-	routes := []providerbootstrap.PlannedRoute{{UseCase: "embedding", Chain: embChain}}
+	routes := []providerbootstrap.PlannedRoute{{UseCase: embeddingUseCase, Chain: embChain}}
 	var summarizeChain []string
 	if progressive {
 		summarizeRoute, serr := providerbootstrap.PlanOptionalUseCaseRoute(cfg, config.UseCaseSummarize)
@@ -239,7 +239,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) (runErr
 		summarizeChain = summarizeRoute.Chain
 	}
 	gate, netPlan, _, err := admitForSubcommand(ctx, cfg, routes,
-		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", errOut)
+		providerbootstrap.PlanOptions{}, allowDest, ollamaURL, "", "", "index", *noColor, errOut)
 	if err != nil {
 		return err
 	}

@@ -437,7 +437,7 @@ Inside the REPL, `/help` lists every command: sessions (`/new`, `/clear`, `/resu
 
 `/compact` accepts no arguments and compacts the current session's persisted history. It keeps the newest four completed user/assistant exchanges, including their tool chains, along with system messages and any unresolved tool-call tail, and folds older messages into the existing progressive summary. The summarizer receives only the user and assistant text of the folded messages, never tool results. The command reports history token estimates that count only the user and assistant text Golem replays to the model plus the rendered summary; stored tool results and tool-call details are not counted, so tool-heavy threads show small numbers. The estimates also exclude the live prompt, tool schemas, and current turn. Unless `--no-compress` is set, Golem also compresses on its own after a saved goal once this estimate passes half the input ceiling, folding history down to half of that threshold, so the summary at the start of every request is rewritten once and then left alone for several goals. Every repeat with an existing summary can invoke the summarizer again, with model latency and provider charges even when the result is `(unchanged)`. A `(changed)` result can have a larger estimate, especially for short histories where the summary's trust-boundary wrapper outweighs the removed messages. The command is unavailable with `--no-session` or `--no-compress`. Cancellation or another failure before a successful save preserves the previous session snapshot; only a successful save replaces it.
 
-Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". Writes to agent instruction and harness configuration files are the exception: `write_file` and `edit_file` always prompt `[y/N]` for them, `a` denies, no answer creates a grant, and `/auto-edits` does not cover them (see [Harness files always prompt](#harness-files-always-prompt)). `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants (and, with [`-strict-approval`](#strict-approval--strict-approval), shows the conversation's exposure), and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them — after which the next goal re-runs the admission prompt.
+Approval prompts that offer an `a` answer also accept "always this session", and the prompt names the grant's scope because the two classes are deliberately asymmetric: `a` on a command prompt (`a=always this command`) covers only that exact command, while `a` on an edit prompt (`a=all edits this session`) enables auto-approval for **every** write/edit in the workspace — it is `/auto-edits on`, not "always this file". Writes to agent instruction and harness configuration files are the exception: `write_file` and `edit_file` always prompt `[y/N]` for them, `a` denies, no answer creates a grant, and `/auto-edits` does not cover them (see [Harness files always prompt](#harness-files-always-prompt)). `/auto-edits on|off` toggles the write/edit grant explicitly, `/grants` counts the active session grants (and, with [`-strict-approval`](#strict-approval--strict-approval), shows the conversation's exposure), and `/grants clear` revokes them all without touching history. Grants are in-memory only and die with `/new`, `/clear`, a successful `/resume`, or process exit. Destination admission keeps its own lifetime: admitted destinations survive conversation resets and model switches, `/grants` lists them alongside the approval-grant count, and only `/grants clear` revokes them. After a clear, local and `-allow-destination`-covered servers are re-admitted without a question (unless you answer no, which admits nothing), and the next admission asks about every other remote, including ones approved before the clear; that re-admission prints the model-server section on the REPL's output, as `/model set` does, and if that section cannot be shown when the admission needs your OK, the session ends (exit status 1, or SIGPIPE on a closed output pipe; nothing is admitted) instead of asking, whether the admission comes before a goal, from `/compact`, or from a recipe's model hint. `/grants` shows the model-server section with each remote's state (after a clear, `not allowed (cleared)`, with a line saying access was cleared by `/grants clear`); its uses and `(fallback)` marks are as admitted, not as the routes now stand: a route switched away from stays listed, and a use a later switch made primary can still read `(fallback)`.
 
 `/allow-write` and `/allow-exec` work only in the Trusted profile. They mount exactly the tools the startup flags would, under the session's frozen `-sandbox` policy, with the same approval prompts, undo journal, and post-write verification; they are one-way for the session and never grant approval by themselves. With `-scratch`, promotion stays as it was at startup and `/allow-write` says so. In any other profile, including the default Inspect, they are refused before any store, key or manager is opened, for example `/allow-write is unavailable in profile inspect: restart with -profile trusted -allow-write`; a profile cannot change mid-session, so restart with the named flags. Likewise `/undo`, `/checkpoints`, `/auto-edits` and `/jobs` answer `writes disabled in profile inspect: restart with -profile trusted -allow-write` (or `exec disabled in profile inspect: restart with -profile trusted -allow-exec`) when the capability is not mounted; under Trusted they suggest `/allow-write` or `/allow-exec` instead.
 
@@ -750,15 +750,25 @@ The command runs synchronously in the REPL loop: the next goal is read only
 after it finishes, under the new configuration on success and the old one on
 failure. Ctrl-C cancels resolution and leaves the previous configuration live.
 When the candidate's routes reach a remote destination the session has not
-already been permitted, the existing destination-consent surface renders the
-complete proposed manifest and asks once; the next input line answers that
-prompt exactly as it would for any other prompt, so a line typed after the
+already been permitted, the existing destination-consent surface prints the
+model-server section on the REPL's output (where the question is asked, not
+stderr), names exactly the remotes a yes admits, and asks once; the next input
+line answers that prompt exactly as it would for any other prompt, so a line typed after the
 command is consumed as the answer rather than kept as a future goal. That
 holds for every REPL, terminal or piped: consent is read through the same
 line source as goals, so a script that switches to an uncovered remote must
 either pass `-allow-destination` or supply `y`/`yes` on the line after the
-command — any other line denies. Where no consent prompt is bound at all — the
-headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
+command — any other line denies. If Golem cannot show the section or the
+question (its output fails to write), it never uses an answer to it: it prints
+one line on stderr naming what it could not show and ends the session with exit
+status 1 (a closed output pipe can end it by SIGPIPE instead; nothing is
+admitted either way), so the line typed for the question is never read as a
+goal. On Linux, macOS, the BSDs and the Windows console, Golem then discards
+the input already queued in the terminal, so the shell does not run it (if the
+discard fails, the stderr line says so); text typed after that point, or when a
+closed output pipe ends Golem by SIGPIPE first, still reaches the shell. A tool approval whose question cannot be
+shown ends the session the same way. Where no consent prompt is bound at all —
+the headless modes `-p`, `-plan`, and `-goal -approve-plan-lock`, which have no
 `/model`, and startup admission outside a terminal — an uncovered remote fails
 closed instead and names the exact `-allow-destination` value that would
 cover it. Neither `/model` nor `/model set` is recorded or sent as
@@ -783,8 +793,9 @@ a session grant, and the failure adds
 Reusing an existing grant, a local destination, or an exact
 `-allow-destination` flag grants nothing new and prints no such notice.
 Switching away from a route is not revocation either: `/grants` lists the
-session's destination authority, including routes that are no longer active,
-and `/grants clear` revokes all of it.
+servers the session has admitted or may re-admit, with each remote's state,
+including routes that are no longer active, and `/grants clear` revokes all of
+them (after a clear nothing is admitted until the next admission).
 
 ## golem ops
 

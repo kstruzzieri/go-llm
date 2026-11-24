@@ -106,7 +106,7 @@ func TestRunOneShotOmitsRemoteSummarizeRoute(t *testing.T) {
 		t.Error("local provider received no requests; the one-shot turn cannot have run")
 	}
 	errOut := readRunTestFile(t, stderr)
-	if strings.Contains(errOut, "summarize") || strings.Contains(errOut, "opencode.invalid") {
+	if strings.Contains(errOut, "summaries") || strings.Contains(errOut, "opencode.invalid") {
 		t.Errorf("one-shot admitted unreachable summarize fallback:\n%s", errOut)
 	}
 }
@@ -168,7 +168,7 @@ func TestRunGroundingRoutesJoinTheManifest(t *testing.T) {
 		t.Fatalf("grounding run with remote fallback succeeded\nstderr:\n%s", readRunTestFile(t, stderr))
 	}
 	errOut := readRunTestFile(t, stderr)
-	for _, want := range []string{"verify", "extract"} {
+	for _, want := range []string{"verification", "extraction"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("manifest missing grounding purpose %q:\n%s", want, errOut)
 		}
@@ -224,11 +224,44 @@ func TestRunLocalOnlyRemainsPromptFree(t *testing.T) {
 		t.Fatalf("local-only run: %v\nstderr:\n%s", err, readRunTestFile(t, stderr))
 	}
 	errOut := readRunTestFile(t, stderr)
-	if strings.Contains(errOut, "Allow this session") {
+	if strings.Contains(errOut, "Send data to") {
 		t.Errorf("local-only run prompted for consent:\n%s", errOut)
 	}
-	if !strings.Contains(errOut, "destinations:") {
+	if !strings.Contains(errOut, "\u2500\u2500 model servers") {
 		t.Errorf("manifest not rendered:\n%s", errOut)
+	}
+}
+
+// -p - reads stdin once, as the prompt body, never as a consent answer: a
+// body of "y" leaves the uncovered remote refused with the unchanged
+// noninteractive error, and no question is printed.
+func TestPipedStdinNoConsentRead(t *testing.T) {
+	configPath, root, requests := admissionHarness(t, "https://opencode.invalid/zen/go")
+	stdin, stdout, stderr := runTestFiles(t)
+	if _, err := stdin.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+
+	// -grounding makes the remote analysis fallback reachable in one-shot.
+	err := run([]string{"-config", configPath, "-root", root, "-p", "-", "-grounding",
+		"-no-probe", "-no-cap-probe", "-no-rag", "-no-project-context", "-no-session", "-no-memory"},
+		stdin, stdout, stderr)
+	const want = `provider: destination opencode/https://opencode.invalid/zen/go not admitted for extract; pass -allow-destination "opencode/https://opencode.invalid/zen/go" to permit it`
+	errOut := readRunTestFile(t, stderr)
+	if err == nil || err.Error() != want {
+		t.Fatalf("denial = %v\nwant     %s\nstderr:\n%s", err, want, errOut)
+	}
+	if strings.Contains(errOut, "Send data to") {
+		t.Errorf("-p - asked a consent question:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "  not allowed (needs -allow-destination)\n") {
+		t.Errorf("refused row missing:\n%s", errOut)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Errorf("refused -p - sent %d requests, want 0", got)
 	}
 }
 
@@ -681,9 +714,15 @@ func TestOneShotMachineModeDestinationDenialWritesResultAndExitsTwo(t *testing.T
 		t.Fatalf("machine-mode denial must write exactly one stdout line, got %d:\n%s", len(lines), out)
 	}
 	m := decodeResult(t, lines[0])
-	var recErr struct{ Code string }
+	var recErr struct{ Code, Message string }
 	if err := json.Unmarshal(m["error"], &recErr); err != nil || recErr.Code != "destination_denied" {
 		t.Errorf("error = %s, want code destination_denied", m["error"])
+	}
+	// The machine message keeps its exact bytes (#857): the first uncovered
+	// remote in manifest order, the use case reaching it, and the flag.
+	const wantMsg = `provider: destination opencode/https://opencode.invalid/zen/go not admitted for agent; pass -allow-destination "opencode/https://opencode.invalid/zen/go" to permit it`
+	if recErr.Message != wantMsg {
+		t.Errorf("error.message = %q\nwant            %q", recErr.Message, wantMsg)
 	}
 }
 
@@ -885,7 +924,13 @@ func TestStartupAdmissionShowsKeySource(t *testing.T) {
 		t.Fatal("keyed remote without consent was admitted")
 	}
 	errOut := readRunTestFile(t, stderr)
-	if !strings.Contains(errOut, "      sends api_key from $CANARY_VAR\n") {
+	// Anchored to the opencode block: the header line, then the value-column
+	// rows down to the key line.
+	if !strings.Contains(errOut, "\n  opencode  https://opencode.invalid/zen/go\n"+
+		"            not allowed (needs -allow-destination)\n"+
+		"            used for  extraction, verification\n"+
+		"            checks    model list\n"+
+		"            sends api_key from $CANARY_VAR\n") {
 		t.Errorf("startup consent screen missing the key source:\n%s", errOut)
 	}
 	for name, got := range map[string]string{"stderr": errOut, "stdout": readRunTestFile(t, stdout)} {
