@@ -203,6 +203,10 @@ func TestDecideRecallRun(t *testing.T) {
 		{"run 3", func(in *recallDecisionInput) { in.Run = 3 }, recallFail},
 		{"determinism missing primary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallPrimaryModel) }, recallFail},
 		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, "b") }, recallFail},
+		{"extra determinism model", func(in *recallDecisionInput) { in.DeterminismChanges["c"] = 0 }, recallFail},
+		{"secondary holds primary", func(in *recallDecisionInput) {
+			in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pass: true}
+		}, recallFail},
 		{"stopped beats invalid input", func(in *recallDecisionInput) { in.Stopped = true; in.G1 = nil }, recallStopped},
 		{"invalid beats fail", func(in *recallDecisionInput) { in.DeterminismChanges[recallPrimaryModel] = 2; in.MaxLabelTokens = 99 }, recallInvalid},
 	}
@@ -233,27 +237,24 @@ func TestRecallDecisionInputValidate(t *testing.T) {
 
 func TestNewcombePairedCI(t *testing.T) {
 	tests := []struct {
-		name           string
-		a, b, c, d     int
-		wantLo, wantHi float64
+		name                string
+		a, b, c, d          int
+		wantLo, wantHi, tol float64
 	}{
-		{"39-1-0-0", 39, 1, 0, 0, -0.065, 0.129},
-		{"40-0-0-0", 40, 0, 0, 0, -0.088, 0.088},
-		{"newcombe-1998", 36, 12, 2, 0, 0.0569, 0.3404},
+		{"39-1-0-0", 39, 1, 0, 0, -0.065, 0.129, 5e-4},
+		{"40-0-0-0", 40, 0, 0, 0, -0.088, 0.088, 5e-4},
+		{"newcombe-1998", 36, 12, 2, 0, 0.0569, 0.3404, 5e-5},
 	}
 	for _, tc := range tests {
 		lo, hi := newcombePairedCI(tc.a, tc.b, tc.c, tc.d)
-		if math.Abs(lo-tc.wantLo) > 5e-4 || math.Abs(hi-tc.wantHi) > 5e-4 {
-			t.Errorf("%s: hi=%v lo=%v want hi %v", tc.name, hi, lo, tc.wantHi)
+		if math.Abs(lo-tc.wantLo) > tc.tol || math.Abs(hi-tc.wantHi) > tc.tol {
+			t.Errorf("%s: want lo %v hi %v, got lo %v hi %v (tol %g)", tc.name, tc.wantLo, tc.wantHi, lo, hi, tc.tol)
 		}
 	}
 	for _, n := range []int{5, 13, 19, 20} {
 		lo, hi := newcombePairedCI(n, 0, 0, n)
 		if math.IsNaN(lo) || math.IsNaN(hi) || math.Abs(lo) > 1e-8 || math.Abs(hi) > 1e-8 {
-			t.Errorf("(%d,0,0,%d): got %v %v", n, n, lo, hi)
-		}
-		if n < 20 && (lo != 0 || hi != 0) {
-			t.Errorf("(%d,0,0,%d): not exactly zero: %v %v", n, n, lo, hi)
+			t.Errorf("(%d,0,0,%d): want lo 0 hi 0 (tol 1e-8), got lo %v hi %v", n, n, lo, hi)
 		}
 	}
 	if lo, hi := newcombePairedCI(0, 0, 0, 0); lo != 0 || hi != 0 {
@@ -271,6 +272,13 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		fmt.Sprintf("%d or more changed outcomes", recallDeterminismMaxChanges+1),
 		fmt.Sprintf("at most %d prompt tokens", recallLabelMaxTokens),
 		fmt.Sprintf("at most %d of the 12", recallHeadroomMaxRely),
+		"re-checked, searched again, or gave no value",
+		"counts for neither side",
+		"not counted among arm 1's answers",
+		"harness error",
+		"never a gate outcome",
+		"invalid-final",
+		fmt.Sprintf("a run number other than 1 or %d", 2),
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",
 	} {
 		if !strings.Contains(recallDecisionRuleText, want) {

@@ -47,13 +47,13 @@ const (
 // a const); TestRecallDecisionRuleTextNamesConstants builds each phrase from
 // the constants so the text cannot drift from them.
 const recallDecisionRuleText = `recall label decision rule (registered):
-G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm did not (it re-checked, searched again, or gave no value); C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p < 0.025.
-G2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair is a slip. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.
+G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm instead re-checked, searched again, or gave no value; every other pair (for example a memory write, another tool call, another value, or an empty reply) counts for neither side; C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p < 0.025.
+G2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair counts as a slip and is not counted among arm 1's answers. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.
 G5: the label costs at most 10 prompt tokens per labeled record, on each model.
 Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
 Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
-Incomplete input (a missing comparison, repeat count, label measurement or run number) fails the gate.
-Order: stopped, then invalid, then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
+The report refuses to decide on incomplete input (a missing comparison, a model without G2 pairs or a determinism count, an unmeasured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
+Order: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 
 // recallAPair is one question's Part A outcome in a baseline and a labeled arm.
@@ -135,9 +135,11 @@ type recallG2Result struct {
 	Inconclusive, Pass   bool
 }
 
-// evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it counts slips (baseline answered, labeled declined or was
-// wrong, or the pair is missing). Too many slips fail; otherwise a primary
-// whose arm 1 answered fewer than recallBaselineMin is inconclusive.
+// evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it
+// counts slips (baseline answered and labeled declined or was wrong, or the
+// pair is missing; a missing pair is not an arm 1 answer). Too many slips
+// fail; otherwise a primary whose arm 1 answered fewer than
+// recallBaselineMin is inconclusive.
 func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2Result {
 	var r recallG2Result
 	for _, p := range pairs {
@@ -196,8 +198,8 @@ type recallDecisionInput struct {
 	PrimaryG2 recallG2Result
 	// SecondaryG2 is each other local model's safety result.
 	SecondaryG2 map[string]recallG2Result
-	// MaxLabelTokens is the largest per-pair arm 2 minus arm 1 prompt tokens;
-	// 0 means not measured.
+	// MaxLabelTokens is the largest arm 2 minus arm 1 prompt-token difference
+	// over every labeled pair on every model; 0 means not measured.
 	MaxLabelTokens int
 }
 
@@ -221,16 +223,26 @@ func (in recallDecisionInput) validate() error {
 	if _, ok := in.DeterminismChanges[recallPrimaryModel]; !ok {
 		return fmt.Errorf("recall: no determinism count for %s", recallPrimaryModel)
 	}
+	if _, ok := in.SecondaryG2[recallPrimaryModel]; ok {
+		return fmt.Errorf("recall: SecondaryG2 must not hold the primary model %s", recallPrimaryModel)
+	}
 	for m := range in.SecondaryG2 {
 		if _, ok := in.DeterminismChanges[m]; !ok {
 			return fmt.Errorf("recall: no determinism count for %s", m)
+		}
+	}
+	for m := range in.DeterminismChanges {
+		if _, ok := in.SecondaryG2[m]; m != recallPrimaryModel && !ok {
+			return fmt.Errorf("recall: model %s has a determinism count but no G2 result", m)
 		}
 	}
 	return nil
 }
 
 // decideRecallRun applies the registered order: stopped, determinism, fail,
-// inconclusive, pass. Fail beats inconclusive.
+// inconclusive, pass. Fail beats inconclusive. Task 7 calls validate first
+// and returns its error as a harness error, so the recallFail returned here
+// on a validate error is defensive only.
 func decideRecallRun(in recallDecisionInput) recallVerdict {
 	if in.Stopped {
 		return recallStopped
