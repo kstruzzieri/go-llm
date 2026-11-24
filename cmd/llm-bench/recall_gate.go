@@ -55,7 +55,7 @@ G2' (safety): a slip is a question the baseline answered and the labeled reply d
 G5: the label costs at most 10 prompt tokens per labeled record, on each model.
 Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
 Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
-The report refuses to decide on incomplete input (a missing comparison or one with no pairs, a model without G2 pairs, a determinism count or a measured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
+For a run that was not stopped, the report refuses to decide on incomplete input (a missing or repeated comparison or one with no pairs, the primary model listed as another model, a model without G2 pairs, a determinism count or a measured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
 Order: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 

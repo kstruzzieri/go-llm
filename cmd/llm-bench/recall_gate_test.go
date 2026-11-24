@@ -219,11 +219,11 @@ func TestRecallDecisionInputValidate(t *testing.T) {
 			Run:                1,
 			DeterminismChanges: map[string]int{recallPrimaryModel: 0, "b": 0},
 			G1: []recallG1Result{
-				{Comparison: recallCompareArm1, B: 1},
-				{Comparison: recallCompareArm0, Neither: 1},
+				{Comparison: recallCompareArm1, B: 8, Pass: true},
+				{Comparison: recallCompareArm0, B: 8, Pass: true},
 			},
-			PrimaryG2:   recallG2Result{Pairs: 1},
-			SecondaryG2: map[string]recallG2Result{"b": {Pairs: 1}},
+			PrimaryG2:   recallG2Result{Pairs: 40, Pass: true},
+			SecondaryG2: map[string]recallG2Result{"b": {Pairs: 40, Pass: true}},
 			LabelTokens: map[string]int{recallPrimaryModel: 1, "b": 1},
 		}
 	}
@@ -241,7 +241,9 @@ func TestRecallDecisionInputValidate(t *testing.T) {
 		{"run 3", func(in *recallDecisionInput) { in.Run = recallMaxRun + 1 }, false},
 		{"zero-value primary G2", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{} }, false},
 		{"zero-pair secondary G2", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{} }, false},
-		{"secondary holds primary", func(in *recallDecisionInput) { in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pairs: 1} }, false},
+		{"secondary holds primary", func(in *recallDecisionInput) {
+			in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pairs: 40, Pass: true}
+		}, false},
 		{"determinism missing primary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallPrimaryModel) }, false},
 		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, "b") }, false},
 		{"determinism extra model", func(in *recallDecisionInput) { in.DeterminismChanges["c"] = 0 }, false},
@@ -255,8 +257,12 @@ func TestRecallDecisionInputValidate(t *testing.T) {
 		if err := in.validate(); (err == nil) != tc.ok {
 			t.Errorf("%s: err=%v want ok=%v", tc.name, err, tc.ok)
 		}
-		if !tc.ok && decideRecallRun(in) != recallFail {
-			t.Errorf("%s: decideRecallRun did not fail closed", tc.name)
+		want := recallFail
+		if tc.ok {
+			want = recallPass
+		}
+		if got := decideRecallRun(in); got != want {
+			t.Errorf("%s: decideRecallRun = %v, want %v", tc.name, got, want)
 		}
 	}
 }
@@ -306,7 +312,9 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		"never a gate outcome",
 		string(recallInvalidFinal),
 		fmt.Sprintf("a run number other than 1 or %d", recallMaxRun),
-		"a missing comparison or one with no pairs",
+		"a run that was not stopped",
+		"a missing or repeated comparison",
+		"the primary model listed as another model",
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",
 	} {
 		if !strings.Contains(recallDecisionRuleText, want) {

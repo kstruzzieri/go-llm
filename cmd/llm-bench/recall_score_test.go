@@ -75,6 +75,7 @@ func TestClassifyRecallA(t *testing.T) {
 		{"no value", Turn{Content: "Let me ask: which file?"}, recallNoValue},
 		{"other number", Turn{Content: "See line 12"}, recallOtherValue},
 		{"changed", Turn{Content: "It is 8"}, recallOtherValue},
+		{"version string", Turn{Content: "upgrade to version 5.0.1"}, recallNoValue},
 	} {
 		if got := classifyRecallA(ev, c.reply); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
@@ -187,6 +188,9 @@ func TestStatesValueVersionAndWords(t *testing.T) {
 		if got := statesValue(in, v, "5"); got != want {
 			t.Errorf("statesValue(%q) = %v, want %v", in, got, want)
 		}
+	}
+	if statesValue("bump to 1.2.0", v, "1.2") {
+		t.Error("version string stated a decimal")
 	}
 	if statesValue("version 5.0.1", v, "5.0") || statesValue("version 5.0.1", v, "5") {
 		t.Error("version string stated a number")

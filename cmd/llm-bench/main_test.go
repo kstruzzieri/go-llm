@@ -1178,7 +1178,7 @@ func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
 	}
 }
 
-func TestMainRecallRequiresRegisteredCaptureFlow(t *testing.T) {
+func TestMainRefusesRecallTraces(t *testing.T) {
 	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -1199,7 +1199,7 @@ func TestMainRecallRequiresRegisteredCaptureFlow(t *testing.T) {
 	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "recall traces cannot be replayed by this build yet") {
-		t.Fatalf("ordinary recall run did not fail with capture guidance: %v\n%s", err, out)
+		t.Fatalf("recall trace run was not refused: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(reportPath); !os.IsNotExist(err) {
 		t.Fatalf("report created before refusing: %v", err)
