@@ -314,7 +314,9 @@ func recallWilson(x, n, z float64) (lo, hi float64) {
 
 // newcombePairedCI is Newcombe (1998) method 10 for the difference of paired
 // proportions p1-p2 from the 2x2 cells (a both yes, b yes/no, c no/yes, d both
-// no). Descriptive only; never compared with a threshold.
+// no). Descriptive only; never compared with a threshold. phi follows
+// Newcombe (1998) method 10 as described by Fagerland, Lydersen and Laake
+// (2014): when ad > bc the numerator is max(ad-bc-n/2, 0), otherwise ad-bc.
 func newcombePairedCI(a, b, c, d int) (lo, hi float64) {
 	n := float64(a + b + c + d)
 	if n == 0 {
@@ -326,7 +328,11 @@ func newcombePairedCI(a, b, c, d int) (lo, hi float64) {
 	l2, u2 := recallWilson(float64(a+c), n, z)
 	phi := 0.0
 	if den := math.Sqrt(float64(a+b) * float64(c+d) * float64(a+c) * float64(b+d)); den != 0 {
-		phi = (float64(a)*float64(d) - float64(b)*float64(c)) / den
+		num := float64(a)*float64(d) - float64(b)*float64(c)
+		if num > 0 {
+			num = math.Max(num-n/2, 0)
+		}
+		phi = num / den
 	}
 	delta := p1 - p2
 	// Rounding can push a radicand slightly negative (phi = 1); clamp it.

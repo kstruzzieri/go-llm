@@ -1428,7 +1428,8 @@ func TestReplayAttempt_SessionIDReachesHeader(t *testing.T) {
 	}
 }
 
-// Recall traces (#864) run through -calibrate-capture like injection traces.
+// -replay-attempt never runs recall traces; like injection traces they go through
+// -calibrate-capture, which refuses them in this build until the recall registration lands.
 func TestReplayAttemptRefusesRecallTrace(t *testing.T) {
 	srv := newCompatServer(t)
 	path := filepath.Join(t.TempDir(), "recall.json")

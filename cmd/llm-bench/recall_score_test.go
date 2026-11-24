@@ -229,6 +229,8 @@ func TestClassifyRecallAOrderAndSpec(t *testing.T) {
 		{"search (?i) identifier", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"(?i)MAXRETRIES"}`)}}, recallRecheck},
 		{"search id lesson", idEv, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"RETRY.max_attempts"}`)}}, recallRecheck},
 		{"string envelope", ev, Turn{Content: "It is 5", ToolCalls: []ToolCall{recallCall("read_file", `"{\"path\":\"config/retry.go\"}"`)}}, recallRecheck},
+		{"search empty identifier", RecallEval{Value: RecallValue{Type: "number", Identifier: "", Lesson: "5", Changed: "7"}}, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"zzz"}`)}}, recallOtherTool},
+		{"search empty id lesson", RecallEval{Value: RecallValue{Type: "identifier", Identifier: "mode", Lesson: "", Changed: "slow"}}, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"zzz"}`)}}, recallOtherTool},
 		{"one pronoun", ev, Turn{Content: "Which one do you mean?"}, recallNoValue},
 		{"one pronoun lesson 2", RecallEval{Value: RecallValue{Type: "number", Identifier: "n", Lesson: "2", Changed: "1"}}, Turn{Content: "Which one?"}, recallNoValue},
 	} {

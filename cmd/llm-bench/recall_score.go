@@ -235,13 +235,14 @@ func isRecallRecheck(ev RecallEval, call ToolCall) bool {
 	case "search":
 		pat, _ := args["pattern"].(string)
 		lower := strings.ToLower(pat)
-		if strings.Contains(lower, strings.ToLower(ev.Value.Identifier)) {
+		// An empty needle matches every pattern; it must never read as a re-check.
+		if id := ev.Value.Identifier; id != "" && strings.Contains(lower, strings.ToLower(id)) {
 			return true
 		}
 		if ev.Value.Type == "number" {
 			return recallNumberInPattern(pat, ev.Value.Lesson)
 		}
-		return strings.Contains(lower, strings.ToLower(ev.Value.Lesson))
+		return ev.Value.Lesson != "" && strings.Contains(lower, strings.ToLower(ev.Value.Lesson))
 	}
 	return false
 }

@@ -39,6 +39,16 @@ type RecallValue struct {
 // (injection or recall): registered decoding, raw tool-call channel, one turn.
 func frozenWireTrace(t Trace) bool { return t.Injection != nil || t.Recall != nil }
 
+// anyFrozenWireTrace reports whether any trace is a frozen-wire trace.
+func anyFrozenWireTrace(traces []Trace) bool {
+	for _, t := range traces {
+		if frozenWireTrace(t) {
+			return true
+		}
+	}
+	return false
+}
+
 // anyRecallTrace reports whether any trace carries a recall block.
 func anyRecallTrace(traces []Trace) bool {
 	for _, t := range traces {
@@ -90,6 +100,16 @@ func validateRecallTrace(t Trace) error {
 		for _, f := range vals[1:] {
 			if !recallNumberPattern.MatchString(f.v) {
 				return fmt.Errorf("recall: value.%s %q is not a canonical number token", f.name, f.v)
+			}
+		}
+	}
+	if r.Value.Type == "number" {
+		for _, f := range vals[1:] {
+			// Values 0 and 1 are rejected: fixture number values are 2..20 and the
+			// scorer drops the pronoun "one" from its number words, so it cannot
+			// recognize 1.
+			if f.v == "0" || f.v == "1" {
+				return fmt.Errorf("recall: value.%s %q must not be 0 or 1", f.name, f.v)
 			}
 		}
 	}

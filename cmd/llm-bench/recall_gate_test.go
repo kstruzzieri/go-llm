@@ -276,6 +276,10 @@ func TestNewcombePairedCI(t *testing.T) {
 		{"39-1-0-0", 39, 1, 0, 0, -0.065, 0.129, 5e-4},
 		{"40-0-0-0", 40, 0, 0, 0, -0.088, 0.088, 5e-4},
 		{"newcombe-1998", 36, 12, 2, 0, 0.0569, 0.3404, 5e-5},
+		{"13-0-0-13", 13, 0, 0, 13, -0.0704, 0.0704, 5e-4},
+		{"5-0-0-5", 5, 0, 0, 5, -0.1666, 0.1666, 5e-4},
+		{"38-1-0-1", 38, 1, 0, 1, -0.0730, 0.1350, 5e-4},
+		{"30-5-2-3", 30, 5, 2, 3, -0.0672, 0.2194, 5e-4},
 	}
 	for _, tc := range tests {
 		lo, hi := newcombePairedCI(tc.a, tc.b, tc.c, tc.d)
@@ -283,10 +287,10 @@ func TestNewcombePairedCI(t *testing.T) {
 			t.Errorf("%s: want lo %v hi %v, got lo %v hi %v (tol %g)", tc.name, tc.wantLo, tc.wantHi, lo, hi, tc.tol)
 		}
 	}
-	for _, n := range []int{5, 13, 19, 20} {
-		lo, hi := newcombePairedCI(n, 0, 0, n)
-		if math.IsNaN(lo) || math.IsNaN(hi) || math.Abs(lo) > 1e-8 || math.Abs(hi) > 1e-8 {
-			t.Errorf("(%d,0,0,%d): want lo 0 hi 0 (tol 1e-8), got lo %v hi %v", n, n, lo, hi)
+	for _, tc := range [][4]int{{5, 0, 0, 5}, {13, 0, 0, 13}, {20, 0, 0, 20}, {1, 0, 0, 0}, {0, 0, 0, 1}, {0, 5, 0, 0}, {0, 0, 5, 0}, {7, 3, 3, 7}} {
+		lo, hi := newcombePairedCI(tc[0], tc[1], tc[2], tc[3])
+		if math.IsNaN(lo) || math.IsNaN(hi) || lo < -1 || hi > 1 || lo > hi {
+			t.Errorf("%v: bad interval %v %v", tc, lo, hi)
 		}
 	}
 	if lo, hi := newcombePairedCI(0, 0, 0, 0); lo != 0 || hi != 0 {
@@ -316,6 +320,7 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		"a missing or repeated comparison",
 		"the primary model listed as another model",
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",
+		strings.TrimPrefix(recallPrimaryModel, "openai-compat/"),
 	} {
 		if !strings.Contains(recallDecisionRuleText, want) {
 			t.Errorf("rule text missing %q", want)
