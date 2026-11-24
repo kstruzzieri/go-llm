@@ -79,37 +79,42 @@ func normalizeRecallNumber(t string) string {
 // and states nothing; a number word counts only when both neighbors are
 // outside [A-Za-z0-9_]. In pattern mode only digit tokens count, and a letter
 // directly preceded by a backslash (a regex escape such as \b) does not block
-// the token's left side.
+// the token's left side, and "\." counts as ".".
 func recallNumberTokens(content string, pattern bool) []string {
 	var out []string
 	for i := 0; i < len(content); {
 		c := content[i]
 		switch {
 		case recallIsDigit(c):
-			j := i
-			for j < len(content) && recallIsDigit(content[j]) {
-				j++
-			}
-			if j+1 < len(content) && content[j] == '.' && recallIsDigit(content[j+1]) {
-				j++
+			// Collect ".<digits>" groups; in pattern mode "\." counts as ".".
+			// One group is a decimal, more than one is a version string.
+			j, groups := i, 0
+			var tok strings.Builder
+			for {
 				for j < len(content) && recallIsDigit(content[j]) {
+					tok.WriteByte(content[j])
 					j++
 				}
-			}
-			version := false
-			for j+1 < len(content) && content[j] == '.' && recallIsDigit(content[j+1]) {
-				version = true
-				j++
-				for j < len(content) && recallIsDigit(content[j]) {
-					j++
+				d := 0
+				if j < len(content) && content[j] == '.' {
+					d = 1
+				} else if pattern && j+1 < len(content) && content[j] == '\\' && content[j+1] == '.' {
+					d = 2
 				}
+				if d == 0 || j+d >= len(content) || !recallIsDigit(content[j+d]) {
+					break
+				}
+				tok.WriteByte('.')
+				j += d
+				groups++
 			}
+			version := groups > 1
 			left := i == 0 || (!recallIsWordByte(content[i-1]) && content[i-1] != '.')
 			if !left && pattern && i >= 2 && recallIsLetter(content[i-1]) && content[i-2] == '\\' {
 				left = true
 			}
 			if left && !version {
-				out = append(out, normalizeRecallNumber(content[i:j]))
+				out = append(out, normalizeRecallNumber(tok.String()))
 			}
 			i = j
 		case recallIsLetter(c):
@@ -129,10 +134,10 @@ func recallNumberTokens(content string, pattern bool) []string {
 	return out
 }
 
-// recallIdentifierBlocked reports whether the byte at content[at] (moving outward by
-// step) blocks an identifier match: word bytes and '.'/'-' block, except that
-// a '.' or '-' followed outward by end of text or a non-word byte is
-// sentence punctuation.
+// recallIdentifierBlocked reports whether the byte at content[at] (moving
+// outward by step) blocks an identifier match: word bytes and '.'/'-' block,
+// except that a '.' or '-' followed outward by end of text or a non-word byte
+// is sentence punctuation.
 func recallIdentifierBlocked(content string, at, step int) bool {
 	if at < 0 || at >= len(content) {
 		return false
@@ -283,8 +288,8 @@ func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 }
 
 // classifyRecallB classifies a Trace B reply (a call whose arguments do not
-// decode counts as no call, so it cannot make a reply continue); bothStated is set on S1 replies
-// that state both the lesson and the changed value.
+// decode counts as no call, so it cannot make a reply continue); bothStated
+// is set on S1 replies that state both the lesson and the changed value.
 func classifyRecallB(ev RecallEval, reply Turn) (outcome recallBOutcome, bothStated bool) {
 	v := ev.Value
 	s1 := len(ev.Cases) > 0 && ev.Cases[0] == "S1"

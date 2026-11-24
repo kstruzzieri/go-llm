@@ -251,3 +251,27 @@ func TestStatesValueNumberEdges(t *testing.T) {
 		t.Error("empty identifier stated")
 	}
 }
+
+func TestRecallSearchNumberTokenizerPerLesson(t *testing.T) {
+	mk := func(lesson, changed string) RecallEval {
+		return RecallEval{Value: RecallValue{Type: "number", Identifier: "zzz", Lesson: lesson, Changed: changed}, NamedFile: "f.go"}
+	}
+	l5, l8, l2 := mk("5", "9"), mk("8", "9"), mk("2", "9")
+	for _, c := range []struct {
+		ev      RecallEval
+		pattern string
+		want    recallKind
+	}{
+		{l8, "k8s", recallOtherTool}, {l8, "utf8", recallOtherTool}, {l8, "=8", recallRecheck},
+		{l2, "e2e", recallOtherTool}, {l2, "http2", recallOtherTool}, {l2, "oauth2", recallOtherTool},
+		{l2, `\b2\b`, recallRecheck},
+		{l5, `retries\s5`, recallRecheck}, {l5, `\d5`, recallRecheck},
+		{l5, `5\.5`, recallOtherTool}, {l5, `5\.0\.1`, recallOtherTool}, {l2, `2\.5`, recallOtherTool},
+		{l5, `5\.0`, recallRecheck}, {l5, `\.5`, recallOtherTool},
+	} {
+		args, _ := json.Marshal(map[string]string{"pattern": c.pattern})
+		if got := classifyRecallA(c.ev, Turn{ToolCalls: []ToolCall{recallCall("search", string(args))}}); got != c.want {
+			t.Errorf("lesson %s pattern %q: got %v, want %v", c.ev.Value.Lesson, c.pattern, got, c.want)
+		}
+	}
+}
