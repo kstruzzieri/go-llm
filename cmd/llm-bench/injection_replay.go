@@ -47,6 +47,18 @@ func replayInjection(ctx context.Context, client candidateChatClient, model stri
 	if err != nil {
 		return replayOutput{}, err
 	}
+	if trace.Recall != nil {
+		// Provider normalization can lose an entire batch on one malformed
+		// call, or turn omitted arguments into {}. Score the wire calls individually.
+		resp.Message.ToolCalls = nil
+		for _, raw := range resp.RawToolCalls {
+			if args, ok := decodeRawArgs(raw.Arguments); ok {
+				resp.Message.ToolCalls = append(resp.Message.ToolCalls, ollama.ToolCall{
+					ID: raw.ID, Function: ollama.ToolCallFunction{Name: raw.Name, Arguments: args},
+				})
+			}
+		}
+	}
 	turn, err := assistantTurnFromMessage(resp.Message)
 	if err != nil {
 		return replayOutput{}, err

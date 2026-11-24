@@ -148,7 +148,7 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx, SessionID: r.CandidateSessionID}
-	if trace.Injection != nil {
+	if frozenWireTrace(trace) {
 		decoding, ok := r.InjectionDecoding[target.Display]
 		if !ok {
 			cancel()
@@ -309,10 +309,12 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 //   - Candidate emits a fully empty reply (no content, no tool calls):
 //     errEmptyAssistantReply.
 //
+// Frozen-wire traces (injection, recall) dispatch to replayInjection.
+//
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
-	if trace.Injection != nil {
+	if frozenWireTrace(trace) {
 		return replayInjection(ctx, client, model, trace, opts)
 	}
 	if prefilledAssemblyMode(trace) {

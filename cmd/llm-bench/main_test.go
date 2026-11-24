@@ -1177,3 +1177,49 @@ func TestDefaultJudgeRefusesWorkingDirKey(t *testing.T) {
 		t.Errorf("bad message: %v", err)
 	}
 }
+
+func TestMainRefusesRecallTraces(t *testing.T) {
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "recall.json")
+	raw, err := json.Marshal(validRecallTrace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tracePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assembly := `{"id":"assembly","system":"sys","turns":[{"role":"user","content":"question"}],"assembly_eval":{"mode":"topline","pair_id":"pair"}}`
+	if err := os.WriteFile(filepath.Join(dir, "assembly.json"), []byte(assembly), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, traces, outputFlag, wantError string
+		flags                               []string
+	}{
+		{"plain", tracePath, "-report", "recall traces cannot be replayed by this build yet", []string{"-scorer", "exact-match"}},
+		{"mixed assembly capture", filepath.Join(dir, "*.json"), "-labels-out", errRecallCaptureRegistration.Error(), []string{"-calibrate-capture"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "out")
+			args := append([]string{"-traces", tc.traces, "-models", "fake", "-ollama-url", server.URL, tc.outputFlag, outPath}, tc.flags...)
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(out), tc.wantError) {
+				t.Fatalf("recall trace run was not refused: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+				t.Fatalf("output created before refusing: %v", err)
+			}
+			if n := hits.Load(); n != 0 {
+				t.Fatalf("candidate server saw %d request(s) before the refusal", n)
+			}
+		})
+	}
+}

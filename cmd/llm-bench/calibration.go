@@ -1070,6 +1070,8 @@ func emitCaptureManifestDigest(raw []byte, stdout io.Writer) {
 	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
 }
 
+var errRecallCaptureRegistration = errors.New("calibrate-capture: recall traces need a recall registration, which this build does not load yet")
+
 // runCalibrateCapture replays each (trace, candidate) cell — retrying every
 // failed cell exactly once in-run (the registered one-retry policy) — and
 // writes one Artifact per captured cell to OutputPath as JSONL. Artifacts
@@ -1099,9 +1101,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 		seenTargets[key] = struct{}{}
 	}
+	if anyRecallTrace(opts.Traces) {
+		// The later recall-registration wiring replaces this refusal and must keep the frozen-wire switch below.
+		return errRecallCaptureRegistration
+	}
 	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
-	injectionCapture := anyInjectionTrace(opts.Traces)
-	if injectionCapture {
+	frozenWireCapture := anyFrozenWireTrace(opts.Traces)
+	if frozenWireCapture {
 		if assemblyCapture {
 			return errors.New("calibrate-capture: injection and assembly traces cannot share one capture")
 		}
@@ -1110,7 +1116,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 	}
 	captureTemp := assemblyCaptureTemperature
-	if injectionCapture {
+	if frozenWireCapture {
 		for i, target := range opts.Targets {
 			temp, ok := opts.InjectionTemperatures[target.Display]
 			if !ok {
@@ -1123,7 +1129,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 	}
 	var endpoint, transport string
-	if assemblyCapture || injectionCapture {
+	if assemblyCapture || frozenWireCapture {
 		var err error
 		endpoint, transport, err = captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
 		if err != nil {
@@ -1204,13 +1210,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	// timeout is context.DeadlineExceeded and stays a real failure.
 	var interrupted error
 	isCtxErr := func(err error) bool {
-		return injectionCapture && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+		return frozenWireCapture && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	}
 	cutOff := func(err error) bool { // only consulted once interrupted is set
-		return injectionCapture && errors.Is(err, context.Canceled)
+		return frozenWireCapture && errors.Is(err, context.Canceled)
 	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
-	if err == nil && injectionCapture && ctx.Err() != nil {
+	if err == nil && frozenWireCapture && ctx.Err() != nil {
 		err = ctx.Err()
 	}
 	if err != nil {
@@ -1261,7 +1267,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			continue
 		}
 		retryResults, err := opts.Runner.RunAll(ctx, []ModelTarget{target}, retryTraces)
-		if err == nil && injectionCapture && ctx.Err() != nil {
+		if err == nil && frozenWireCapture && ctx.Err() != nil {
 			err = ctx.Err()
 		}
 		if err != nil {
@@ -1326,7 +1332,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 				row.PairID = c.trace.AssemblyEval.PairID
 			}
 		}
-		if injectionCapture {
+		if frozenWireCapture {
 			row.AttemptErrors = c.errs
 		}
 		switch {
@@ -1397,7 +1403,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	// fails loudly. Non-assembly captures stay manifest-free.
 	var manifestPath string
 	var manifestRaw []byte
-	if assemblyCapture || injectionCapture {
+	if assemblyCapture || frozenWireCapture {
 		targets := make([]captureManifestTarget, 0, len(opts.Targets))
 		for _, target := range opts.Targets {
 			targets = append(targets, captureManifestTarget{
@@ -1420,7 +1426,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			Expected:             expected,
 			RequestedTraces:      requestedTraces,
 		}
-		if injectionCapture {
+		if frozenWireCapture {
 			manifest.SchemaVersion = captureManifestSchemaVersionV3
 			manifest.RegistrationDigest = opts.RegistrationDigest
 			manifest.Decoding = captureDecoding{Temperature: captureTemp}
@@ -1584,15 +1590,16 @@ func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
 }
 
 // captureProvenance builds the controlled-capture provenance for one
-// result, or nil for non-assembly traces so their artifacts stay
-// byte-identical to the pre-3c shape. Prompt/gen tokens come from the
-// replay usage carried on Result.Score; capturedOrders is the label map the
-// actual capture order was derived from (counterbalanceCaptureTraces), the
-// single source for CapturedOrder. temp is the temperature the request was
-// sent with: assemblyCaptureTemperature, or the model's registered injection
-// temperature.
+// result, or nil for traces that are neither prefilled assembly nor
+// frozen-wire (injection, recall) so their artifacts stay byte-identical to
+// the pre-3c shape. Prompt/gen tokens come from the replay usage carried on
+// Result.Score; capturedOrders is the label map the actual capture order was
+// derived from (counterbalanceCaptureTraces), the single source for
+// CapturedOrder. temp is the temperature the request was sent with:
+// assemblyCaptureTemperature for assembly traces, or the model's registered
+// temperature for frozen-wire traces.
 func captureProvenance(trace Trace, r Result, temp float64, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
-	if !prefilledAssemblyMode(trace) && trace.Injection == nil {
+	if !prefilledAssemblyMode(trace) && !frozenWireTrace(trace) {
 		return nil
 	}
 	prov := &CaptureProvenance{

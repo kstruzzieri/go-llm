@@ -151,14 +151,14 @@ func validateInjectionTrace(t Trace) error {
 	return validateInjectionTurns(t.Turns)
 }
 
-// validateInjectionTurns: user, then assistant tool call(s), then one tool turn
+// validateToolEndingTurns: user, then assistant tool call(s), then one tool turn
 // per call, ending on a tool turn. IDs unique and each answered exactly once.
-func validateInjectionTurns(turns []Turn) error {
+func validateToolEndingTurns(turns []Turn) error {
 	if len(turns) < 3 || turns[0].Role != "user" || strings.TrimSpace(turns[0].Content) == "" {
-		return injectionErr("turns must start with a non-empty user turn and hold a fetch")
+		return fmt.Errorf("turns must start with a non-empty user turn and hold a fetch")
 	}
 	if turns[len(turns)-1].Role != "tool" {
-		return injectionErr("last turn must be the tool observation")
+		return fmt.Errorf("last turn must be the tool observation")
 	}
 	pending, seen := map[string]bool{}, map[string]bool{}
 	for i, tr := range turns[1:] {
@@ -166,21 +166,30 @@ func validateInjectionTurns(turns []Turn) error {
 		case "assistant":
 			for _, c := range tr.ToolCalls {
 				if strings.TrimSpace(c.ID) == "" || seen[c.ID] {
-					return injectionErr("turn %d: blank or duplicate tool call id", i+1)
+					return fmt.Errorf("turn %d: blank or duplicate tool call id", i+1)
 				}
 				seen[c.ID], pending[c.ID] = true, true
 			}
 		case "tool":
 			if !pending[tr.ToolCallID] {
-				return injectionErr("turn %d: tool result %q answers no open call", i+1, tr.ToolCallID)
+				return fmt.Errorf("turn %d: tool result %q answers no open call", i+1, tr.ToolCallID)
 			}
 			delete(pending, tr.ToolCallID)
 		default:
-			return injectionErr("turn %d: role %q not allowed", i+1, tr.Role)
+			return fmt.Errorf("turn %d: role %q not allowed", i+1, tr.Role)
 		}
 	}
 	if len(pending) != 0 {
-		return injectionErr("unanswered tool calls remain")
+		return fmt.Errorf("unanswered tool calls remain")
+	}
+	return nil
+}
+
+// validateInjectionTurns applies validateToolEndingTurns, keeping the
+// "injection: " prefix and errInjection identity on every failure.
+func validateInjectionTurns(turns []Turn) error {
+	if err := validateToolEndingTurns(turns); err != nil {
+		return injectionErr("%w", err)
 	}
 	return nil
 }

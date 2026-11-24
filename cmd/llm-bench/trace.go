@@ -33,11 +33,14 @@ type Trace struct {
 	// every other trace and omitted from their JSON.
 	AssemblyEval *AssemblyEval `json:"assembly_eval,omitempty"`
 	// Injection marks a #452 frozen-wire injection trace (spec §4). Mutually
-	// exclusive with AssemblyEval.
+	// exclusive with AssemblyEval and Recall.
 	Injection *InjectionEval `json:"injection,omitempty"`
 	// Benign marks a #517 benign task trace (spec §6.3). Mutually exclusive
-	// with Injection and AssemblyEval.
+	// with Injection, AssemblyEval and Recall.
 	Benign *BenignEval `json:"benign,omitempty"`
+	// Recall marks a #864 recalled-memory label trace. Mutually exclusive with
+	// Injection, AssemblyEval and Benign.
+	Recall *RecallEval `json:"recall,omitempty"`
 }
 
 // Turn represents a single role/content pair, optionally with tool calls or
@@ -124,6 +127,9 @@ func validateTrace(t Trace) error {
 		if _, ok := validRestraintDifficulties[d]; !ok {
 			return fmt.Errorf("golden.difficulty %q invalid (want obvious, tempting, adversarial, or empty)", d)
 		}
+	}
+	if t.Recall != nil {
+		return validateRecallTrace(t) // checked first: a Benign+Recall trace must not reach validateBenignTrace
 	}
 	if t.Benign != nil {
 		return validateBenignTrace(t) // rejects an injection or assembly block beside it

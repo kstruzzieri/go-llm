@@ -481,6 +481,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
 		}
+		if anyRecallTrace(traces) {
+			log.Fatalf("llm-bench: calibrate-capture: %v", errRecallCaptureRegistration)
+		}
 		targets, err := parseModelTargets(*modelsArg)
 		if err != nil {
 			log.Fatalf("llm-bench: parse models: %v", err)
@@ -1138,6 +1141,9 @@ func main() {
 	}
 	if anyInjectionTrace(traces) {
 		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
+	}
+	if anyRecallTrace(traces) {
+		log.Fatalf("llm-bench: recall traces cannot be replayed by this build yet")
 	}
 
 	var corpusData *corpusReportData
