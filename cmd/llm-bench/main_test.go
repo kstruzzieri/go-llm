@@ -1202,8 +1202,8 @@ func TestMainRefusesRecallTraces(t *testing.T) {
 		name, traces, outputFlag, wantError string
 		flags                               []string
 	}{
-		{"plain", tracePath, "-report", "recall traces cannot be replayed by this build yet", []string{"-scorer", "exact-match"}},
-		{"mixed assembly capture", filepath.Join(dir, "*.json"), "-labels-out", errRecallCaptureRegistration.Error(), []string{"-calibrate-capture"}},
+		{"plain", tracePath, "-report", "recall traces require -calibrate-capture with -registration", []string{"-scorer", "exact-match"}},
+		{"mixed assembly capture", filepath.Join(dir, "*.json"), "-labels-out", "recall traces cannot share one capture with injection or assembly traces", []string{"-calibrate-capture"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			outPath := filepath.Join(t.TempDir(), "out")

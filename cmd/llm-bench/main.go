@@ -50,6 +50,9 @@ func main() {
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
 	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452; a cases source of \"forged-close\" builds the E1 forged-close corpus, docs/llm/traces/injection-forged-close)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
+	recallBuildPath := flag.String("build-recall-corpus", "", "Build the recall-label frozen-wire traces (#864 Stage 0) from this cases JSON (requires -recall-split and -recall-out)")
+	recallOut := flag.String("recall-out", "", "Output directory for -build-recall-corpus (required; only that split's stale recall-*.json files are pruned)")
+	recallSplit := flag.String("recall-split", "", "With -build-recall-corpus: pilot or confirmatory (required)")
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
 	censusManifestPath := flag.String("census-manifest", filepath.Join("docs", "llm", "census", "manifest.json"), "With -interceptor-census or -interceptor-benign-draft: the census manifest (llm-bench.census-manifest/v1)")
 	censusRoot := flag.String("census-root", "", "With -interceptor-census or -interceptor-benign-draft: directory holding one subdirectory per manifest stratum, fetched as docs/llm/census/README.md describes")
@@ -94,7 +97,7 @@ func main() {
 	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
 	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
 	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
-	registrationPath := flag.String("registration", "", "With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over recall traces: the committed recall pre-registration JSON (recall-label-registration/v1), whose trace hashes and decoding bind the capture (#864). With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -216,6 +219,9 @@ func main() {
 	if *injectionBuildPath != "" {
 		modes++
 	}
+	if *recallBuildPath != "" {
+		modes++
+	}
 	if *injectionReport {
 		modes++
 	}
@@ -241,7 +247,7 @@ func main() {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -build-recall-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
 	}
 	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport {
 		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report")
@@ -250,6 +256,15 @@ func main() {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
 		}
+	}
+	if *recallBuildPath == "" {
+		if stray := strayFlags(providedFlags, "recall-out", "recall-split"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -build-recall-corpus", strings.Join(stray, ", "))
+		}
+	} else if *recallSplit == "" {
+		log.Fatalf("llm-bench: -build-recall-corpus requires -recall-split (pilot or confirmatory)")
+	} else if *recallOut == "" {
+		log.Fatalf("llm-bench: -build-recall-corpus requires -recall-out")
 	}
 	if !*cacheProbe {
 		if stray := strayFlags(providedFlags, "cache-probe-out", "cache-probe-scenario"); len(stray) > 0 {
@@ -402,6 +417,15 @@ func main() {
 		return
 	}
 
+	if *recallBuildPath != "" {
+		digest, err := buildRecallCorpus(ctx, *recallBuildPath, *recallOut, *recallSplit)
+		if err != nil {
+			log.Fatalf("llm-bench: build-recall-corpus: %v", err)
+		}
+		fmt.Printf("cases_sha256 %s\n", digest)
+		return
+	}
+
 	if *capture {
 		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
 			log.Fatalf("llm-bench: %v", err)
@@ -481,9 +505,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: load traces: %v", err)
 		}
-		if anyRecallTrace(traces) {
-			log.Fatalf("llm-bench: calibrate-capture: %v", errRecallCaptureRegistration)
-		}
 		targets, err := parseModelTargets(*modelsArg)
 		if err != nil {
 			log.Fatalf("llm-bench: parse models: %v", err)
@@ -499,17 +520,38 @@ func main() {
 		}
 		var registrationDigest string
 		var injectionTemps map[string]float64
-		if anyInjectionTrace(traces) {
+		// Refused before any network call, not only inside runCalibrateCapture.
+		if anyRecallTrace(traces) && (anyInjectionTrace(traces) || anyPrefilledAssemblyTrace(traces)) {
+			log.Fatalf("llm-bench: calibrate-capture: recall traces cannot share one capture with injection or assembly traces")
+		}
+		if anyInjectionTrace(traces) || anyRecallTrace(traces) {
 			if strings.TrimSpace(*registrationPath) == "" {
-				log.Fatalf("llm-bench: -calibrate-capture over injection traces requires -registration")
+				kind := "injection"
+				if anyRecallTrace(traces) {
+					kind = "recall"
+				}
+				log.Fatalf("llm-bench: -calibrate-capture over %s traces requires -registration", kind)
 			}
-			reg, digest, err := loadInjectionRegistration(*registrationPath)
-			if err != nil {
-				log.Fatalf("llm-bench: calibrate-capture: %v", err)
-			}
-			decoding, err := reg.bindCapture(traces, targets)
-			if err != nil {
-				log.Fatalf("llm-bench: calibrate-capture: %v", err)
+			var decoding map[string]injectionDecoding
+			var digest string
+			if anyRecallTrace(traces) {
+				reg, d, err := loadRecallRegistration(*registrationPath)
+				if err != nil {
+					log.Fatalf("llm-bench: calibrate-capture: %v", err)
+				}
+				digest = d
+				if decoding, err = reg.bindCapture(traces, targets); err != nil {
+					log.Fatalf("llm-bench: calibrate-capture: %v", err)
+				}
+			} else {
+				reg, d, err := loadInjectionRegistration(*registrationPath)
+				if err != nil {
+					log.Fatalf("llm-bench: calibrate-capture: %v", err)
+				}
+				digest = d
+				if decoding, err = reg.bindCapture(traces, targets); err != nil {
+					log.Fatalf("llm-bench: calibrate-capture: %v", err)
+				}
 			}
 			runner.InjectionDecoding = decoding
 			registrationDigest = digest
@@ -518,7 +560,7 @@ func main() {
 				injectionTemps[sel] = *d.Options.Temperature // providerOptions always sets it
 			}
 		} else if strings.TrimSpace(*registrationPath) != "" {
-			log.Fatalf("llm-bench: -registration applies only to injection traces")
+			log.Fatalf("llm-bench: -registration applies only to injection or recall traces")
 		}
 		// Model digests feed assembly-artifact capture provenance only, so
 		// resolution (an /api/show round-trip per ollama target) is skipped
@@ -1143,7 +1185,7 @@ func main() {
 		log.Fatalf("llm-bench: injection traces require -calibrate-capture with -registration, then -injection-report")
 	}
 	if anyRecallTrace(traces) {
-		log.Fatalf("llm-bench: recall traces cannot be replayed by this build yet")
+		log.Fatalf("llm-bench: recall traces require -calibrate-capture with -registration")
 	}
 
 	var corpusData *corpusReportData

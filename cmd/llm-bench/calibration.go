@@ -1070,8 +1070,6 @@ func emitCaptureManifestDigest(raw []byte, stdout io.Writer) {
 	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
 }
 
-var errRecallCaptureRegistration = errors.New("calibrate-capture: recall traces need a recall registration, which this build does not load yet")
-
 // runCalibrateCapture replays each (trace, candidate) cell — retrying every
 // failed cell exactly once in-run (the registered one-retry policy) — and
 // writes one Artifact per captured cell to OutputPath as JSONL. Artifacts
@@ -1101,18 +1099,17 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		}
 		seenTargets[key] = struct{}{}
 	}
-	if anyRecallTrace(opts.Traces) {
-		// The later recall-registration wiring replaces this refusal and must keep the frozen-wire switch below.
-		return errRecallCaptureRegistration
-	}
 	assemblyCapture := anyPrefilledAssemblyTrace(opts.Traces)
+	if anyRecallTrace(opts.Traces) && !allRecallTraces(opts.Traces) {
+		return errors.New("calibrate-capture: recall traces cannot share one capture with non-recall (injection, assembly or plain) traces")
+	}
 	frozenWireCapture := anyFrozenWireTrace(opts.Traces)
 	if frozenWireCapture {
 		if assemblyCapture {
 			return errors.New("calibrate-capture: injection and assembly traces cannot share one capture")
 		}
 		if !strings.HasPrefix(opts.RegistrationDigest, "sha256:") {
-			return errors.New("calibrate-capture: an injection capture requires a registration digest (-registration)")
+			return fmt.Errorf("calibrate-capture: %s capture requires a registration digest (-registration)", frozenNoun(opts.Traces, "an injection", "a recall"))
 		}
 	}
 	captureTemp := assemblyCaptureTemperature
@@ -1123,7 +1120,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 				return fmt.Errorf("calibrate-capture: model %q has no registered temperature", target.Display)
 			}
 			if i > 0 && temp != captureTemp {
-				return errors.New("calibrate-capture: injection capture mixes registered temperatures; run one capture per temperature")
+				return fmt.Errorf("calibrate-capture: %s capture mixes registered temperatures; run one capture per temperature", frozenNoun(opts.Traces, "injection", "recall"))
 			}
 			captureTemp = temp
 		}
@@ -1430,6 +1427,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			manifest.SchemaVersion = captureManifestSchemaVersionV3
 			manifest.RegistrationDigest = opts.RegistrationDigest
 			manifest.Decoding = captureDecoding{Temperature: captureTemp}
+			if anyRecallTrace(opts.Traces) {
+				manifest.CounterbalanceScheme = recallCaptureCounterbalanceScheme
+			}
 		}
 		manifestPath = captureManifestPath(opts.OutputPath)
 		var err error
@@ -1468,6 +1468,15 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	return nil
 }
 
+// frozenNoun picks the capture noun for an error: recall when the set holds a
+// recall trace, injection otherwise.
+func frozenNoun(traces []Trace, injection, recall string) string {
+	if anyRecallTrace(traces) {
+		return recall
+	}
+	return injection
+}
+
 // counterbalanceCaptureTraces returns the deterministic capture order for a
 // mixed trace set — non-assembly traces (and 3a flat/progressive arms) first
 // in their input order, then legacy/mixed pairs in the registered
@@ -1475,9 +1484,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 // first arm alternating), then topline traces sorted by trace ID — plus the
 // pair-ID -> captured-order label map the pair ordering was derived from, so
 // the recorded captured_order provenance can never disagree with the actual
-// order. A set with no legacy/mixed/topline traces is returned untouched,
-// preserving today's capture order byte-for-byte.
+// order. A set holding a recall trace is ordered by recallCaptureOrder
+// instead; any other set with no legacy/mixed/topline traces is returned
+// untouched, preserving today's capture order byte-for-byte.
 func counterbalanceCaptureTraces(traces []Trace) ([]Trace, map[string]string) {
+	if anyRecallTrace(traces) {
+		return recallCaptureOrder(traces), map[string]string{}
+	}
 	var plain, topline []Trace
 	var pairIDs []string
 	pairs := map[string][]Trace{}

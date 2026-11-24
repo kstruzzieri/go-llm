@@ -254,15 +254,15 @@ func TestRunOneRecallUsesRegisteredDecoding(t *testing.T) {
 	}
 }
 
-func TestRunCalibrateCaptureRefusesRecall(t *testing.T) {
+func TestRunCalibrateCaptureRecallNeedsRegistrationDigest(t *testing.T) {
 	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner:     &fakeRunner{},
 		Targets:    []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}},
 		Traces:     []Trace{validRecallTrace()},
 		OutputPath: filepath.Join(t.TempDir(), "out.jsonl"),
 	})
-	if err == nil || !strings.Contains(err.Error(), "recall traces need a recall registration") {
-		t.Fatalf("err = %v; want the recall registration refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "requires a registration digest (-registration)") {
+		t.Fatalf("err = %v; want the registration-digest refusal", err)
 	}
 }
 

@@ -44,6 +44,16 @@ func (r RecallEval) currentValue() string {
 	return r.Value.Lesson
 }
 
+// allRecallTraces reports whether every trace carries a recall block.
+func allRecallTraces(traces []Trace) bool {
+	for _, t := range traces {
+		if t.Recall == nil {
+			return false
+		}
+	}
+	return true
+}
+
 // frozenWireTrace reports whether t replays a frozen decision-point wire
 // (injection or recall): registered decoding, raw tool-call channel, one turn.
 func frozenWireTrace(t Trace) bool { return t.Injection != nil || t.Recall != nil }
@@ -142,9 +152,9 @@ func validateRecallTrace(t Trace) error {
 	}
 	if r.Value.Type == "number" {
 		for _, f := range vals[1:] {
-			// Values 0 and 1 are rejected: fixture number values are 2..20 and the
+			// Values 0 and 1 are rejected (and no other range is enforced): the
 			// scorer drops the pronoun "one" from its number words, so it cannot
-			// recognize 1.
+			// recognize 1, and 0 is excluded with it.
 			if f.v == "0" || f.v == "1" {
 				return fmt.Errorf("recall: value.%s %q must not be 0 or 1", f.name, f.v)
 			}
