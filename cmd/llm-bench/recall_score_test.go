@@ -2,16 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
-// numVal is a number-type recall value (lesson 5, changed 8).
-func numVal() RecallValue {
+// recallNumVal is a number-type recall value (lesson 5, changed 8).
+func recallNumVal() RecallValue {
 	return RecallValue{Type: "number", Identifier: "maxRetries", Lesson: "5", Changed: "8"}
 }
 
-// idVal is an identifier-type recall value.
-func idVal() RecallValue {
+// recallIDVal is an identifier-type recall value.
+func recallIDVal() RecallValue {
 	return RecallValue{Type: "identifier", Identifier: "strategy", Lesson: "retry.max_attempts", Changed: "exponential", Alternatives: []string{"linear"}}
 }
 
@@ -21,7 +22,7 @@ func recallCall(name, args string) ToolCall {
 }
 
 func TestStatesValueNumber(t *testing.T) {
-	v := numVal()
+	v := recallNumVal()
 	for in, want := range map[string]bool{
 		"maxRetries = 5": true, "five retries": true, "(5)": true, "5.": true, "5,": true, "5s": true, "Five": true,
 		"50": false, "0.5": false, "15": false, "fifty": false, "v5x": false, "x_5": false,
@@ -49,14 +50,14 @@ func TestStatesValueIdentifier(t *testing.T) {
 		{"xexponential then exponential", "exponential", true},
 		{"-exponential-", "exponential", true},
 	} {
-		if got := statesValue(c.in, idVal(), c.val); got != c.want {
+		if got := statesValue(c.in, recallIDVal(), c.val); got != c.want {
 			t.Errorf("statesValue(%q, %q) = %v, want %v", c.in, c.val, got, c.want)
 		}
 	}
 }
 
 func TestClassifyRecallA(t *testing.T) {
-	ev := RecallEval{Value: numVal(), NamedFile: "config/retry.go"}
+	ev := RecallEval{Value: recallNumVal(), NamedFile: "config/retry.go"}
 	for _, c := range []struct {
 		name  string
 		reply Turn
@@ -79,7 +80,7 @@ func TestClassifyRecallA(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}
-	idEv := RecallEval{Value: idVal(), NamedFile: "x.go"}
+	idEv := RecallEval{Value: recallIDVal(), NamedFile: "x.go"}
 	if got := classifyRecallA(idEv, Turn{Content: "use linear"}); got != recallOtherValue {
 		t.Errorf("identifier alternative: got %v", got)
 	}
@@ -89,14 +90,14 @@ func TestClassifyRecallA(t *testing.T) {
 }
 
 func TestRecallScorerIgnoresThinking(t *testing.T) {
-	ev := RecallEval{Value: numVal(), NamedFile: "config/retry.go"}
+	ev := RecallEval{Value: recallNumVal(), NamedFile: "config/retry.go"}
 	if got := classifyRecallA(ev, Turn{Thinking: "5", Content: "Which value do you mean?"}); got != recallNoValue {
 		t.Errorf("got %v, want recallNoValue", got)
 	}
 }
 
 func TestRecallRecheckPathSpellings(t *testing.T) {
-	ev := RecallEval{Value: numVal(), NamedFile: "config/retry.go", TaskPaths: []string{"svc/./main.go"}}
+	ev := RecallEval{Value: recallNumVal(), NamedFile: "config/retry.go", TaskPaths: []string{"svc/./main.go"}}
 	for path, want := range map[string]recallKind{
 		"./config/retry.go": recallRecheck, "config//retry.go": recallRecheck,
 		"/workspace/config/retry.go": recallRecheck, "svc/main.go": recallRecheck,
@@ -110,7 +111,7 @@ func TestRecallRecheckPathSpellings(t *testing.T) {
 }
 
 func TestClassifyRecallB(t *testing.T) {
-	mk := func(c string) RecallEval { return RecallEval{Value: numVal(), Cases: []string{c}} }
+	mk := func(c string) RecallEval { return RecallEval{Value: recallNumVal(), Cases: []string{c}} }
 	for _, c := range []struct {
 		name   string
 		ev     RecallEval
@@ -126,8 +127,8 @@ func TestClassifyRecallB(t *testing.T) {
 		{"S1 both", mk("S1"), Turn{Content: "used to be 5, now 8"}, recallAnswers, true, false},
 		{"S2 answers with call", mk("S2"), Turn{Content: "It is 5", ToolCalls: []ToolCall{recallCall("read_file", `{"path":"a.go"}`)}}, recallAnswers, false, false},
 		{"S2 bad call declines", mk("S2"), Turn{ToolCalls: []ToolCall{recallCall("read_file", `{`)}}, recallDeclinesOrWrong, false, false},
-		{"id S2 answers", RecallEval{Value: idVal(), Cases: []string{"S2"}}, Turn{Content: "retry.max_attempts"}, recallAnswers, false, false},
-		{"id S2 declines", RecallEval{Value: idVal(), Cases: []string{"S2"}}, Turn{Content: "exponential"}, recallDeclinesOrWrong, false, false},
+		{"id S2 answers", RecallEval{Value: recallIDVal(), Cases: []string{"S2"}}, Turn{Content: "retry.max_attempts"}, recallAnswers, false, false},
+		{"id S2 declines", RecallEval{Value: recallIDVal(), Cases: []string{"S2"}}, Turn{Content: "exponential"}, recallDeclinesOrWrong, false, false},
 		{"S1 wrong", mk("S1"), Turn{Content: "it is 5"}, recallDeclinesOrWrong, false, false},
 	} {
 		got, both := classifyRecallB(c.ev, c.reply)
@@ -138,7 +139,12 @@ func TestClassifyRecallB(t *testing.T) {
 }
 
 func TestRecallHedged(t *testing.T) {
-	for _, p := range recallHedgePhrases {
+	frozen := []string{"can't confirm", "cannot confirm", "not sure", "may have changed",
+		"might have changed", "unable to verify", "I would need to check"}
+	if !slices.Equal(recallHedgePhrases, frozen) {
+		t.Errorf("recallHedgePhrases = %q, want %q", recallHedgePhrases, frozen)
+	}
+	for _, p := range frozen {
 		if !recallHedged("so " + p + " here") {
 			t.Errorf("phrase %q not hedged", p)
 		}
@@ -150,9 +156,46 @@ func TestRecallHedged(t *testing.T) {
 	}
 }
 
+func TestRecallSearchNumberTokenizer(t *testing.T) {
+	ev := RecallEval{Value: recallNumVal(), NamedFile: "config/retry.go"}
+	empty := RecallEval{Value: RecallValue{Type: "number", Identifier: "x", Lesson: "", Changed: "8"}}
+	for _, c := range []struct {
+		ev      RecallEval
+		pattern string
+		want    recallKind
+	}{
+		{ev, "md5", recallOtherTool}, {ev, "k8s", recallOtherTool}, {ev, "e2e", recallOtherTool},
+		{ev, "http2", recallOtherTool}, {ev, "timeout = 15", recallOtherTool}, {ev, "sha256", recallOtherTool},
+		{ev, "5", recallRecheck}, {ev, "=5", recallRecheck}, {ev, `\b5\b`, recallRecheck},
+		{ev, `maxRetries\s*=\s*5`, recallRecheck}, {ev, "5.0", recallRecheck},
+		{ev, "version 5.0.1", recallOtherTool}, {ev, "5.0.1", recallOtherTool},
+		{empty, "anything", recallOtherTool},
+	} {
+		args, _ := json.Marshal(map[string]string{"pattern": c.pattern})
+		if got := classifyRecallA(c.ev, Turn{ToolCalls: []ToolCall{recallCall("search", string(args))}}); got != c.want {
+			t.Errorf("pattern %q: got %v, want %v", c.pattern, got, c.want)
+		}
+	}
+}
+
+func TestStatesValueVersionAndWords(t *testing.T) {
+	v := recallNumVal()
+	for in, want := range map[string]bool{
+		"upgrade to version 5.0.1": false, "5.0.1": false, "5.0. Then": true,
+		"five_x": false, "five5": false, "five x": true,
+	} {
+		if got := statesValue(in, v, "5"); got != want {
+			t.Errorf("statesValue(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if statesValue("version 5.0.1", v, "5.0") || statesValue("version 5.0.1", v, "5") {
+		t.Error("version string stated a number")
+	}
+}
+
 func TestClassifyRecallAOrderAndSpec(t *testing.T) {
-	ev := RecallEval{Value: numVal(), NamedFile: "config/retry.go"}
-	idEv := RecallEval{Value: idVal(), NamedFile: "x.go"}
+	ev := RecallEval{Value: recallNumVal(), NamedFile: "config/retry.go"}
+	idEv := RecallEval{Value: recallIDVal(), NamedFile: "x.go"}
 	read := recallCall("read_file", `{"path":"config/retry.go"}`)
 	for _, c := range []struct {
 		name  string
@@ -191,8 +234,8 @@ func TestClassifyRecallAOrderAndSpec(t *testing.T) {
 	}
 }
 
-func TestStatesValueNumberRound1(t *testing.T) {
-	v := numVal()
+func TestStatesValueNumberEdges(t *testing.T) {
+	v := recallNumVal()
 	for in, want := range map[string]bool{"x_five": false, "9five": false, "no_one": false, ".5": false, "5.0": true, "5.00": true, "05": false, "five.": true, "(five)": true} {
 		if got := statesValue(in, v, "5"); got != want {
 			t.Errorf("statesValue(%q) = %v, want %v", in, got, want)
@@ -204,7 +247,7 @@ func TestStatesValueNumberRound1(t *testing.T) {
 	if !statesValue("0", v, "0") || !statesValue("0.0", v, "0") {
 		t.Error("0 not stated")
 	}
-	if statesValue("anything", idVal(), "") {
+	if statesValue("anything", recallIDVal(), "") {
 		t.Error("empty identifier stated")
 	}
 }

@@ -73,10 +73,14 @@ func normalizeRecallNumber(t string) string {
 	return t
 }
 
-// numberTokens lists the normalized number tokens and number words stated in
-// content. A digit run preceded by a word byte or '.' is not a token; a number
-// word counts only when both neighbors are outside [A-Za-z0-9_].
-func numberTokens(content string) []string {
+// recallNumberTokens lists the normalized number tokens (and, for reply text,
+// number words) stated in content. A digit run preceded by a word byte or '.'
+// is not a token; a token followed by a further ".<digit>" is a version string
+// and states nothing; a number word counts only when both neighbors are
+// outside [A-Za-z0-9_]. In pattern mode only digit tokens count, and a letter
+// directly preceded by a backslash (a regex escape such as \b) does not block
+// the token's left side.
+func recallNumberTokens(content string, pattern bool) []string {
 	var out []string
 	for i := 0; i < len(content); {
 		c := content[i]
@@ -92,7 +96,19 @@ func numberTokens(content string) []string {
 					j++
 				}
 			}
-			if i == 0 || (!recallIsWordByte(content[i-1]) && content[i-1] != '.') {
+			version := false
+			for j+1 < len(content) && content[j] == '.' && recallIsDigit(content[j+1]) {
+				version = true
+				j++
+				for j < len(content) && recallIsDigit(content[j]) {
+					j++
+				}
+			}
+			left := i == 0 || (!recallIsWordByte(content[i-1]) && content[i-1] != '.')
+			if !left && pattern && i >= 2 && recallIsLetter(content[i-1]) && content[i-2] == '\\' {
+				left = true
+			}
+			if left && !version {
 				out = append(out, normalizeRecallNumber(content[i:j]))
 			}
 			i = j
@@ -102,7 +118,7 @@ func numberTokens(content string) []string {
 				j++
 			}
 			n, ok := recallNumberWords[strings.ToLower(content[i:j])]
-			if ok && (i == 0 || !recallIsWordByte(content[i-1])) && (j == len(content) || !recallIsWordByte(content[j])) {
+			if ok && !pattern && (i == 0 || !recallIsWordByte(content[i-1])) && (j == len(content) || !recallIsWordByte(content[j])) {
 				out = append(out, n)
 			}
 			i = j
@@ -113,11 +129,11 @@ func numberTokens(content string) []string {
 	return out
 }
 
-// identifierBlocked reports whether the byte at content[at] (moving outward by
+// recallIdentifierBlocked reports whether the byte at content[at] (moving outward by
 // step) blocks an identifier match: word bytes and '.'/'-' block, except that
 // a '.' or '-' followed outward by end of text or a non-word byte is
 // sentence punctuation.
-func identifierBlocked(content string, at, step int) bool {
+func recallIdentifierBlocked(content string, at, step int) bool {
 	if at < 0 || at >= len(content) {
 		return false
 	}
@@ -143,7 +159,7 @@ func statesIdentifier(content, id string) bool {
 			return false
 		}
 		s := from + k
-		if !identifierBlocked(content, s-1, -1) && !identifierBlocked(content, s+len(id), 1) {
+		if !recallIdentifierBlocked(content, s-1, -1) && !recallIdentifierBlocked(content, s+len(id), 1) {
 			return true
 		}
 		from = s + 1
@@ -153,7 +169,7 @@ func statesIdentifier(content, id string) bool {
 // statesValue reports whether content states value under v's type rules.
 func statesValue(content string, v RecallValue, value string) bool {
 	if v.Type == "number" {
-		for _, t := range numberTokens(content) {
+		for _, t := range recallNumberTokens(content, false) {
 			if t == normalizeRecallNumber(value) {
 				return true
 			}
@@ -162,10 +178,6 @@ func statesValue(content string, v RecallValue, value string) bool {
 	}
 	return statesIdentifier(content, value)
 }
-
-// cleanRecallPath normalizes a path for comparison (path.Clean already drops
-// a leading "./").
-func cleanRecallPath(p string) string { return path.Clean(p) }
 
 // recallCallArgs decodes a call's arguments; ok is false for a malformed call,
 // which the scorer treats as no call at all.
@@ -184,28 +196,15 @@ func recallDecodedCalls(calls []ToolCall) []ToolCall {
 	return out
 }
 
-// recallNumberInPattern reports whether the number lesson occurs in pattern at
-// a spot not adjacent to a digit and not part of a decimal.
+// recallNumberInPattern reports whether the number lesson is a token of pattern.
 func recallNumberInPattern(pattern, lesson string) bool {
-	for from := 0; ; {
-		k := strings.Index(pattern[from:], lesson)
-		if k < 0 {
-			return false
-		}
-		s := from + k
-		e := s + len(lesson)
-		ok := true
-		if s > 0 && (recallIsDigit(pattern[s-1]) || (pattern[s-1] == '.' && s > 1 && recallIsDigit(pattern[s-2]))) {
-			ok = false
-		}
-		if e < len(pattern) && (recallIsDigit(pattern[e]) || (pattern[e] == '.' && e+1 < len(pattern) && recallIsDigit(pattern[e+1]))) {
-			ok = false
-		}
-		if ok {
+	want := normalizeRecallNumber(lesson)
+	for _, t := range recallNumberTokens(pattern, true) {
+		if t == want {
 			return true
 		}
-		from = s + 1
 	}
+	return false
 }
 
 // isRecallRecheck reports whether call (already decodable) re-checks the
@@ -221,9 +220,9 @@ func isRecallRecheck(ev RecallEval, call ToolCall) bool {
 		if p == "" {
 			return false
 		}
-		got := cleanRecallPath(p)
+		got := path.Clean(p)
 		for _, t := range append([]string{ev.NamedFile}, ev.TaskPaths...) {
-			t = cleanRecallPath(t)
+			t = path.Clean(t)
 			if got == t || strings.HasSuffix(got, "/"+t) {
 				return true
 			}
@@ -268,7 +267,7 @@ func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 		return recallEmpty
 	}
 	if v.Type == "number" {
-		for _, t := range numberTokens(reply.Content) {
+		for _, t := range recallNumberTokens(reply.Content, false) {
 			if t != normalizeRecallNumber(v.Lesson) {
 				return recallOtherValue
 			}
@@ -283,7 +282,8 @@ func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 	return recallNoValue
 }
 
-// classifyRecallB classifies a Trace B reply; bothStated is set on S1 replies
+// classifyRecallB classifies a Trace B reply (a call whose arguments do not
+// decode counts as no call, so it cannot make a reply continue); bothStated is set on S1 replies
 // that state both the lesson and the changed value.
 func classifyRecallB(ev RecallEval, reply Turn) (outcome recallBOutcome, bothStated bool) {
 	v := ev.Value
