@@ -228,6 +228,40 @@ func TestReplApproverFlushesPendingMarkdownBeforePreview(t *testing.T) {
 	}
 }
 
+// A renderer flush that fails before the question means the question is never
+// shown: the approver returns errConsentNotShown, so the REPL ends instead of
+// reading the "y" typed for it as a goal, and it reads no answer. A call a
+// session grant covers asks no question, so the same failure is an ordinary
+// error: the tool does not run, the turn aborts and the session goes on.
+func TestReplApproverBeforeWriteFailureIsNotShown(t *testing.T) {
+	flushFailed := errors.New("flush failed")
+	t.Run("ungranted", func(t *testing.T) {
+		in := &countingReader{r: strings.NewReader("y\n")}
+		var out strings.Builder
+		ap := newReplApprover(newScannerSource(in, &out), &out, false)
+		ap.grants = newApprovalGrants()
+		ap.beforeWrite = func() error { return flushFailed }
+		d, err := ap.ApproveKeyed(context.Background(), newCall(), "preview", tools.WriteClassApprovalKey)
+		if d.Approved || !errors.Is(err, errConsentNotShown) {
+			t.Fatalf("ApproveKeyed = %+v, %v; want a denial with errConsentNotShown", d, err)
+		}
+		if n := in.reads.Load(); n != 0 {
+			t.Errorf("stdin reads = %d, want 0", n)
+		}
+	})
+	t.Run("covered by a session grant", func(t *testing.T) {
+		var out strings.Builder
+		ap := newReplApprover(&promptFatalSource{t: t}, &out, false)
+		ap.grants = newApprovalGrants()
+		ap.grants.grant(grantScopeFiles, tools.WriteClassApprovalKey)
+		ap.beforeWrite = func() error { return flushFailed }
+		d, err := ap.ApproveKeyed(context.Background(), newCall(), "preview", tools.WriteClassApprovalKey)
+		if d.Approved || !errors.Is(err, flushFailed) || errors.Is(err, errConsentNotShown) {
+			t.Fatalf("ApproveKeyed = %+v, %v; want a denial with the plain flush error", d, err)
+		}
+	})
+}
+
 func TestReplApproverWritesThroughRendererCursor(t *testing.T) {
 	var out strings.Builder
 	r := newRenderer(&out, false, 4, nil, false)

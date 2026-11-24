@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 
@@ -25,10 +24,18 @@ type destinationAdmissionConfig struct {
 	AllowFlags  []string
 	Interactive bool
 	PromptYN    func(ctx context.Context, prompt string) (bool, error)
-	Out         io.Writer
+	// Out receives the consent section until the REPL binds its own writer
+	// with setReplOut: stderr at startup and for the subcommands.
+	Out io.Writer
 	// KeySources maps provider key -> the consent line saying where its key
 	// comes from (see keySourceLines); nil renders none.
 	KeySources map[string]string
+	// NoColor is the command's -no-color; NO_COLOR, TERM=dumb and a
+	// non-terminal writer turn color off without it.
+	NoColor bool
+	// Operation is "" for a session, or the subcommand ("models", "index",
+	// "source") whose requests the section describes.
+	Operation string
 }
 
 // destinationAdmission is golem's consent surface for #477: it renders the
@@ -47,8 +54,13 @@ type destinationAdmission struct {
 	promptYN    func(ctx context.Context, prompt string) (bool, error)
 	out         io.Writer
 	keySources  map[string]string
+	noColor     bool
+	operation   string
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// replOut is the REPL line source's writer once setReplOut binds it; the
+	// consent section then renders there, beside the question.
+	replOut  io.Writer
 	admitted bool
 	// granted is the policy the current generation was installed with —
 	// always an EXACT set (D4), never allow-all: the gate's Narrow carries
@@ -95,6 +107,8 @@ func newDestinationAdmission(cfg destinationAdmissionConfig) (*destinationAdmiss
 		promptYN:    cfg.PromptYN,
 		out:         out,
 		keySources:  cfg.KeySources,
+		noColor:     cfg.NoColor,
+		operation:   cfg.Operation,
 	}, nil
 }
 
@@ -118,17 +132,12 @@ func keySourceLines(cfg *config.Config) map[string]string {
 	return lines
 }
 
-// destinationConsentPrompt is the one batch consent question, asked from the
-// single consent path both ensure and extend go through, because both consent
-// to the complete manifest rendered immediately above it.
-const destinationConsentPrompt = "Allow this session to send data to the remote destinations listed above? [y/N] "
-
 // ensure admits the manifest if it is not already admitted this generation:
 // render the manifest, auto-admit when every destination is local or covered
-// by the exact allowlist, otherwise collect the one interactive batch
-// decision — or fail closed noninteractively, naming an uncovered
-// destination, a use case that reaches it, and the exact flag that would
-// cover it (I6). A reader that answers on a cancelled context installs
+// by the exact allowlist, otherwise ask the one interactive batch question
+// naming every uncovered remote, or fail closed noninteractively, naming an
+// uncovered destination, a use case that reaches it, and the exact flag that
+// would cover it (I6). A reader that answers on a cancelled context installs
 // nothing. Idempotent after success; revoke re-arms it.
 func (a *destinationAdmission) ensure(ctx context.Context) error {
 	a.mu.Lock()
@@ -137,11 +146,12 @@ func (a *destinationAdmission) ensure(ctx context.Context) error {
 		return nil
 	}
 
-	a.render(a.out)
-
 	// At startup the baseline is only the exact allow flags (plus the
 	// loopback rule inside Permits): nothing has been granted yet.
-	policy, _, err := a.consent(ctx, a.manifest, provider.NewDestinationPolicy(a.allowed...))
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	renderErr := a.renderForConsent(a.manifest, flags, a.baselineLocked())
+
+	policy, _, err := a.consent(ctx, a.manifest, flags, renderErr)
 	if err != nil {
 		return err
 	}
@@ -175,31 +185,52 @@ func (a *destinationAdmission) revoke() {
 // consent is THE destination-consent decision, shared by ensure and extend so
 // the discipline cannot drift between the startup admission and a model
 // switch: at most one question for the complete manifest, judged against
-// baseline. It reports the policy to publish with and whether approval added
-// a remote the baseline did not already permit.
+// baseline, naming exactly the remotes baseline does not permit: the set a
+// yes admits. It reports the policy to publish with and whether approval
+// added a remote the baseline did not already permit.
 //
-// Callers hold a.mu and render m before calling, because the question refers
-// to the manifest listed above it.
-func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy) (provider.DestinationPolicy, bool, error) {
+// Callers hold a.mu and render m before calling, so the user sees what each
+// remote the question names is used for, and pass renderErr, the error that
+// rendering returned: a question whose section failed to print is never asked,
+// and the refusal wraps both provider.ErrDestinationDenied and
+// errConsentNotShown. The write error counts only where golem would ask about
+// an uncovered remote: a manifest the baseline covers in full (local and
+// flag-covered servers, or an earlier grant) is admitted even if its section
+// failed to print, as before, and a noninteractive refusal keeps its exact
+// bytes.
+func (a *destinationAdmission) consent(ctx context.Context, m *provider.DestinationManifest, baseline provider.DestinationPolicy, renderErr error) (provider.DestinationPolicy, bool, error) {
 	// No explicit local/remote split: DestinationPolicy.Permits auto-admits
-	// literal loopback, so firstUncovered can only ever surface a remote —
-	// a separate filter would be a second copy of that rule.
+	// literal loopback, so uncoveredAll can only ever surface remotes; a
+	// separate filter would be a second copy of that rule.
 	dests := m.Destinations()
-	uncovered := firstUncovered(dests, baseline)
-	if uncovered == nil {
+	uncovered := uncoveredAll(dests, baseline)
+	if len(uncovered) == 0 {
 		return baseline, false, nil
 	}
+	// The diagnostic names the first uncovered remote in manifest order, so
+	// its bytes do not depend on how the question sorts.
 	denied := &provider.DestinationDeniedError{
-		Destination: *uncovered,
-		Purpose:     purposeReaching(m, *uncovered),
+		Destination: uncovered[0],
+		Purpose:     purposeReaching(m, uncovered[0]),
 	}
 	// Fail closed without reading anything: noninteractive modes do not ask
 	// for consent, they name the destination, a use case that reaches it,
-	// and the exact flag that would cover it (I6).
-	if !a.interactive || a.promptYN == nil {
-		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered.String())
+	// and the exact flag that would cover it (I6). consentMode is the same
+	// test the rendering used for "needs your OK", so the screen and the
+	// decision cannot disagree.
+	if a.consentMode() != renderAsking {
+		return baseline, false, fmt.Errorf("%w; pass -allow-destination %q to permit it", denied, uncovered[0].String())
 	}
-	ok, err := a.promptYN(ctx, destinationConsentPrompt)
+	// Fail closed when the section did not print and golem would ask about an
+	// uncovered remote: the user has not seen what a yes admits, and a
+	// typed-ahead "y" must not answer for them. Nothing is read: the REPL ends
+	// on errConsentNotShown rather than read the line typed for the question
+	// as a goal, at startup the refusal ends the run, and run discards the
+	// line from the terminal as golem exits.
+	if renderErr != nil {
+		return baseline, false, fmt.Errorf("%w; the model-server section %w: %w", denied, errConsentNotShown, renderErr)
+	}
+	ok, err := a.promptYN(ctx, consentQuestion(uncovered))
 	if err != nil {
 		return baseline, false, err
 	}
@@ -251,16 +282,14 @@ func (a *destinationAdmission) extend(ctx context.Context, edges []provider.Dest
 	// revoked, granted is authority the user WITHDREW: reusing it would
 	// silently re-admit a remote they cleared, so only the exact flags (and
 	// the normal loopback rule inside Permits) survive a revoke.
-	baseline := provider.NewDestinationPolicy(a.allowed...)
-	if a.admitted {
-		baseline = a.granted
-	}
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	baseline := a.baselineLocked()
 
-	// Rendered before the decision: the question refers to "the remote
-	// destinations listed above", and it asks about the PROPOSED manifest.
-	renderManifest(a.out, m, a.keySources)
+	// Rendered before the decision: the question names the remotes of the
+	// PROPOSED manifest that need a yes, and the rendering shows their uses.
+	renderErr := a.renderForConsent(m, flags, baseline)
 
-	policy, newGrant, err := a.consent(ctx, m, baseline)
+	policy, newGrant, err := a.consent(ctx, m, baseline, renderErr)
 	if err != nil {
 		return false, err
 	}
@@ -307,12 +336,38 @@ func manifestCovers(cur, proposed *provider.DestinationManifest) bool {
 
 // setPrompt rebinds the interactive seam — the REPL installs its lineSource
 // here once it exists, so post-startup re-admissions (after /grants clear)
-// run through the same input discipline as every other prompt.
+// run through the same input discipline as every other prompt. setReplOut
+// moves the section those questions sit under onto the same stream.
 func (a *destinationAdmission) setPrompt(promptYN func(ctx context.Context, prompt string) (bool, error)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.promptYN = promptYN
 	a.interactive = promptYN != nil
+}
+
+// setReplOut binds the writer the REPL's line source prints to. Every consent
+// section drawn after that (a /model set extension, the re-admission after
+// /grants clear) renders there, on the stream its question is asked on, with
+// color and width measured on it. Startup admission and the subcommands never
+// call it and stay on Out.
+func (a *destinationAdmission) setReplOut(out io.Writer) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.replOut = out
+}
+
+// renderForConsent draws m before the consent decision on the writer the
+// question is asked on (replOut once bound, else Out), asking when a question
+// can be asked and refusing otherwise, and returns the write error for consent,
+// which refuses on it only where golem would ask about an uncovered remote.
+// Callers hold a.mu.
+func (a *destinationAdmission) renderForConsent(m *provider.DestinationManifest, flags, baseline provider.DestinationPolicy) error {
+	w := a.out
+	if a.replOut != nil {
+		w = a.replOut
+	}
+	return renderManifest(w, m, a.keySources, remoteStates(m, flags, baseline, a.consentMode()),
+		manifestOpts{style: styleFor(w, a.noColor), operation: a.operation})
 }
 
 // pinLoopback re-installs the current generation with one provider's
@@ -352,7 +407,7 @@ func (a *destinationAdmission) pinLoopback(providerKey string, d provider.Destin
 	}
 	a.manifest = m
 	a.edges = edges
-	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", providerKey, d.BaseURL())
+	_, _ = fmt.Fprintf(a.out, "destination pinned: %s -> %s (discovered)\n", destinationName(providerKey), destinationURL(d))
 	return nil
 }
 
@@ -370,70 +425,54 @@ func purposeReaching(m *provider.DestinationManifest, d provider.Destination) st
 	return ""
 }
 
-// firstUncovered returns the first destination the policy does not permit,
-// in the manifest's deterministic order. Loopback destinations always pass
-// Permits, so only remotes can surface here.
-func firstUncovered(dests []provider.Destination, policy provider.DestinationPolicy) *provider.Destination {
-	for _, d := range dests {
-		if !policy.Permits(d) {
-			return &d
-		}
-	}
-	return nil
+// render writes the /grants listing of the session's manifest in style: every
+// remote with its current state, plus the cleared note while /grants clear has
+// left it unadmitted. Uses and fallback marks are as admitted, not as the
+// routes now stand: a route switched away from stays listed, and a fallback a
+// switch made primary can still read "(fallback)". It takes a.mu, so the
+// states, the cleared note and the manifest come from one moment; ensure and
+// extend hold a.mu and render through renderForConsent, never through this.
+func (a *destinationAdmission) render(w io.Writer, style consoleStyle) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	flags := provider.NewDestinationPolicy(a.allowed...)
+	baseline := a.baselineLocked()
+	// A listing asks nothing, so a failed write admits nothing; like the rest
+	// of the slash command's output, it is not reported.
+	_ = renderManifest(w, a.manifest, a.keySources, remoteStates(a.manifest, flags, baseline, renderListing),
+		manifestOpts{style: style, cleared: !a.admitted})
 }
 
-// render writes the consent surface: one line per deduplicated destination,
-// grouped local-first, each followed by the purposes that reach it with
-// primary/fallback marking. D14 fields — provider key, canonical URL, purpose,
-// marker, locality — plus, for a provider that sends a key, the key source
-// (#776 D5: variable names or "literal", never a value). Deterministic order.
-func (a *destinationAdmission) render(w io.Writer) {
-	renderManifest(w, a.manifest, a.keySources)
+// baselineLocked is the policy a consent decision and its rendering are judged
+// against: the grant while admitted, else only the exact allow flags (plus the
+// loopback rule inside Permits). Once revoked, granted is authority the user
+// withdrew, so it never counts. The caller holds a.mu.
+func (a *destinationAdmission) baselineLocked() provider.DestinationPolicy {
+	if a.admitted {
+		return a.granted
+	}
+	return provider.NewDestinationPolicy(a.allowed...)
 }
 
-// renderManifest is render over an arbitrary manifest — extend renders the
-// PROPOSED one, which is exactly what its consent question refers to.
-func renderManifest(w io.Writer, m *provider.DestinationManifest, keySources map[string]string) {
-	byDest := make(map[provider.Destination][]provider.DestinationEdge)
-	for _, e := range m.Edges() {
-		byDest[e.Destination] = append(byDest[e.Destination], e)
+// consentMode is the render mode for a manifest shown before the consent
+// decision: asking when a question can be asked, refusing otherwise.
+func (a *destinationAdmission) consentMode() renderMode {
+	if a.interactive && a.promptYN != nil {
+		return renderAsking
 	}
-	dests := m.Destinations()
-	sort.SliceStable(dests, func(i, j int) bool {
-		if dests[i].IsLocal() != dests[j].IsLocal() {
-			return dests[i].IsLocal()
-		}
-		return dests[i].String() < dests[j].String()
-	})
-
-	_, _ = fmt.Fprintln(w, "destinations:")
-	for _, d := range dests {
-		kind := "remote"
-		if d.IsLocal() {
-			kind = "local, auto-admitted"
-		}
-		_, _ = fmt.Fprintf(w, "  %s  %s  (%s)\n", d.Provider(), d.BaseURL(), kind)
-		var parts []string
-		for _, e := range byDest[d] {
-			label := e.Purpose
-			if e.IsFallback {
-				label += " (fallback)"
-			}
-			parts = append(parts, label)
-		}
-		_, _ = fmt.Fprintf(w, "      %s\n", strings.Join(parts, ", "))
-		if line, ok := keySources[d.Provider()]; ok {
-			_, _ = fmt.Fprintf(w, "      %s\n", line)
-		}
-	}
+	return renderRefusing
 }
 
 // startupPromptYN is the pre-REPL consent reader: one line from stdin, read
 // byte-at-a-time so no buffered read-ahead can steal bytes from the line
-// editor that takes over the same descriptor moments later.
+// editor that takes over the same descriptor moments later. A prompt that
+// fails to print is an errConsentNotShown error, and nothing is read: a
+// question whose prompt fails to write is never answered.
 func startupPromptYN(in io.Reader, out io.Writer) func(context.Context, string) (bool, error) {
 	return func(_ context.Context, prompt string) (bool, error) {
-		_, _ = fmt.Fprint(out, prompt)
+		if _, err := fmt.Fprint(out, prompt); err != nil {
+			return false, questionNotShown(err)
+		}
 		var line []byte
 		buf := make([]byte, 1)
 		for {
@@ -531,7 +570,8 @@ func (a *destinationAdmission) effectiveConfigForDiscovery(raw *config.Config) *
 // render, admit via the exact -allow-destination set — NEVER a prompt (D10;
 // these commands do not read stdin for consent). A remote destination outside
 // the allowlist fails closed with the diagnostic naming it and the flag that
-// would cover it.
+// would cover it. The section on errOut describes operation (the subcommand's
+// name) and honors noColor.
 func admitForSubcommand(
 	ctx context.Context,
 	cfg *config.Config,
@@ -539,6 +579,8 @@ func admitForSubcommand(
 	opts providerbootstrap.PlanOptions,
 	allow []string,
 	ollamaOverride, ocProv, ocURL string,
+	operation string,
+	noColor bool,
 	errOut io.Writer,
 ) (*provider.DestinationGate, *providerbootstrap.NetworkPlan, *destinationAdmission, error) {
 	eff, err := providerbootstrap.Materialize(cfg, ollamaOverride, ocProv, ocURL)
@@ -556,6 +598,8 @@ func admitForSubcommand(
 		AllowFlags: allow,
 		Out:        errOut,
 		KeySources: keySourceLines(cfg),
+		NoColor:    noColor,
+		Operation:  operation,
 	})
 	if err != nil {
 		return nil, nil, nil, err

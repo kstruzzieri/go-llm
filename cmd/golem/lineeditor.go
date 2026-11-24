@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -51,10 +52,43 @@ var errSegmentFlagMissing = errors.New("golem: terminal returned a line with no 
 type termIO struct {
 	r io.Reader
 	w io.Writer
+	// writeErr, when set, keeps the first write error since editorSource.read
+	// last cleared it. x/term ignores its own write errors (the prompt
+	// included), so this is the only way an answer read learns that its
+	// question was never drawn. Shared by every copy, as each Terminal holds
+	// its own.
+	writeErr *atomic.Pointer[error]
+	// answer marks an answer read's window. read sets it on e.rw before the
+	// window binds a Terminal, and each Terminal holds its own copy.
+	answer bool
 }
 
-func (t termIO) Read(p []byte) (int, error)  { return t.r.Read(p) }
-func (t termIO) Write(p []byte) (int, error) { return t.w.Write(p) }
+// Read refuses, in an answer window whose writes have failed, before reading
+// anything: x/term draws the prompt, drops the write error and then reads, so
+// without this the editor would wait on a keystroke for a question nobody saw.
+// A paste already begun is the exception. It is read through its end marker,
+// so its tail is not left in the terminal's input queue for the shell to run
+// after golem exits.
+func (t termIO) Read(p []byte) (int, error) {
+	if t.answer && t.writeErr != nil {
+		if werr := t.writeErr.Load(); werr != nil {
+			if f, ok := t.r.(*keyFilter); !ok || !f.inPaste {
+				return 0, questionNotShown(*werr)
+			}
+		}
+	}
+	return t.r.Read(p)
+}
+
+// Write forwards to the output and records the first write error of the current
+// read window in writeErr, which x/term would otherwise drop.
+func (t termIO) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if err != nil && t.writeErr != nil {
+		t.writeErr.CompareAndSwap(nil, &err)
+	}
+	return n, err
+}
 
 // terminalBinding owns the answer to "where does terminal output go right
 // now": the current Terminal, or the scanner the editor permanently fell back
@@ -272,7 +306,7 @@ func newEditorSource(cfg inputConfig, resize <-chan struct{}, stopResize func(),
 		fallback:    fallback,
 		onInterrupt: cfg.OnInterrupt,
 	}
-	e.rw = termIO{r: e.filter, w: cfg.Out}
+	e.rw = termIO{r: e.filter, w: cfg.Out, writeErr: new(atomic.Pointer[error])}
 	e.binding.out = cfg.Out
 	if cfg.UseHistory {
 		e.hist = newGoalHistory(cfg.Getenv, cfg.Root, func(msg string) {
@@ -391,6 +425,22 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 	}()
 
 	refused := false
+	// A new window: only its own writes can have hidden its prompt. Nothing
+	// is bound yet, so no notice can write through termIO concurrently.
+	e.rw.writeErr.Store(nil)
+	e.rw.answer = !compose
+	if !compose {
+		// A question this window failed to draw is never answered, whatever
+		// ends the window: a line (already read, so discarded), EOF, Ctrl-C,
+		// a rejection, or termIO.Read refusing. A paste has been drained by
+		// then. Registered after the teardown defer, so it runs first and
+		// teardown's own writes do not count.
+		defer func() {
+			if werr := e.rw.writeErr.Load(); werr != nil && !errors.Is(err, errConsentNotShown) {
+				line, ok, err = "", false, questionNotShown(*werr)
+			}
+		}()
+	}
 	e.bindTerminal(prompt, hist, &refused)
 
 	// Composition state (spec 8.2), used only when compose is true. joined
@@ -464,6 +514,8 @@ func (e *editorSource) read(ctx context.Context, prompt string, hist term.Histor
 						return "", false, derr
 					}
 				}
+				// The window's deferred check discards seg if the question
+				// failed to draw.
 				return seg, true, nil
 			}
 			if inPaste {

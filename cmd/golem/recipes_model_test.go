@@ -135,6 +135,29 @@ func TestRecipeModelConsentRefusal(t *testing.T) {
 	}
 }
 
+// A recipe hint whose consent section cannot be shown ends the REPL (exit 1):
+// no answer and no later goal is read, and the hinted turn does not run.
+func TestRecipeModelConsentSectionWriteFailureEndsTheREPL(t *testing.T) {
+	fx := newModelSwitchFixture(t, remoteModelURL)
+	fx.withSession(t, nil, func(t *testing.T, sess *replSession) {
+		installModelRecipe(sess, &recipe.ModelHint{Role: "cloudrole"})
+		before := snapshotModelTuple(sess).withoutTurnState()
+		src := newCountingSource(sess, "/review project\nyes\nnext goal\n")
+		sess.destAdmission.setReplOut(failWriter{})
+		err := runREPL(t.Context(), src, io.Discard, nil, sess)
+		checkREPLEndedUnshown(t, err, src, 0, "yes")
+		if !errors.Is(err, errRecipeHintRefused) {
+			t.Errorf("err = %v, want the hint refused", err)
+		}
+		if len(src.goals()) != 0 || fx.primary.chats.Load() != 0 || fx.alt.chats.Load() != 0 {
+			t.Errorf("a goal ran: recorded %q, primary %d, alt %d", src.goals(), fx.primary.chats.Load(), fx.alt.chats.Load())
+		}
+		if after := snapshotModelTuple(sess).withoutTurnState(); !reflect.DeepEqual(before, after) {
+			t.Errorf("tuple changed: %+v", after)
+		}
+	})
+}
+
 func TestRecipeModelStrictShortcut(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

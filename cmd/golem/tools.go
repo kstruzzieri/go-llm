@@ -331,7 +331,7 @@ func newChainEmbedder(route embedRouteFunc, chain []string, usage *usageLedger) 
 			return rag.EmbedResult{}, fmt.Errorf("golem: embedding router unavailable")
 		}
 		rr := provider.RoutingRequest{
-			UseCase:        "embedding",
+			UseCase:        embeddingUseCase,
 			Input:          inputs,
 			RequiredCaps:   provider.CapEmbed,
 			ExpectedOutput: provider.DefaultExpectedOutput("embedding"),

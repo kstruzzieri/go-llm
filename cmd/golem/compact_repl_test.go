@@ -289,6 +289,31 @@ func TestCompactConsentAfterGrantsClear(t *testing.T) {
 	}
 }
 
+// /compact after /grants clear re-runs admission. When its section cannot be
+// shown, the REPL ends (exit 1) without summarizing, reading an answer, or
+// reading another goal.
+func TestCompactSectionWriteFailureEndsTheREPL(t *testing.T) {
+	calls := 0
+	sess, _ := newCompactSession(t, 5, func(context.Context, string, []conversation.Message) (string, error) {
+		calls++
+		return "SUM", nil
+	})
+	adm, _ := newTestAdmission(t, admEdges(t), nil, true, &fakePrompt{answer: true})
+	if err := adm.ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sess.destAdmission = adm
+	slash(t, sess, "/grants clear")
+	adm.setReplOut(failWriter{})
+	src := newCountingSource(sess, "/compact\nyes\nnext goal\n")
+
+	err := runREPL(context.Background(), src, io.Discard, nil, sess)
+	checkREPLEndedUnshown(t, err, src, 0, "yes")
+	if calls != 0 || sess.session.store.(*compactTestStore).saves != 0 {
+		t.Errorf("compacted after the failure: summarizer %d, saves %d", calls, sess.session.store.(*compactTestStore).saves)
+	}
+}
+
 func TestCompactFailureAndRefreshWarning(t *testing.T) {
 	blocked := &agent.BlockedError{Findings: []agent.Finding{{Interceptor: "secrets", Verdict: agent.VerdictBlock, Detail: "private summary text"}}}
 	for _, tc := range []struct {

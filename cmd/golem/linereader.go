@@ -130,21 +130,31 @@ func newScannerSource(in io.Reader, out io.Writer) *scannerSource {
 }
 
 func (s *scannerSource) ReadGoal(ctx context.Context, prompt string) (string, bool, error) {
-	return s.read(ctx, prompt)
+	return s.read(ctx, prompt, false)
 }
 
+// ReadAnswer never answers a question that failed to print: a typed-ahead
+// answer must not reply to a question the user never saw. It reads nothing
+// then and returns errConsentNotShown at once, leaving the line typed for the
+// question unread; the REPL ends on that error rather than read the line as
+// a goal, and run discards it from the terminal as golem exits.
 func (s *scannerSource) ReadAnswer(ctx context.Context, prompt string) (string, bool, error) {
-	return s.read(ctx, prompt)
+	return s.read(ctx, prompt, true)
 }
 
-func (s *scannerSource) read(ctx context.Context, prompt string) (string, bool, error) {
+func (s *scannerSource) read(ctx context.Context, prompt string, answer bool) (string, bool, error) {
 	// Marking the read active and printing the prompt are one critical
 	// section: a notice landing between them would print a prompt of its own
 	// and then be followed by this one.
 	s.mu.Lock()
 	s.readActive = true
 	s.prompt = prompt
-	_, _ = fmt.Fprint(s.out, prompt)
+	_, werr := fmt.Fprint(s.out, prompt)
+	if answer && werr != nil {
+		s.readActive = false
+		s.mu.Unlock()
+		return "", false, questionNotShown(werr)
+	}
 	s.mu.Unlock()
 
 	line, ok, err := s.lr.ReadLine(ctx)

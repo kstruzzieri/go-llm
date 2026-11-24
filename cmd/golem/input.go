@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"runtime"
@@ -24,7 +25,9 @@ type lineSource interface {
 	// must not.
 	ReadGoal(ctx context.Context, prompt string) (string, bool, error)
 
-	// ReadAnswer reads one approval answer. Never recorded to history.
+	// ReadAnswer reads one approval answer. Never recorded to history. A
+	// question whose prompt fails to print is never answered: the error
+	// wraps errConsentNotShown.
 	ReadAnswer(ctx context.Context, prompt string) (string, bool, error)
 
 	// RecordGoal appends an accepted goal to history. runREPL calls it after
@@ -46,6 +49,27 @@ type lineSource interface {
 
 	// Close releases whatever the source owns. Safe to call more than once.
 	Close() error
+}
+
+// errConsentNotShown marks a consent surface golem meant the user to answer
+// that failed to print: the prompt of a ReadAnswer question (a tool approval,
+// a destination question) or the model-server section above a destination
+// question. No answer is used for it. Nothing is read once the failure is
+// known, so golem never reads a line typed for that question (the editor
+// discards one it had already read when a later write failed); in the REPL the
+// next read would take it as a goal, so runREPL ends the session on this error
+// (exit status 1) instead of reading on. At startup and in the one-shot modes
+// the error already ends the run. Either way run then discards the input still
+// queued in the terminal (discardIfConsentNotShown), so the shell golem exits
+// to does not run it.
+//
+// Its text is a fragment the wrapping site completes, as in "the question
+// could not be shown: <write error>".
+var errConsentNotShown = errors.New("could not be shown")
+
+// questionNotShown is the error of a question whose prompt failed to print.
+func questionNotShown(werr error) error {
+	return fmt.Errorf("the question %w: %w", errConsentNotShown, werr)
 }
 
 // lineSourceMode is the final-dispatch decision about whether an interactive

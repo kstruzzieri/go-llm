@@ -140,7 +140,7 @@ func runModelsCommand(ctx context.Context, args []string, out, errOut io.Writer)
 	}
 	gate, netPlan, adm, err := admitForSubcommand(ctx, cfg, routes,
 		providerbootstrap.PlanOptions{CapabilityProbes: !jsonOut},
-		allowDest, ollamaURL, ocProv, ocURL, errOut)
+		allowDest, ollamaURL, ocProv, ocURL, "models", false, errOut)
 	if err != nil {
 		return err
 	}

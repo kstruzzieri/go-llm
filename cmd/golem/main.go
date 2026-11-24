@@ -879,13 +879,44 @@ func main() {
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) || errors.Is(err, errSourceFailed) {
 			os.Exit(exitCodeFor(err))
 		}
-		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", runFailureMessage("", err))
+		_, _ = fmt.Fprintf(os.Stderr, "golem: %s\n", cliFailureLine(err))
 		os.Exit(exitCodeFor(err))
 	}
 }
 
+// cliFailureLine is the text of main's stderr line for err. A question that
+// could not be shown promises one line, but errors.Join (a runtime
+// cancellation, an editor restore failure, a failed discard of typed-ahead
+// input) can add causes on lines of their own, so those are joined with "; ".
+// Only the text changes, never err.
+func cliFailureLine(err error) string {
+	msg := runFailureMessage("", err)
+	if errors.Is(err, errConsentNotShown) {
+		msg = strings.ReplaceAll(msg, "\n", "; ")
+	}
+	return msg
+}
+
+// discardIfConsentNotShown is run's last step when a consent surface could not
+// be shown (errConsentNotShown): golem is about to exit without reading what
+// the user typed or pasted for it, and the shell it exits to would run that
+// input. On a terminal stdin it discards the queued input; on any other error,
+// or a stdin that is not a terminal, it does nothing. A failed discard is
+// joined into runErr, so the user learns the input may reach the shell.
+func discardIfConsentNotShown(runErr error, stdin *os.File, isTerminal func(int) bool, discard func(*os.File) error) error {
+	if !errors.Is(runErr, errConsentNotShown) || stdin == nil || !isTerminal(int(stdin.Fd())) {
+		return runErr
+	}
+	if err := discard(stdin); err != nil {
+		return errors.Join(runErr, fmt.Errorf("typed-ahead input could not be discarded and may reach the shell: %w", err))
+	}
+	return runErr
+}
+
 func colorEnabled(out *os.File, noColor bool) bool {
-	return colorPermitted(noColor) && realTermOps{}.IsTerminal(int(out.Fd()))
+	fd := int(out.Fd())
+	ops := consoleTermOps{}
+	return colorPermitted(noColor) && ops.IsTerminal(fd) && ops.supportsANSI(fd)
 }
 
 // colorPermitted holds the flag/environment gates separately from the TTY
@@ -939,6 +970,11 @@ func formatFeedbackReport(report feedbackReport) string {
 }
 
 func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...runHooks) (runErr error) {
+	// Registered first so it runs last: withLineSource has closed the line
+	// source, so the terminal is cooked again, before queued input is dropped.
+	defer func() {
+		runErr = discardIfConsentNotShown(runErr, stdin, realTermOps{}.IsTerminal, discardTypedAhead)
+	}()
 	var hooks runHooks
 	if len(testHooks) > 0 {
 		hooks = testHooks[0]
@@ -1110,7 +1146,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		routes = append(routes, summarizeRoute)
 	}
 	if embChainErr == nil && retrievalEnabled {
-		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: "embedding", Chain: embChain})
+		routes = append(routes, providerbootstrap.PlannedRoute{UseCase: embeddingUseCase, Chain: embChain})
 	}
 	if f.grounding && cfg != nil {
 		// Grounding (#348, merged via #480) binds the extract and verify use
@@ -1185,6 +1221,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		PromptYN:    startupPromptYN(stdin, stderr),
 		Out:         stderr,
 		KeySources:  keySourceLines(cfg),
+		NoColor:     f.noColor,
 	})
 	if err != nil {
 		return maybeUsageError(err, headlessExitApplies(f))
@@ -1998,6 +2035,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		maxSteps:         f.maxSteps,
 		startupBudget:    budget,
 		color:            colorEnabled(renderOut, f.noColor),
+		noColor:          f.noColor,
 		retrieveOmitted:  retrieveOmitted,
 		session:          sessn,
 		strictApproval:   f.strictApproval,
@@ -2277,6 +2315,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 		// through the SAME lineSource as every other read, never a second
 		// stdin reader racing the editor.
 		sess.destAdmission.setPrompt(lineSourcePromptYN(src))
+		// ...and draw the section above that question on the stream the line
+		// source prints to (inputConfig.Out defaults to Stdout), not stderr.
+		sess.destAdmission.setReplOut(stdout)
 		// Bound before the auto-index goroutine can emit a notice, so no
 		// asynchronous message is ever rendered through the default display
 		// while a source exists.
