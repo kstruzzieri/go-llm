@@ -155,21 +155,23 @@ func TestEvaluateRecallG2(t *testing.T) {
 	}
 	for _, tc := range tests {
 		got := evaluateRecallG2(tc.pairs, tc.maxSlips, tc.primary)
-		if got.ArmOneAnswers != tc.answers || got.Slips != tc.slip || got.Inconclusive != tc.inconc || got.Pass != tc.pass {
+		if got.Pairs != len(tc.pairs) || got.ArmOneAnswers != tc.answers || got.Slips != tc.slip || got.Inconclusive != tc.inconc || got.Pass != tc.pass {
 			t.Errorf("%s: got %+v", tc.name, got)
 		}
 	}
 }
 
 func TestDecideRecallRun(t *testing.T) {
+	g1 := func(c string) recallG1Result { return recallG1Result{Comparison: c, B: 8, Pass: true} }
+	g2 := func() recallG2Result { return recallG2Result{Pairs: 40, ArmOneAnswers: 40, Pass: true} }
 	good := func() recallDecisionInput {
 		return recallDecisionInput{
 			Run:                1,
 			DeterminismChanges: map[string]int{recallPrimaryModel: 0, "b": 0},
-			G1:                 []recallG1Result{{Comparison: recallCompareArm1, Pass: true}, {Comparison: recallCompareArm0, Pass: true}},
-			PrimaryG2:          recallG2Result{Pass: true},
-			SecondaryG2:        map[string]recallG2Result{"b": {Pass: true}},
-			MaxLabelTokens:     10,
+			G1:                 []recallG1Result{g1(recallCompareArm1), g1(recallCompareArm0)},
+			PrimaryG2:          g2(),
+			SecondaryG2:        map[string]recallG2Result{"b": g2()},
+			LabelTokens:        map[string]int{recallPrimaryModel: recallLabelMaxTokens, "b": 1},
 		}
 	}
 	tests := []struct {
@@ -185,30 +187,22 @@ func TestDecideRecallRun(t *testing.T) {
 		{"stopped beats all", func(in *recallDecisionInput) {
 			in.Stopped = true
 			in.DeterminismChanges["b"] = 5
-			in.MaxLabelTokens = 99
+			in.LabelTokens["b"] = 99
 		}, recallStopped},
-		{"label 11", func(in *recallDecisionInput) { in.MaxLabelTokens = 11 }, recallFail},
-		{"primary inconclusive", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{Inconclusive: true} }, recallInconclusive},
+		{"stopped with nothing else", func(in *recallDecisionInput) { *in = recallDecisionInput{Stopped: true} }, recallStopped},
+		{"primary label 11", func(in *recallDecisionInput) { in.LabelTokens[recallPrimaryModel] = recallLabelMaxTokens + 1 }, recallFail},
+		{"secondary label 11", func(in *recallDecisionInput) { in.LabelTokens["b"] = recallLabelMaxTokens + 1 }, recallFail},
+		{"primary inconclusive", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{Pairs: 40, Inconclusive: true} }, recallInconclusive},
 		{"fail beats inconclusive", func(in *recallDecisionInput) {
-			in.PrimaryG2 = recallG2Result{Inconclusive: true}
+			in.PrimaryG2 = recallG2Result{Pairs: 40, Inconclusive: true}
 			in.G1[0].Pass = false
 		}, recallFail},
-		{"primary G2 fail", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{} }, recallFail},
-		{"secondary G2 fail", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{} }, recallFail},
-		{"no G1", func(in *recallDecisionInput) { in.G1 = nil }, recallFail},
-		{"one G1", func(in *recallDecisionInput) { in.G1 = in.G1[:1] }, recallFail},
-		{"arm 1 twice", func(in *recallDecisionInput) { in.G1[1].Comparison = recallCompareArm1 }, recallFail},
-		{"label tokens unmeasured", func(in *recallDecisionInput) { in.MaxLabelTokens = 0 }, recallFail},
-		{"run 0", func(in *recallDecisionInput) { in.Run = 0 }, recallFail},
-		{"run 3", func(in *recallDecisionInput) { in.Run = 3 }, recallFail},
-		{"determinism missing primary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallPrimaryModel) }, recallFail},
-		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, "b") }, recallFail},
-		{"extra determinism model", func(in *recallDecisionInput) { in.DeterminismChanges["c"] = 0 }, recallFail},
-		{"secondary holds primary", func(in *recallDecisionInput) {
-			in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pass: true}
-		}, recallFail},
-		{"stopped beats invalid input", func(in *recallDecisionInput) { in.Stopped = true; in.G1 = nil }, recallStopped},
-		{"invalid beats fail", func(in *recallDecisionInput) { in.DeterminismChanges[recallPrimaryModel] = 2; in.MaxLabelTokens = 99 }, recallInvalid},
+		{"primary G2 fail", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{Pairs: 40, Slips: 2} }, recallFail},
+		{"secondary G2 fail", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{Pairs: 40, Slips: 3} }, recallFail},
+		{"invalid beats fail", func(in *recallDecisionInput) {
+			in.DeterminismChanges[recallPrimaryModel] = 2
+			in.LabelTokens["b"] = 99
+		}, recallInvalid},
 	}
 	for _, tc := range tests {
 		in := good()
@@ -220,18 +214,50 @@ func TestDecideRecallRun(t *testing.T) {
 }
 
 func TestRecallDecisionInputValidate(t *testing.T) {
-	in := recallDecisionInput{
-		Run:                1,
-		DeterminismChanges: map[string]int{recallPrimaryModel: 0},
-		G1:                 []recallG1Result{{Comparison: recallCompareArm1}, {Comparison: recallCompareArm0}},
-		MaxLabelTokens:     1,
+	good := func() recallDecisionInput {
+		return recallDecisionInput{
+			Run:                1,
+			DeterminismChanges: map[string]int{recallPrimaryModel: 0, "b": 0},
+			G1: []recallG1Result{
+				{Comparison: recallCompareArm1, B: 1},
+				{Comparison: recallCompareArm0, Neither: 1},
+			},
+			PrimaryG2:   recallG2Result{Pairs: 1},
+			SecondaryG2: map[string]recallG2Result{"b": {Pairs: 1}},
+			LabelTokens: map[string]int{recallPrimaryModel: 1, "b": 1},
+		}
 	}
-	if err := in.validate(); err != nil {
-		t.Errorf("valid input: %v", err)
+	tests := []struct {
+		name string
+		mut  func(*recallDecisionInput)
+		ok   bool
+	}{
+		{"valid", func(*recallDecisionInput) {}, true},
+		{"no G1", func(in *recallDecisionInput) { in.G1 = nil }, false},
+		{"one G1", func(in *recallDecisionInput) { in.G1 = in.G1[:1] }, false},
+		{"arm 1 twice", func(in *recallDecisionInput) { in.G1[1].Comparison = recallCompareArm1 }, false},
+		{"G1 with zero pairs", func(in *recallDecisionInput) { in.G1[0] = recallG1Result{Comparison: recallCompareArm1} }, false},
+		{"run 0", func(in *recallDecisionInput) { in.Run = 0 }, false},
+		{"run 3", func(in *recallDecisionInput) { in.Run = recallMaxRun + 1 }, false},
+		{"zero-value primary G2", func(in *recallDecisionInput) { in.PrimaryG2 = recallG2Result{} }, false},
+		{"zero-pair secondary G2", func(in *recallDecisionInput) { in.SecondaryG2["b"] = recallG2Result{} }, false},
+		{"secondary holds primary", func(in *recallDecisionInput) { in.SecondaryG2[recallPrimaryModel] = recallG2Result{Pairs: 1} }, false},
+		{"determinism missing primary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, recallPrimaryModel) }, false},
+		{"determinism missing secondary", func(in *recallDecisionInput) { delete(in.DeterminismChanges, "b") }, false},
+		{"determinism extra model", func(in *recallDecisionInput) { in.DeterminismChanges["c"] = 0 }, false},
+		{"labels missing model", func(in *recallDecisionInput) { delete(in.LabelTokens, "b") }, false},
+		{"labels extra model", func(in *recallDecisionInput) { in.LabelTokens["c"] = 1 }, false},
+		{"labels zero value", func(in *recallDecisionInput) { in.LabelTokens["b"] = 0 }, false},
 	}
-	in.MaxLabelTokens = 0
-	if err := in.validate(); err == nil {
-		t.Error("unmeasured label tokens accepted")
+	for _, tc := range tests {
+		in := good()
+		tc.mut(&in)
+		if err := in.validate(); (err == nil) != tc.ok {
+			t.Errorf("%s: err=%v want ok=%v", tc.name, err, tc.ok)
+		}
+		if !tc.ok && decideRecallRun(in) != recallFail {
+			t.Errorf("%s: decideRecallRun did not fail closed", tc.name)
+		}
 	}
 }
 
@@ -273,12 +299,14 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		fmt.Sprintf("at most %d prompt tokens", recallLabelMaxTokens),
 		fmt.Sprintf("at most %d of the 12", recallHeadroomMaxRely),
 		"re-checked, searched again, or gave no value",
+		"plus every missing pair; every pair in neither B nor C",
 		"counts for neither side",
 		"not counted among arm 1's answers",
 		"harness error",
 		"never a gate outcome",
-		"invalid-final",
-		fmt.Sprintf("a run number other than 1 or %d", 2),
+		string(recallInvalidFinal),
+		fmt.Sprintf("a run number other than 1 or %d", recallMaxRun),
+		"a missing comparison or one with no pairs",
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",
 	} {
 		if !strings.Contains(recallDecisionRuleText, want) {

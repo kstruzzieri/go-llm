@@ -33,6 +33,9 @@ const (
 	recallLabelMaxTokens = 10
 )
 
+// recallMaxRun is the last run number: one rerun after a recorded serving fix.
+const recallMaxRun = 2
+
 const (
 	// recallCompareArm1 labels the G1 comparison against arm 1 (the
 	// like-for-like baseline).
@@ -47,12 +50,12 @@ const (
 // a const); TestRecallDecisionRuleTextNamesConstants builds each phrase from
 // the constants so the text cannot drift from them.
 const recallDecisionRuleText = `recall label decision rule (registered):
-G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm instead re-checked, searched again, or gave no value; every other pair (for example a memory write, another tool call, another value, or an empty reply) counts for neither side; C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p < 0.025.
+G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm instead re-checked, searched again, or gave no value; C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair; every pair in neither B nor C (for example a memory write, another tool call, another value, or an empty reply) counts for neither side. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p < 0.025.
 G2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair counts as a slip and is not counted among arm 1's answers. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.
 G5: the label costs at most 10 prompt tokens per labeled record, on each model.
 Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
 Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
-The report refuses to decide on incomplete input (a missing comparison, a model without G2 pairs or a determinism count, an unmeasured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
+The report refuses to decide on incomplete input (a missing comparison or one with no pairs, a model without G2 pairs, a determinism count or a measured label size, a run number other than 1 or 2): that is a harness error, fixed and the report re-run on the same captures; it is never a gate outcome.
 Order: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 
@@ -131,8 +134,8 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 
 // recallG2Result is one model's safety count and verdict.
 type recallG2Result struct {
-	ArmOneAnswers, Slips int
-	Inconclusive, Pass   bool
+	Pairs, ArmOneAnswers, Slips int
+	Inconclusive, Pass          bool
 }
 
 // evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it
@@ -141,7 +144,7 @@ type recallG2Result struct {
 // fail; otherwise a primary whose arm 1 answered fewer than
 // recallBaselineMin is inconclusive.
 func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2Result {
-	var r recallG2Result
+	r := recallG2Result{Pairs: len(pairs)}
 	for _, p := range pairs {
 		if p.Missing {
 			r.Slips++
@@ -189,8 +192,8 @@ type recallDecisionInput struct {
 	Stopped bool
 	// Run is 1 or 2 (the rerun after a recorded serving fix).
 	Run int
-	// DeterminismChanges is keyed by model display name; it must hold the
-	// primary model and every key of SecondaryG2.
+	// DeterminismChanges is keyed by model display name; its key set must be
+	// the primary model plus every key of SecondaryG2.
 	DeterminismChanges map[string]int
 	// G1 holds exactly the arm 1 and arm 0 comparisons.
 	G1 []recallG1Result
@@ -198,51 +201,74 @@ type recallDecisionInput struct {
 	PrimaryG2 recallG2Result
 	// SecondaryG2 is each other local model's safety result.
 	SecondaryG2 map[string]recallG2Result
-	// MaxLabelTokens is the largest arm 2 minus arm 1 prompt-token difference
-	// over every labeled pair on every model; 0 means not measured.
-	MaxLabelTokens int
+	// LabelTokens is keyed like DeterminismChanges: per model, the largest
+	// arm 2 minus arm 1 prompt-token difference over that model's labeled
+	// pairs. Each value must be at least 1 (0 means not measured).
+	LabelTokens map[string]int
 }
 
-// validate reports why the input is too incomplete to decide. Task 7 must
-// call it and surface the error before deciding; decideRecallRun also fails
-// closed on it.
+// recallKeysMatch reports whether got holds exactly the primary model plus
+// the keys of secondary.
+func recallKeysMatch(got map[string]int, secondary map[string]recallG2Result) bool {
+	if _, ok := got[recallPrimaryModel]; !ok || len(got) != len(secondary)+1 {
+		return false
+	}
+	for m := range secondary {
+		if _, ok := got[m]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// validate reports why the input is too incomplete to decide. It applies to
+// a run that is not Stopped; decideRecallRun does not consult it for a
+// stopped run. Task 7 must call it and surface the error as a harness error
+// before deciding; decideRecallRun also fails closed on it.
 func (in recallDecisionInput) validate() error {
 	seen := map[string]int{}
 	for _, g := range in.G1 {
 		seen[g.Comparison]++
+		if g.B+g.C+g.Neither < 1 {
+			return fmt.Errorf("recall: G1 %q has no pairs", g.Comparison)
+		}
 	}
 	if len(in.G1) != 2 || seen[recallCompareArm1] != 1 || seen[recallCompareArm0] != 1 {
 		return fmt.Errorf("recall: G1 must hold exactly one %q and one %q result, got %d results", recallCompareArm1, recallCompareArm0, len(in.G1))
 	}
-	if in.MaxLabelTokens < 1 {
-		return errors.New("recall: label tokens not measured (MaxLabelTokens < 1)")
-	}
-	if in.Run != 1 && in.Run != 2 {
-		return fmt.Errorf("recall: Run must be 1 or 2, got %d", in.Run)
-	}
-	if _, ok := in.DeterminismChanges[recallPrimaryModel]; !ok {
-		return fmt.Errorf("recall: no determinism count for %s", recallPrimaryModel)
+	if in.Run < 1 || in.Run > recallMaxRun {
+		return fmt.Errorf("recall: Run must be 1 to %d, got %d", recallMaxRun, in.Run)
 	}
 	if _, ok := in.SecondaryG2[recallPrimaryModel]; ok {
 		return fmt.Errorf("recall: SecondaryG2 must not hold the primary model %s", recallPrimaryModel)
 	}
-	for m := range in.SecondaryG2 {
-		if _, ok := in.DeterminismChanges[m]; !ok {
-			return fmt.Errorf("recall: no determinism count for %s", m)
+	if !recallKeysMatch(in.DeterminismChanges, in.SecondaryG2) {
+		return errors.New("recall: DeterminismChanges models must be the primary plus SecondaryG2's models")
+	}
+	if !recallKeysMatch(in.LabelTokens, in.SecondaryG2) {
+		return errors.New("recall: LabelTokens models must be the primary plus SecondaryG2's models")
+	}
+	for m, n := range in.LabelTokens {
+		if n < 1 {
+			return fmt.Errorf("recall: label tokens not measured for %s", m)
 		}
 	}
-	for m := range in.DeterminismChanges {
-		if _, ok := in.SecondaryG2[m]; m != recallPrimaryModel && !ok {
-			return fmt.Errorf("recall: model %s has a determinism count but no G2 result", m)
+	if in.PrimaryG2.Pairs < 1 {
+		return errors.New("recall: primary G2 has no pairs")
+	}
+	for m, g := range in.SecondaryG2 {
+		if g.Pairs < 1 {
+			return fmt.Errorf("recall: G2 for %s has no pairs", m)
 		}
 	}
 	return nil
 }
 
 // decideRecallRun applies the registered order: stopped, determinism, fail,
-// inconclusive, pass. Fail beats inconclusive. Task 7 calls validate first
-// and returns its error as a harness error, so the recallFail returned here
-// on a validate error is defensive only.
+// inconclusive, pass. Fail beats inconclusive. A stopped run is decided
+// before validation. Task 7 calls validate first and returns its error as a
+// harness error, so the recallFail returned here on a validate error is
+// defensive only.
 func decideRecallRun(in recallDecisionInput) recallVerdict {
 	if in.Stopped {
 		return recallStopped
@@ -252,13 +278,16 @@ func decideRecallRun(in recallDecisionInput) recallVerdict {
 	}
 	for _, n := range in.DeterminismChanges {
 		if n > recallDeterminismMaxChanges {
-			if in.Run >= 2 {
+			if in.Run >= recallMaxRun {
 				return recallInvalidFinal
 			}
 			return recallInvalid
 		}
 	}
-	fail := in.MaxLabelTokens > recallLabelMaxTokens || (!in.PrimaryG2.Pass && !in.PrimaryG2.Inconclusive)
+	fail := !in.PrimaryG2.Pass && !in.PrimaryG2.Inconclusive
+	for _, n := range in.LabelTokens {
+		fail = fail || n > recallLabelMaxTokens
+	}
 	for _, g := range in.G1 {
 		fail = fail || !g.Pass
 	}
