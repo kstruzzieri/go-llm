@@ -5,15 +5,20 @@ import (
 	"testing"
 )
 
+// numVal is a number-type recall value (lesson 5, changed 8).
 func numVal() RecallValue {
 	return RecallValue{Type: "number", Identifier: "maxRetries", Lesson: "5", Changed: "8"}
 }
 
+// idVal is an identifier-type recall value.
 func idVal() RecallValue {
 	return RecallValue{Type: "identifier", Identifier: "strategy", Lesson: "retry.max_attempts", Changed: "exponential", Alternatives: []string{"linear"}}
 }
 
-func call(name, args string) ToolCall { return ToolCall{Name: name, Arguments: json.RawMessage(args)} }
+// recallCall builds a tool call with raw JSON arguments.
+func recallCall(name, args string) ToolCall {
+	return ToolCall{Name: name, Arguments: json.RawMessage(args)}
+}
 
 func TestStatesValueNumber(t *testing.T) {
 	v := numVal()
@@ -57,14 +62,14 @@ func TestClassifyRecallA(t *testing.T) {
 		reply Turn
 		want  recallKind
 	}{
-		{"rely", Turn{Content: "it is 5", ToolCalls: []ToolCall{call("glob", `{"pattern":"*.go"}`)}}, recallRely},
-		{"recheck read", Turn{Content: "it is 5", ToolCalls: []ToolCall{call("read_file", `{"path":"config/retry.go"}`)}}, recallRecheck},
-		{"recheck search", Turn{ToolCalls: []ToolCall{call("search", `{"pattern":"maxRetries"}`)}}, recallRecheck},
-		{"other read", Turn{Content: "5", ToolCalls: []ToolCall{call("read_file", `{"path":"a.go"}`)}}, recallRely},
-		{"bad args", Turn{ToolCalls: []ToolCall{call("read_file", `{`)}}, recallOtherTool},
-		{"second search", Turn{ToolCalls: []ToolCall{call("agent_memory_search", `{}`)}}, recallSecondSearch},
-		{"write", Turn{ToolCalls: []ToolCall{call("agent_memory_promote", `{}`)}}, recallMemoryWrite},
-		{"other tool", Turn{ToolCalls: []ToolCall{call("list", `{}`)}}, recallOtherTool},
+		{"rely", Turn{Content: "it is 5", ToolCalls: []ToolCall{recallCall("glob", `{"pattern":"*.go"}`)}}, recallRely},
+		{"recheck read", Turn{Content: "it is 5", ToolCalls: []ToolCall{recallCall("read_file", `{"path":"config/retry.go"}`)}}, recallRecheck},
+		{"recheck search", Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"maxRetries"}`)}}, recallRecheck},
+		{"other read", Turn{Content: "5", ToolCalls: []ToolCall{recallCall("read_file", `{"path":"a.go"}`)}}, recallRely},
+		{"bad args", Turn{ToolCalls: []ToolCall{recallCall("read_file", `{`)}}, recallEmpty},
+		{"second search", Turn{ToolCalls: []ToolCall{recallCall("agent_memory_search", `{}`)}}, recallSecondSearch},
+		{"write", Turn{ToolCalls: []ToolCall{recallCall("agent_memory_promote", `{}`)}}, recallMemoryWrite},
+		{"other tool", Turn{ToolCalls: []ToolCall{recallCall("list", `{}`)}}, recallOtherTool},
 		{"empty", Turn{Content: "  "}, recallEmpty},
 		{"no value", Turn{Content: "Let me ask: which file?"}, recallNoValue},
 		{"other number", Turn{Content: "See line 12"}, recallOtherValue},
@@ -98,7 +103,7 @@ func TestRecallRecheckPathSpellings(t *testing.T) {
 		"config/retry_test.go": recallOtherTool, "xconfig/retry.go": recallOtherTool,
 	} {
 		args, _ := json.Marshal(map[string]string{"path": path})
-		if got := classifyRecallA(ev, Turn{ToolCalls: []ToolCall{call("read_file", string(args))}}); got != want {
+		if got := classifyRecallA(ev, Turn{ToolCalls: []ToolCall{recallCall("read_file", string(args))}}); got != want {
 			t.Errorf("%s: got %v, want %v", path, got, want)
 		}
 	}
@@ -116,14 +121,90 @@ func TestClassifyRecallB(t *testing.T) {
 	}{
 		{"S2 answers", mk("S2"), Turn{Content: "It is 5"}, recallAnswers, false, false},
 		{"S2 hedged", mk("S2"), Turn{Content: "I can’t confirm it is still 5"}, recallAnswers, false, true},
-		{"S2 continues", mk("S2"), Turn{ToolCalls: []ToolCall{call("read_file", `{}`)}}, recallContinues, false, false},
+		{"S2 continues", mk("S2"), Turn{ToolCalls: []ToolCall{recallCall("read_file", `{}`)}}, recallContinues, false, false},
 		{"S2 declines", mk("S2"), Turn{Content: "I'm not sure"}, recallDeclinesOrWrong, false, true},
 		{"S1 both", mk("S1"), Turn{Content: "used to be 5, now 8"}, recallAnswers, true, false},
+		{"S2 answers with call", mk("S2"), Turn{Content: "It is 5", ToolCalls: []ToolCall{recallCall("read_file", `{"path":"a.go"}`)}}, recallAnswers, false, false},
+		{"S2 bad call declines", mk("S2"), Turn{ToolCalls: []ToolCall{recallCall("read_file", `{`)}}, recallDeclinesOrWrong, false, false},
+		{"id S2 answers", RecallEval{Value: idVal(), Cases: []string{"S2"}}, Turn{Content: "retry.max_attempts"}, recallAnswers, false, false},
+		{"id S2 declines", RecallEval{Value: idVal(), Cases: []string{"S2"}}, Turn{Content: "exponential"}, recallDeclinesOrWrong, false, false},
 		{"S1 wrong", mk("S1"), Turn{Content: "it is 5"}, recallDeclinesOrWrong, false, false},
 	} {
 		got, both := classifyRecallB(c.ev, c.reply)
 		if got != c.want || both != c.both || recallHedged(c.reply.Content) != c.hedged {
-			t.Errorf("%s: got %v/%v/%v", c.name, got, both, recallHedged(c.reply.Content))
+			t.Errorf("%s: got %v/%v/%v, want %v/%v/%v", c.name, got, both, recallHedged(c.reply.Content), c.want, c.both, c.hedged)
 		}
+	}
+}
+
+func TestRecallHedged(t *testing.T) {
+	for _, p := range recallHedgePhrases {
+		if !recallHedged("so " + p + " here") {
+			t.Errorf("phrase %q not hedged", p)
+		}
+	}
+	for in, want := range map[string]bool{"I CAN\u2019T CONFIRM": true, "can\u2019t confirm": true, "I would NEED to check": true, "sure": false} {
+		if got := recallHedged(in); got != want {
+			t.Errorf("recallHedged(%q) = %v", in, got)
+		}
+	}
+}
+
+func TestClassifyRecallAOrderAndSpec(t *testing.T) {
+	ev := RecallEval{Value: numVal(), NamedFile: "config/retry.go"}
+	idEv := RecallEval{Value: idVal(), NamedFile: "x.go"}
+	read := recallCall("read_file", `{"path":"config/retry.go"}`)
+	for _, c := range []struct {
+		name  string
+		ev    RecallEval
+		reply Turn
+		want  recallKind
+	}{
+		{"recheck beats search", ev, Turn{ToolCalls: []ToolCall{read, recallCall("agent_memory_search", `{}`)}}, recallRecheck},
+		{"search beats create", ev, Turn{ToolCalls: []ToolCall{recallCall("agent_memory_search", `{}`), recallCall("agent_memory_create", `{}`)}}, recallSecondSearch},
+		{"write beats other", ev, Turn{ToolCalls: []ToolCall{recallCall("agent_memory_promote", `{}`), recallCall("glob", `{}`)}}, recallMemoryWrite},
+		{"rely with two other calls", ev, Turn{Content: "5", ToolCalls: []ToolCall{recallCall("glob", `{}`), recallCall("list", `{}`)}}, recallRely},
+		{"bad args is no call", ev, Turn{Content: "5", ToolCalls: []ToolCall{recallCall("read_file", `{`)}}, recallRely},
+		{"glob alone", ev, Turn{ToolCalls: []ToolCall{recallCall("glob", `{}`)}}, recallOtherTool},
+		{"bad args alone", ev, Turn{ToolCalls: []ToolCall{recallCall("read_file", `{`)}}, recallEmpty},
+		{"bad memory search is no call", ev, Turn{ToolCalls: []ToolCall{recallCall("agent_memory_search", `{`)}}, recallEmpty},
+		{"create alone", ev, Turn{ToolCalls: []ToolCall{recallCall("agent_memory_create", `{}`)}}, recallMemoryWrite},
+		{"literal empty", ev, Turn{}, recallEmpty},
+		{"search 5", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"5"}`)}}, recallRecheck},
+		{"search timeout 15", ev, Turn{Content: "It is 5", ToolCalls: []ToolCall{recallCall("search", `{"pattern":"timeout = 15"}`)}}, recallRely},
+		{"search word boundary", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"\\b5\\b"}`)}}, recallRecheck},
+		{"search maxRetries.*5", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"maxRetries.*5"}`)}}, recallRecheck},
+		{"search =5", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"=5"}`)}}, recallRecheck},
+		{"search sha256", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"sha256"}`)}}, recallOtherTool},
+		{"search http 503", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"http 503"}`)}}, recallOtherTool},
+		{"search decimal", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"0.5 and 5.5"}`)}}, recallOtherTool},
+		{"search upper identifier", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"MAXRETRIES"}`)}}, recallRecheck},
+		{"search (?i) identifier", ev, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"(?i)MAXRETRIES"}`)}}, recallRecheck},
+		{"search id lesson", idEv, Turn{ToolCalls: []ToolCall{recallCall("search", `{"pattern":"RETRY.max_attempts"}`)}}, recallRecheck},
+		{"string envelope", ev, Turn{Content: "It is 5", ToolCalls: []ToolCall{recallCall("read_file", `"{\"path\":\"config/retry.go\"}"`)}}, recallRecheck},
+		{"one pronoun", ev, Turn{Content: "Which one do you mean?"}, recallNoValue},
+		{"one pronoun lesson 2", RecallEval{Value: RecallValue{Type: "number", Identifier: "n", Lesson: "2", Changed: "1"}}, Turn{Content: "Which one?"}, recallNoValue},
+	} {
+		if got := classifyRecallA(c.ev, c.reply); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestStatesValueNumberRound1(t *testing.T) {
+	v := numVal()
+	for in, want := range map[string]bool{"x_five": false, "9five": false, "no_one": false, ".5": false, "5.0": true, "5.00": true, "05": false, "five.": true, "(five)": true} {
+		if got := statesValue(in, v, "5"); got != want {
+			t.Errorf("statesValue(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if !statesValue("2.5s", v, "2.5") || !statesValue("2.50", v, "2.5") {
+		t.Error("2.5 not stated")
+	}
+	if !statesValue("0", v, "0") || !statesValue("0.0", v, "0") {
+		t.Error("0 not stated")
+	}
+	if statesValue("anything", idVal(), "") {
+		t.Error("empty identifier stated")
 	}
 }

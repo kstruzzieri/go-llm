@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"path"
 	"strconv"
 	"strings"
@@ -38,52 +37,72 @@ const (
 // recallHedgePhrases is the frozen hedge list; matching is case-insensitive.
 var recallHedgePhrases = []string{
 	"can't confirm", "cannot confirm", "not sure", "may have changed",
-	"might have changed", "unable to verify", "i would need to check",
+	"might have changed", "unable to verify", "I would need to check",
 }
 
-// recallNumberWords maps the number words zero..twenty to their values.
+// recallNumberWords maps the number words zero and two..twenty to their values.
 var recallNumberWords = func() map[string]string {
 	m := map[string]string{}
+	// "one" is left out: as a pronoun ("which one?") it would state 1.
 	for i, w := range []string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
 		"eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"} {
-		m[w] = strconv.Itoa(i)
+		if w != "one" {
+			m[w] = strconv.Itoa(i)
+		}
 	}
 	return m
 }()
 
-func isDigit(c byte) bool { return c >= '0' && c <= '9' }
-func isLetter(c byte) bool {
+// recallIsDigit reports whether c is an ASCII digit.
+func recallIsDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// recallIsLetter reports whether c is an ASCII letter.
+func recallIsLetter(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
-func isWordByte(c byte) bool { return isDigit(c) || isLetter(c) || c == '_' }
 
-// numberTokens lists the number tokens and number words stated in content.
+// recallIsWordByte reports whether c is in [A-Za-z0-9_].
+func recallIsWordByte(c byte) bool { return recallIsDigit(c) || recallIsLetter(c) || c == '_' }
+
+// normalizeRecallNumber strips trailing fractional zeros ("5.0" -> "5",
+// "2.50" -> "2.5"); leading zeros are kept so "05" is not 5.
+func normalizeRecallNumber(t string) string {
+	if strings.Contains(t, ".") {
+		t = strings.TrimSuffix(strings.TrimRight(t, "0"), ".")
+	}
+	return t
+}
+
+// numberTokens lists the normalized number tokens and number words stated in
+// content. A digit run preceded by a word byte or '.' is not a token; a number
+// word counts only when both neighbors are outside [A-Za-z0-9_].
 func numberTokens(content string) []string {
 	var out []string
 	for i := 0; i < len(content); {
 		c := content[i]
 		switch {
-		case isDigit(c):
+		case recallIsDigit(c):
 			j := i
-			for j < len(content) && isDigit(content[j]) {
+			for j < len(content) && recallIsDigit(content[j]) {
 				j++
 			}
-			if j+1 < len(content) && content[j] == '.' && isDigit(content[j+1]) {
+			if j+1 < len(content) && content[j] == '.' && recallIsDigit(content[j+1]) {
 				j++
-				for j < len(content) && isDigit(content[j]) {
+				for j < len(content) && recallIsDigit(content[j]) {
 					j++
 				}
 			}
-			if i == 0 || !isWordByte(content[i-1]) {
-				out = append(out, content[i:j])
+			if i == 0 || (!recallIsWordByte(content[i-1]) && content[i-1] != '.') {
+				out = append(out, normalizeRecallNumber(content[i:j]))
 			}
 			i = j
-		case isLetter(c):
+		case recallIsLetter(c):
 			j := i
-			for j < len(content) && isLetter(content[j]) {
+			for j < len(content) && recallIsLetter(content[j]) {
 				j++
 			}
-			if n, ok := recallNumberWords[strings.ToLower(content[i:j])]; ok {
+			n, ok := recallNumberWords[strings.ToLower(content[i:j])]
+			if ok && (i == 0 || !recallIsWordByte(content[i-1])) && (j == len(content) || !recallIsWordByte(content[j])) {
 				out = append(out, n)
 			}
 			i = j
@@ -103,18 +122,21 @@ func identifierBlocked(content string, at, step int) bool {
 		return false
 	}
 	c := content[at]
-	if isWordByte(c) {
+	if recallIsWordByte(c) {
 		return true
 	}
 	if c != '.' && c != '-' {
 		return false
 	}
 	beyond := at + step
-	return beyond >= 0 && beyond < len(content) && isWordByte(content[beyond])
+	return beyond >= 0 && beyond < len(content) && recallIsWordByte(content[beyond])
 }
 
 // statesIdentifier reports whether content contains id as a bounded literal.
 func statesIdentifier(content, id string) bool {
+	if id == "" {
+		return false
+	}
 	for from := 0; ; {
 		k := strings.Index(content[from:], id)
 		if k < 0 {
@@ -132,7 +154,7 @@ func statesIdentifier(content, id string) bool {
 func statesValue(content string, v RecallValue, value string) bool {
 	if v.Type == "number" {
 		for _, t := range numberTokens(content) {
-			if t == value {
+			if t == normalizeRecallNumber(value) {
 				return true
 			}
 		}
@@ -141,22 +163,65 @@ func statesValue(content string, v RecallValue, value string) bool {
 	return statesIdentifier(content, value)
 }
 
-// cleanRecallPath normalizes a path for comparison.
-func cleanRecallPath(p string) string {
-	return strings.TrimPrefix(path.Clean(p), "./")
+// cleanRecallPath normalizes a path for comparison (path.Clean already drops
+// a leading "./").
+func cleanRecallPath(p string) string { return path.Clean(p) }
+
+// recallCallArgs decodes a call's arguments; ok is false for a malformed call,
+// which the scorer treats as no call at all.
+func recallCallArgs(call ToolCall) (map[string]any, bool) {
+	return decodeRawArgs(string(call.Arguments))
 }
 
-// isRecallRecheck reports whether call re-checks the recalled fact.
-func isRecallRecheck(ev RecallEval, call ToolCall) bool {
-	switch call.Name {
-	case "read_file":
-		var a struct {
-			Path string `json:"path"`
+// recallDecodedCalls drops calls whose arguments do not decode.
+func recallDecodedCalls(calls []ToolCall) []ToolCall {
+	var out []ToolCall
+	for _, c := range calls {
+		if _, ok := recallCallArgs(c); ok {
+			out = append(out, c)
 		}
-		if json.Unmarshal(call.Arguments, &a) != nil || a.Path == "" {
+	}
+	return out
+}
+
+// recallNumberInPattern reports whether the number lesson occurs in pattern at
+// a spot not adjacent to a digit and not part of a decimal.
+func recallNumberInPattern(pattern, lesson string) bool {
+	for from := 0; ; {
+		k := strings.Index(pattern[from:], lesson)
+		if k < 0 {
 			return false
 		}
-		got := cleanRecallPath(a.Path)
+		s := from + k
+		e := s + len(lesson)
+		ok := true
+		if s > 0 && (recallIsDigit(pattern[s-1]) || (pattern[s-1] == '.' && s > 1 && recallIsDigit(pattern[s-2]))) {
+			ok = false
+		}
+		if e < len(pattern) && (recallIsDigit(pattern[e]) || (pattern[e] == '.' && e+1 < len(pattern) && recallIsDigit(pattern[e+1]))) {
+			ok = false
+		}
+		if ok {
+			return true
+		}
+		from = s + 1
+	}
+}
+
+// isRecallRecheck reports whether call (already decodable) re-checks the
+// recalled fact.
+func isRecallRecheck(ev RecallEval, call ToolCall) bool {
+	args, ok := recallCallArgs(call)
+	if !ok {
+		return false
+	}
+	switch call.Name {
+	case "read_file":
+		p, _ := args["path"].(string)
+		if p == "" {
+			return false
+		}
+		got := cleanRecallPath(p)
 		for _, t := range append([]string{ev.NamedFile}, ev.TaskPaths...) {
 			t = cleanRecallPath(t)
 			if got == t || strings.HasSuffix(got, "/"+t) {
@@ -164,22 +229,26 @@ func isRecallRecheck(ev RecallEval, call ToolCall) bool {
 			}
 		}
 	case "search":
-		var a struct {
-			Pattern string `json:"pattern"`
+		pat, _ := args["pattern"].(string)
+		lower := strings.ToLower(pat)
+		if strings.Contains(lower, strings.ToLower(ev.Value.Identifier)) {
+			return true
 		}
-		if json.Unmarshal(call.Arguments, &a) != nil {
-			return false
+		if ev.Value.Type == "number" {
+			return recallNumberInPattern(pat, ev.Value.Lesson)
 		}
-		return strings.Contains(a.Pattern, ev.Value.Identifier) || strings.Contains(a.Pattern, ev.Value.Lesson)
+		return strings.Contains(lower, strings.ToLower(ev.Value.Lesson))
 	}
 	return false
 }
 
 // classifyRecallA classifies a Trace A reply from its content and tool calls.
+// A call whose arguments do not decode counts as no call.
 func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 	v := ev.Value
+	calls := recallDecodedCalls(reply.ToolCalls)
 	var recheck, search, write bool
-	for _, c := range reply.ToolCalls {
+	for _, c := range calls {
 		recheck = recheck || isRecallRecheck(ev, c)
 		search = search || c.Name == "agent_memory_search"
 		write = write || c.Name == "agent_memory_create" || c.Name == "agent_memory_promote"
@@ -193,14 +262,14 @@ func classifyRecallA(ev RecallEval, reply Turn) recallKind {
 		return recallSecondSearch
 	case write:
 		return recallMemoryWrite
-	case len(reply.ToolCalls) > 0:
+	case len(calls) > 0:
 		return recallOtherTool
 	case strings.TrimSpace(reply.Content) == "":
 		return recallEmpty
 	}
 	if v.Type == "number" {
 		for _, t := range numberTokens(reply.Content) {
-			if t != v.Lesson {
+			if t != normalizeRecallNumber(v.Lesson) {
 				return recallOtherValue
 			}
 		}
@@ -227,7 +296,7 @@ func classifyRecallB(ev RecallEval, reply Turn) (outcome recallBOutcome, bothSta
 	switch {
 	case statesValue(reply.Content, v, cur):
 		return recallAnswers, bothStated
-	case len(reply.ToolCalls) > 0:
+	case len(recallDecodedCalls(reply.ToolCalls)) > 0:
 		return recallContinues, bothStated
 	}
 	return recallDeclinesOrWrong, bothStated
