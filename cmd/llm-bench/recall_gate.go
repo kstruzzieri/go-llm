@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"math/big"
 )
@@ -12,9 +14,11 @@ const (
 	recallPrimaryModel = "openai-compat/gemma4:31b"
 	// recallG1MinNet is the minimum B-C for G1.
 	recallG1MinNet = 8
-	// recallG1Alpha is the one-sided sign-test level (1/40); display only,
-	// the decision is exact integer arithmetic.
-	recallG1Alpha = 0.025
+	// recallG1AlphaDenom is 1/alpha: the one-sided sign-test level is 1/40.
+	recallG1AlphaDenom = 40
+	// recallG1Alpha is the sign-test level for display; the decision uses
+	// exact integer arithmetic on recallG1AlphaDenom.
+	recallG1Alpha = 1.0 / recallG1AlphaDenom
 	// recallPrimaryMaxSlips is the most slips the primary model may have.
 	recallPrimaryMaxSlips = 1
 	// recallSecondaryMaxSlips is the most slips another local model may have.
@@ -29,15 +33,27 @@ const (
 	recallLabelMaxTokens = 10
 )
 
+const (
+	// recallCompareArm1 labels the G1 comparison against arm 1 (the
+	// like-for-like baseline).
+	recallCompareArm1 = "arm 1"
+	// recallCompareArm0 labels the G1 comparison against arm 0 (today's
+	// behavior).
+	recallCompareArm0 = "arm 0"
+)
+
 // recallDecisionRuleText is the plain-English decision rule, rendered as the
-// report header and written into #864. The numbers are literals; the test
-// TestRecallDecisionRuleTextNamesConstants pins that each constant appears.
+// report header and written into #864. It holds literal numbers (it must stay
+// a const); TestRecallDecisionRuleTextNamesConstants builds each phrase from
+// the constants so the text cannot drift from them.
 const recallDecisionRuleText = `recall label decision rule (registered):
-G1 (benefit): on gemma4:31b the label must beat arm 1 AND arm 0. For each comparison, B is the questions where the baseline repeated the stale lesson and the labeled reply did not (re-checked, searched again, or gave no value); C is the reverse, plus every missing pair. Pass needs B minus C of at least 8 and an exact one-sided sign test p < 0.025.
-G2 (safety): on gemma4:31b at most 1 slip, where a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair is a slip. If its arm 1 answers fewer than 36 of 40 the result is inconclusive. Each other local model blocks on 3 or more slips (at most 2 allowed).
-G5: the label is at most 10 tokens.
-Determinism: 2 or more changed outcomes among the repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
-Outcomes: stopped, then invalid, then fail (any gate failing), then inconclusive, then pass.
+G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm did not (it re-checked, searched again, or gave no value); C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p < 0.025.
+G2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair is a slip. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.
+G5: the label costs at most 10 prompt tokens per labeled record, on each model.
+Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
+Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
+Incomplete input (a missing comparison, repeat count, label measurement or run number) fails the gate.
+Order: stopped, then invalid, then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 
 // recallAPair is one question's Part A outcome in a baseline and a labeled arm.
@@ -56,6 +72,9 @@ type recallBPair struct {
 
 // recallSignTail returns tail = sum_{k=b..n} C(n,k) and n = b+c exactly.
 func recallSignTail(b, c int) (tail *big.Int, n int) {
+	if b < 0 || c < 0 {
+		panic(fmt.Sprintf("recall: negative sign-test counts b=%d c=%d", b, c))
+	}
 	n = b + c
 	tail = new(big.Int)
 	for k := b; k <= n; k++ {
@@ -64,15 +83,17 @@ func recallSignTail(b, c int) (tail *big.Int, n int) {
 	return tail, n
 }
 
-// recallSignTestPasses reports p < 0.025 exactly: 40 x tail < 2^n.
+// recallSignTestPasses reports p < 1/recallG1AlphaDenom exactly:
+// recallG1AlphaDenom x tail < 2^n. It panics on negative counts.
 func recallSignTestPasses(b, c int) bool {
 	tail, n := recallSignTail(b, c)
-	tail.Mul(tail, big.NewInt(40))
+	tail.Mul(tail, big.NewInt(recallG1AlphaDenom))
 	return tail.Cmp(new(big.Int).Lsh(big.NewInt(1), uint(n))) < 0
 }
 
 // signTestOneSidedP returns P(X >= b), X ~ Binomial(b+c, 1/2), for display.
-// It is 1 when b+c is 0. The gate decision uses recallSignTestPasses.
+// It is 1 when b+c is 0 and panics on negative counts. The gate decision
+// uses recallSignTestPasses.
 func signTestOneSidedP(b, c int) float64 {
 	tail, n := recallSignTail(b, c)
 	f, _ := new(big.Rat).SetFrac(tail, new(big.Int).Lsh(big.NewInt(1), uint(n))).Float64()
@@ -114,7 +135,7 @@ type recallG2Result struct {
 	Inconclusive, Pass   bool
 }
 
-// evaluateRecallG2 counts slips (baseline answered, labeled declined or was
+// evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it counts slips (baseline answered, labeled declined or was
 // wrong, or the pair is missing). Too many slips fail; otherwise a primary
 // whose arm 1 answered fewer than recallBaselineMin is inconclusive.
 func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2Result {
@@ -132,6 +153,7 @@ func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2R
 		}
 	}
 	switch {
+	case len(pairs) == 0: // nothing measured: fail closed
 	case r.Slips > maxSlips:
 	case primary && r.ArmOneAnswers < recallBaselineMin:
 		r.Inconclusive = true
@@ -161,13 +183,50 @@ const (
 
 // recallDecisionInput carries everything decideRecallRun needs.
 type recallDecisionInput struct {
-	Stopped            bool
-	Run                int
+	// Stopped is true when the run stopped before a verdict.
+	Stopped bool
+	// Run is 1 or 2 (the rerun after a recorded serving fix).
+	Run int
+	// DeterminismChanges is keyed by model display name; it must hold the
+	// primary model and every key of SecondaryG2.
 	DeterminismChanges map[string]int
-	G1                 []recallG1Result
-	PrimaryG2          recallG2Result
-	SecondaryG2        map[string]recallG2Result
-	MaxLabelTokens     int
+	// G1 holds exactly the arm 1 and arm 0 comparisons.
+	G1 []recallG1Result
+	// PrimaryG2 is the primary model's safety result.
+	PrimaryG2 recallG2Result
+	// SecondaryG2 is each other local model's safety result.
+	SecondaryG2 map[string]recallG2Result
+	// MaxLabelTokens is the largest per-pair arm 2 minus arm 1 prompt tokens;
+	// 0 means not measured.
+	MaxLabelTokens int
+}
+
+// validate reports why the input is too incomplete to decide. Task 7 must
+// call it and surface the error before deciding; decideRecallRun also fails
+// closed on it.
+func (in recallDecisionInput) validate() error {
+	seen := map[string]int{}
+	for _, g := range in.G1 {
+		seen[g.Comparison]++
+	}
+	if len(in.G1) != 2 || seen[recallCompareArm1] != 1 || seen[recallCompareArm0] != 1 {
+		return fmt.Errorf("recall: G1 must hold exactly one %q and one %q result, got %d results", recallCompareArm1, recallCompareArm0, len(in.G1))
+	}
+	if in.MaxLabelTokens < 1 {
+		return errors.New("recall: label tokens not measured (MaxLabelTokens < 1)")
+	}
+	if in.Run != 1 && in.Run != 2 {
+		return fmt.Errorf("recall: Run must be 1 or 2, got %d", in.Run)
+	}
+	if _, ok := in.DeterminismChanges[recallPrimaryModel]; !ok {
+		return fmt.Errorf("recall: no determinism count for %s", recallPrimaryModel)
+	}
+	for m := range in.SecondaryG2 {
+		if _, ok := in.DeterminismChanges[m]; !ok {
+			return fmt.Errorf("recall: no determinism count for %s", m)
+		}
+	}
+	return nil
 }
 
 // decideRecallRun applies the registered order: stopped, determinism, fail,
@@ -176,9 +235,12 @@ func decideRecallRun(in recallDecisionInput) recallVerdict {
 	if in.Stopped {
 		return recallStopped
 	}
+	if in.validate() != nil {
+		return recallFail
+	}
 	for _, n := range in.DeterminismChanges {
 		if n > recallDeterminismMaxChanges {
-			if in.Run == 2 {
+			if in.Run >= 2 {
 				return recallInvalidFinal
 			}
 			return recallInvalid
@@ -226,7 +288,8 @@ func newcombePairedCI(a, b, c, d int) (lo, hi float64) {
 		phi = (float64(a)*float64(d) - float64(b)*float64(c)) / den
 	}
 	delta := p1 - p2
-	lo = delta - math.Sqrt((p1-l1)*(p1-l1)-2*phi*(p1-l1)*(u2-p2)+(u2-p2)*(u2-p2))
-	hi = delta + math.Sqrt((u1-p1)*(u1-p1)-2*phi*(u1-p1)*(p2-l2)+(p2-l2)*(p2-l2))
-	return lo, hi
+	// Rounding can push a radicand slightly negative (phi = 1); clamp it.
+	lo = delta - math.Sqrt(math.Max(0, (p1-l1)*(p1-l1)-2*phi*(p1-l1)*(u2-p2)+(u2-p2)*(u2-p2)))
+	hi = delta + math.Sqrt(math.Max(0, (u1-p1)*(u1-p1)-2*phi*(u1-p1)*(p2-l2)+(p2-l2)*(p2-l2)))
+	return math.Max(-1, lo), math.Min(1, hi)
 }
