@@ -107,10 +107,9 @@ docker compose -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local -
 - `golangci-lint run`
 - `go test -race -timeout 30m ./...`
 
-The race pass sets its own 30-minute per-binary timeout. Go's 10-minute default
-is too short for `cmd/golem` run natively on a macOS host: about 14 minutes
-there even on a lightly loaded machine, against about 3 minutes in Docker. The
-GitHub workflow keeps the default, which still leaves its Linux runners room.
+Local CI and both Linux race jobs use a 30-minute timeout per test binary.
+`cmd/golem` can take about 14 minutes under the race detector on macOS, and
+`cmd/llm-bench` can exceed ten minutes on GitHub's Linux runners.
 
 `full` runs the pre-push suite plus:
 
@@ -350,8 +349,8 @@ immediately before each run:
 
 | Check | Toolchain | Checks |
 | --- | --- | --- |
-| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, race tests, cross-platform compile smoke (`cmd/golem` and `cmd/go-llm-mcp` builds for every release target, plus `go vet ./...` for Windows, FreeBSD and darwin amd64/arm64, all cgo-off), and GoReleaser config validation |
-| `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race ./...` only |
+| `Lint & Test` | `go-version-file: go.mod` (the `toolchain` directive) | CI/changelog self-tests and guards, lint, formatting, security contracts, non-race benchmark report and capture tests, race tests, cross-platform compile smoke (`cmd/golem` and `cmd/go-llm-mcp` builds for every release target, plus `go vet ./...` for Windows, FreeBSD and darwin amd64/arm64, all cgo-off), and GoReleaser config validation |
+| `Test (oldest supported Go)` | `actions/setup-go` resolves the `go-version: '1.N.x'` query in `ci.yml` | `go test -race -timeout 30m ./...` only |
 | `Windows SQLite URIs` | `go-version-file: go.mod` on `windows-latest` | With `CGO_ENABLED=0`: `go test -count=1 -p 1 -v` (one package at a time, so the lock-budget timing tests are not starved) on `./internal/sqlitedsn ./internal/sqlitetest ./transcript ./memory ./provider ./rag`, covering native Windows path resolution, SQLite URI parsing, the Windows VFS and each store opener's own tests (concurrent first opens, fail-closed WAL, sidecars), which the Linux compile smoke cannot exercise; then the workspace identity and undo tests in `./agent/tools` and `./cmd/golem` (#658). `-v` keeps the lock-holder tests' logged timings visible |
 
 The compatibility job sets `GOTOOLCHAIN=local` for both its version log and tests,

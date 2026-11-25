@@ -306,16 +306,11 @@ func recallE2ECases(t *testing.T) (string, recallCases) {
 // loopback endpoint, as the capture's destination binding requires) and
 // output, and the failed-repeat variant is derived from the label-reading
 // capture instead of recaptured.
-// The build dominates the test's time, most of all under -race, so a -race
-// build (raceEnabled) skips the two variant runs, the declining Trace B run
-// and the failed repeat, to keep the package inside CI's default 10-minute
-// test timeout. They run only in a non-race `go test ./...`, which neither CI
-// nor ci-local runs (both run -race). The logic they exercise has unit tests
-// that do run under -race: labeled S2 slips and the per-model slip limits in
-// TestRecallReportMetricsValues, TestRecallReportMissingArtifact and
-// TestEvaluateRecallG2; a failed determinism repeat or original in
-// TestRecallReportDeterminism and TestRecallReportMissingArtifact. The
-// label-reading pass run and the label-ignoring B == 0 run always run.
+// The declining Trace B and failed-repeat variants run in the non-race CI
+// benchmark step. Race builds cover the label-reading and label-ignoring
+// runs and exercise slips, limits, and missing repeats in the unit tests:
+// TestRecallReportMetricsValues, TestRecallReportMissingArtifact,
+// TestEvaluateRecallG2, and TestRecallReportDeterminism.
 func TestRecallEndToEnd(t *testing.T) {
 	casesPath, cases := recallE2ECases(t)
 	builtDir := t.TempDir()

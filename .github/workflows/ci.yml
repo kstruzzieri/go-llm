@@ -104,10 +104,17 @@ jobs:
           path: ${{ runner.temp }}/containment-linux-host.json
           if-no-files-found: error
 
+      # Two recall end-to-end cases only run without race instrumentation.
+      # Exercise the report and its shared capture path in that build as well.
+      - name: Benchmark report and capture tests (non-race)
+        run: |
+          go test ./cmd/llm-bench -run 'RecallReport|RecallHeadroom|RecallEndToEnd|RecallDecision|DecideRecall' -count=1
+          go test ./cmd/llm-bench -run 'Injection|ReplayAttempt|CalibrateCapture' -count=1
+
       - name: Test
         run: |
           go version
-          go test -race ./...
+          go test -race -timeout 30m ./...
 
       # vet type-checks every package with its test files, so a test naming a
       # symbol declared only in a build-tagged file fails here. windows checks
@@ -168,7 +175,7 @@ jobs:
       - name: Test
         run: |
           go version
-          go test -race ./...
+          go test -race -timeout 30m ./...
 
   # Real bwrap confinement (#441) on a full VM: Docker-based local CI cannot
   # create user namespaces, so this pinned runner is the behavioral gate.
