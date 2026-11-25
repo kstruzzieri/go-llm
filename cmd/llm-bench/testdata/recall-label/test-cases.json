@@ -1,0 +1,44 @@
+{
+  "schema": "recall-label-cases/v1",
+  "templates": [
+    {"id": "t-number-direct", "value_type": "number", "task_style": "direct"},
+    {"id": "t-identifier-task", "value_type": "identifier", "task_style": "task"}
+  ],
+  "families": [
+    {
+      "id": "num-retry",
+      "template": "t-number-direct",
+      "split": "confirmatory",
+      "lesson": "sync worker worker/config.go retry limit equals 7 attempts",
+      "named_file": "worker/config.go",
+      "file_before": "package worker\n\nconst maxRetries = 7\n",
+      "file_s1": "package worker\n\nconst maxRetries = 12\n",
+      "file_s2": "package worker\n\nconst   maxRetries = 7\n\n",
+      "task": "How many times does the sync worker retry a failed sync before it gives up? Answer from what you can find.",
+      "query": "sync worker",
+      "value": {"type": "number", "identifier": "maxRetries", "lesson": "7", "changed": "12"},
+      "other_files": {"worker/doc.go": "// Package worker syncs data.\n"},
+      "distractors": ["sync worker worker/doc.go backoff cap equals 30 seconds", "sync worker worker/doc.go logs rotate every 24 hours"],
+      "rank": 2,
+      "s7_distractor": 0
+    },
+    {
+      "id": "id-eviction",
+      "template": "t-identifier-task",
+      "split": "confirmatory",
+      "lesson": "cache policy cache/policy.go eviction uses evictLRU setting",
+      "named_file": "cache/policy.go",
+      "file_before": "package cache\n\nconst evictionMode = evictLRU\n",
+      "file_s1": "package cache\n\nconst evictionMode = evictTTL\n",
+      "file_s2": "package cache\n\nconst evictionMode   = evictLRU\n",
+      "task": "Fix the cache policy in cache/policy.go so that entries are evicted correctly.",
+      "query": "cache policy",
+      "value": {"type": "identifier", "identifier": "evictionMode", "lesson": "evictLRU", "changed": "evictTTL"},
+      "task_paths": ["cache/policy.go"],
+      "other_files": {"README.md": "Notes for the cache package.\n"},
+      "distractors": ["cache policy README.md cache policy reports hit ratio", "cache policy README.md cache policy warmup runs startup"],
+      "rank": 3,
+      "s7_distractor": 1
+    }
+  ]
+}
