@@ -215,10 +215,24 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, backend resolvedEx
 	if spec.Screen == nil {
 		return JobStatus{}, errNoOutputScreen
 	}
+	// The process can complete its post-run inspection during Start or Wait.
+	// Buffer its already bounded notices so a slow terminal cannot delay
+	// releasing a reservation or publishing the final job state.
+	deliver := spec.sandboxNotice
+	var notices []string
+	if deliver != nil {
+		spec.sandboxNotice = func(note string) { notices = append(notices, note) }
+	}
+	notify := func() {
+		for _, note := range notices {
+			deliver(note)
+		}
+	}
 	owned := false // true once reap owns the screen
 	defer func() {
 		if !owned {
 			spec.Screen.release()
+			notify()
 		}
 	}()
 	handle, err := m.readHandle()
@@ -254,7 +268,12 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, backend resolvedEx
 	stdout := newTailRing(backgroundRingCap)
 	stderr := newTailRing(backgroundRingCap)
 	outStream, errStream := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
-	proc, err := backend.Start(spec, outStream, errStream)
+	var proc backgroundProcess
+	if cs, ok := backend.execBackend.(contextStarter); ok {
+		proc, err = cs.StartContext(ctx, spec, outStream, errStream)
+	} else {
+		proc, err = backend.Start(spec, outStream, errStream)
+	}
 	if err != nil {
 		m.releaseReservation(handle)
 		return JobStatus{}, fmt.Errorf("start background command: %w", err)
@@ -306,7 +325,10 @@ func (m *BackgroundManager) startWrapped(ctx context.Context, backend resolvedEx
 	m.mu.Unlock()
 	m.startWG.Done()
 	owned = true
-	go m.reap(job)
+	go func() {
+		m.reap(job)
+		notify()
+	}()
 	return st, nil
 }
 

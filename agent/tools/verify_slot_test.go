@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -809,5 +810,39 @@ func TestVerifierSlotRendersNotes(t *testing.T) {
 				t.Fatalf("observation mismatch\n got: %q\nwant: %q", out, tc.want)
 			}
 		})
+	}
+}
+
+func TestVerifierSlotKeepsFailureAndRecoveryOnNoteOverflow(t *testing.T) {
+	const summary = "… and 17 more notes (17 reporting renames, 0 with warnings, run aabbccdd)"
+	const diagnostic = "example.go:42: build failed"
+	warning := "WARNING: could not inspect " + strings.Repeat("x", 180)
+	lines := make([]string, 49)
+	for i := range lines {
+		lines[i] = warning
+	}
+	lines = append(lines, summary)
+	v := &stubVerifyExec{
+		command: strings.Repeat("c", verifyCommandCap+20),
+		target:  strings.Repeat("t", verifyCommandCap+20),
+		res: VerifyResult{ExitCode: 1, Notes: lines,
+			Stderr: []byte(diagnostic + "\n" + strings.Repeat("more diagnostics\n", 300)),
+			Stdout: []byte("compile output\n")},
+	}
+	out, err := armedSlot(t, v).Verify(context.Background(), approved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := strings.Count(out, "note: "+warning+"\n")
+	if kept < 1 || kept >= 49 || len(out) > verifyObservationCap {
+		t.Fatalf("retained %d of 49 warnings in %d bytes", kept, len(out))
+	}
+	for _, detail := range []string{
+		fmt.Sprintf("note: … %d more note lines not shown\n", 49-kept),
+		"note: " + summary, "output_truncated: true", "--- stderr ---\n" + diagnostic, "--- stdout ---\ncompile output",
+	} {
+		if !strings.Contains(out, detail) {
+			t.Errorf("missing %q in observation:\n%s", detail, out)
+		}
 	}
 }

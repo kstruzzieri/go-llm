@@ -1,6 +1,9 @@
 package tools
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 // backgroundStarter is the detached-process seam (#346). It stays separate
 // from commandRunner and deliberately minimal; execBackend composes both
@@ -8,6 +11,14 @@ import "io"
 // returns the host implementation for the current platform.
 type backgroundStarter interface {
 	Start(spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error)
+}
+
+// contextStarter is a backend that can also start under the start's
+// admission context, ending a start still waiting before its spawn once that
+// context ends (the bwrap backend, whose start can wait behind another job's
+// post-run check).
+type contextStarter interface {
+	StartContext(ctx context.Context, spec execSpec, stdout, stderr io.Writer) (backgroundProcess, error)
 }
 
 // backgroundProcess is a started detached process — on unix, the leader of its

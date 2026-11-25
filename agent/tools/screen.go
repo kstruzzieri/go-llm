@@ -7,6 +7,8 @@ import (
 	"io"
 	"sort"
 	"sync"
+
+	"github.com/kstruzzieri/go-llm/agent/interceptor"
 )
 
 // screenHoldBound is the longest record the screen holds while waiting for its
@@ -100,6 +102,40 @@ type screenStream struct {
 	mu   sync.Mutex
 	held []byte
 	dead bool // cut or finished: later writes are consumed and dropped
+}
+
+// allowsPath reports whether p, a path the command chose, may appear in
+// model-facing text: false when the screen withholds its streams or is
+// released (it cannot screen p completely), when p reads as a credential path,
+// or when it holds a credential value; each flagged path is counted as a
+// match.
+func (s *outputScreen) allowsPath(p string) bool {
+	keys, withhold, released := s.snapshot()
+	if withhold != "" || released || s.changed != 0 {
+		return false
+	}
+	if len(p) > screenHoldBound {
+		return false
+	}
+	if interceptor.IsCredentialPath(p) {
+		s.mark()
+		return false
+	}
+	raw := []byte(p)
+	stripped := stripCSI(raw)
+	for _, line := range bytes.FieldsFunc(stripped, func(r rune) bool { return r == '\n' || r == '\r' }) {
+		if len(line) > screenHoldBound || credentialPathPrefix(line) || credentialPatchHeader(line) {
+			s.mark()
+			return false
+		}
+	}
+	for _, key := range keys {
+		if bytes.Contains(raw, key) || bytes.Contains(stripped, key) {
+			s.mark()
+			return false
+		}
+	}
+	return true
 }
 
 // stream returns a writer that screens records on their way to dst.

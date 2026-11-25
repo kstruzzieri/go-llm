@@ -325,7 +325,7 @@ func TestInspectSandboxWorkspaceScanErrorFailsClosed(t *testing.T) {
 			// pinned directly (they alone cover a change between the two).
 			// containment: GITMETA-DISCOVERY
 			l := sandboxGitLayout{root: root}
-			err := scanGitDir(filepath.Join(root, ".git"), &l)
+			err := scanGitDir(t.Context(), filepath.Join(root, ".git"), &l)
 			if want := fmt.Sprintf("git metadata %q", c.want); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("scan with unreadable %s: err = %v, want a failure naming %s", c.chmod, err, c.want)
 			}
@@ -360,7 +360,7 @@ func TestScanGitDirTreatsAbsentAsAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := sandboxGitLayout{root: root}
-	if err := scanGitDir(filepath.Join(root, ".git"), &l); err != nil {
+	if err := scanGitDir(t.Context(), filepath.Join(root, ".git"), &l); err != nil {
 		t.Fatal(err)
 	}
 	// containment: GITMETA-DISCOVERY

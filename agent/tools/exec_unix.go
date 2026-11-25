@@ -82,7 +82,12 @@ func (c osExecCmd) State() *os.ProcessState { return c.ProcessState }
 // the whole group (reaping ordinary children), and bounds stdout/stderr to the tool's
 // self-caps while always consuming pipe writes (no deadlock). spawn starts the
 // command; nil means osExecSpawn.
-type unixRunner struct{ spawn spawnFunc }
+type unixRunner struct {
+	spawn spawnFunc
+	// Bubblewrap also screens names during its post-run check. It takes this
+	// snapshot after that check so the match count includes those names.
+	deferScreenNotes bool
+}
 
 func newPlatformRunner() commandRunner { return unixRunner{} }
 
@@ -99,7 +104,7 @@ func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) 
 	outScreen, errScreen := spec.Screen.stream(stdout), spec.Screen.stream(stderr)
 	cmd := spawn(ctx, spec, outScreen, errScreen)
 	if err := cmd.Start(); err != nil {
-		return execResult{}, err
+		return execResult{TimedOut: errors.Is(err, context.DeadlineExceeded)}, err
 	}
 	waitErr := cmd.Wait()
 	// A stream holds an unterminated last line until finish; the caller that
@@ -113,7 +118,9 @@ func (r unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) 
 		StdoutTruncated: stdout.truncated,
 		StderrTruncated: stderr.truncated,
 		ExitCode:        cmd.State().ExitCode(),
-		Notes:           spec.Screen.notes(),
+	}
+	if !r.deferScreenNotes {
+		res.Notes = spec.Screen.notes()
 	}
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

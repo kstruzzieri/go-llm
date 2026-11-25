@@ -1,0 +1,5 @@
+### Security — new Git machinery is set aside after the command, with a WARNING when that fails (#802)
+
+On Linux, Golem checks the pinned workspace after Bubblewrap foreground commands, background exits and failed starts, and post-write verifier runs. It tries to rename new Git metadata in place to `<name>.golem-held-<run id>`. For a new bare repository it renames the Git-valid `HEAD` and preserves the containing directory. On macOS, Seatbelt refuses writes to protected Git metadata during execution.
+
+Each rename produces a recovery note that Golem displays directly to the operator and includes in the tool result. A failed check or rename can leave metadata live and produces a WARNING. The command’s credential screen checks paths before they appear in notes. Restore a held entry by checking its contents and renaming it back, working from the last note upward. See the [Golem guide](docs/golem.md#new-git-machinery-after-a-bubblewrap-command) for overlapping jobs, reporting limits and host Git settings.
