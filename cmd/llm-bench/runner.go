@@ -109,19 +109,29 @@ type Result struct {
 // and per-trace errors are recorded as Result rows rather than aborting
 // the whole run, so partial progress is never discarded.
 func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	options := candidateTransportOptions{
+		ollamaURL: r.OllamaURL, openAICompatBaseURL: r.OpenAICompatBaseURL, openAICompatAPIKey: r.OpenAICompatAPIKey,
+		timeout: r.Timeout, cacheAffinity: r.CandidateCacheAffinity,
+	}
+	if anyRecallTrace(traces) {
+		binding, ok := ctx.Value(recallDestinationKey{}).(recallDestinationBinding)
+		if !ok {
+			return nil, errors.New("recall capture requires a registered destination")
+		}
+		if err := binding.validate(r.OpenAICompatBaseURL, targets); err != nil {
+			return nil, err
+		}
+		client := *binding.client
+		client.Timeout = candidateHTTPClient(options).Timeout
+		options.httpClient = &client
+	}
 	results := make([]Result, 0, len(targets)*len(traces))
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
 			return results, err
 		}
 
-		transport, err := newCandidateTransport(target, candidateTransportOptions{
-			ollamaURL:           r.OllamaURL,
-			openAICompatBaseURL: r.OpenAICompatBaseURL,
-			openAICompatAPIKey:  r.OpenAICompatAPIKey,
-			timeout:             r.Timeout,
-			cacheAffinity:       r.CandidateCacheAffinity,
-		})
+		transport, err := newCandidateTransport(target, options)
 		if err != nil {
 			for _, trace := range traces {
 				results = append(results, Result{
