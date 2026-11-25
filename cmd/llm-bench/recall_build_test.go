@@ -178,6 +178,11 @@ func TestRecallCasesValidate(t *testing.T) {
 		{"absolute named file", "confirmatory", func(c *recallCases) { c.Families[0].NamedFile = "/worker/config.go" }, "named_file"},
 		{"absolute task path", "confirmatory", func(c *recallCases) { c.Families[1].TaskPaths = []string{"/cache/policy.go"} }, "task_paths"},
 		{"escaping task path", "confirmatory", func(c *recallCases) { c.Families[1].TaskPaths = []string{"../cache/policy.go"} }, "task_paths"},
+		// Paths the frozen trace check (recallWorkspaceFile) refuses are refused
+		// here, naming the family, instead of after the build.
+		{"named file is the workspace root", "confirmatory", func(c *recallCases) { c.Families[0].NamedFile = "worker/.." }, `family num-retry: named_file: path "worker/.."`},
+		{"padded task path", "confirmatory", func(c *recallCases) { c.Families[1].TaskPaths = []string{" cache/policy.go"} }, `family id-eviction: task_paths: path " cache/policy.go"`},
+		{"other file is the workspace root", "confirmatory", func(c *recallCases) { c.Families[0].OtherFiles["."] = "x\n" }, `family num-retry: other_files: path "."`},
 		{"other file shadows named file", "confirmatory", func(c *recallCases) { c.Families[0].OtherFiles["worker/config.go"] = "x\n" }, "collides with named_file"},
 		{"other file differs from named file only by case", "confirmatory", func(c *recallCases) { c.Families[0].OtherFiles["Worker/Config.go"] = "x\n" }, "collides with named_file"},
 		{"lesson does not name its file", "confirmatory", func(c *recallCases) { c.Families[0].Lesson = "sync worker retry limit equals 7 attempts" }, "does not name named_file"},
@@ -361,7 +366,7 @@ func TestBuildRecallCorpusConfirmatory(t *testing.T) {
 		// S7 labels a distractor line, A-2 the relevant one.
 		s7 := recallLineWith(recallToolMessageOf(t, traces["recall-"+fam+"-A-2-s7"]), recallLabelSegment)
 		a2 := recallLineWith(recallToolMessageOf(t, traces["recall-"+fam+"-A-2"]), recallLabelSegment)
-		_, rel, dist, _ := recallFixtureFamily(t, fam).layout()
+		_, rel, dist, _ := recallTestLayout(t, recallFixtureFamily(t, fam))
 		if !strings.Contains(a2, " · "+rel+" · ") || strings.Contains(s7, " · "+rel+" · ") || (!strings.Contains(s7, " · "+dist[0]+" · ") && !strings.Contains(s7, " · "+dist[1]+" · ")) {
 			t.Errorf("%s: label lines A-2 %q, S7 %q", fam, a2, s7)
 		}
@@ -386,9 +391,20 @@ func TestBuildRecallCorpusConfirmatory(t *testing.T) {
 }
 
 // recallDistID returns the seeded ID of fam's i-th distractor record.
-func recallDistID(fam recallFamily, i int) string {
-	_, _, d, _ := fam.layout()
+func recallDistID(t *testing.T, fam recallFamily, i int) string {
+	t.Helper()
+	_, _, d, _ := recallTestLayout(t, fam)
 	return d[i]
+}
+
+// recallTestLayout is fam.layout with a layout error failing the test.
+func recallTestLayout(t *testing.T, fam recallFamily) ([]recallSeedRecord, string, [2]string, []string) {
+	t.Helper()
+	recs, rel, dist, order, err := fam.layout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recs, rel, dist, order
 }
 
 // recallToolMessageOf returns the first tool message of a trace (the search result).
@@ -562,7 +578,7 @@ func TestRecallInvariantsHoldAndReject(t *testing.T) {
 				s = strings.Replace(s, recallLabelSegment, "", 1)
 				lines := strings.Split(s, "\n")
 				for i, l := range lines {
-					if strings.Contains(l, " · "+recallDistID(fam, 0)+" · ") {
+					if strings.Contains(l, " · "+recallDistID(t, fam, 0)+" · ") {
 						lines[i], _ = insertProvenanceSegment(l, recallLabelSegment)
 					}
 				}
@@ -594,7 +610,7 @@ func TestRecallInvariantsHoldAndReject(t *testing.T) {
 				s = strings.Replace(s, recallLabelSegment, "", 1)
 				lines := strings.Split(s, "\n")
 				for i, l := range lines {
-					if strings.Contains(l, " · "+recallDistID(fam, 1)+" · ") {
+					if strings.Contains(l, " · "+recallDistID(t, fam, 1)+" · ") {
 						lines[i], _ = insertProvenanceSegment(l, recallLabelSegment)
 					}
 				}
@@ -609,7 +625,7 @@ func TestRecallInvariantsHoldAndReject(t *testing.T) {
 				s = strings.Replace(s, recallPlaceboSegment, "", 1)
 				lines := strings.Split(s, "\n")
 				for i, l := range lines {
-					if strings.Contains(l, " · "+recallDistID(fam, 0)+" · ") {
+					if strings.Contains(l, " · "+recallDistID(t, fam, 0)+" · ") {
 						lines[i], _ = insertProvenanceSegment(l, recallPlaceboSegment)
 					}
 				}
@@ -968,7 +984,7 @@ func TestBuildRecallCorpusFailureLeavesOutDirUntouched(t *testing.T) {
 func TestRecallSeededIDs(t *testing.T) {
 	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
 	for _, fam := range recallFixtureCases(t).Families {
-		_, rel, dist, order := fam.layout()
+		_, rel, dist, order := recallTestLayout(t, fam)
 		ids := []string{rel, dist[0], dist[1]}
 		for _, id := range ids {
 			if !hex32.MatchString(id) {
@@ -984,7 +1000,7 @@ func TestRecallSeededIDs(t *testing.T) {
 		if ids[0] == ids[1] || ids[0] == ids[2] || ids[1] == ids[2] || len(order) != 3 {
 			t.Errorf("%s: ids %v are not distinct", fam.ID, ids)
 		}
-		_, rel2, dist2, _ := fam.layout()
+		_, rel2, dist2, _ := recallTestLayout(t, fam)
 		if rel2 != rel || dist2 != dist {
 			t.Errorf("%s: ids are not deterministic", fam.ID)
 		}
@@ -1009,8 +1025,8 @@ func TestRecallRecordIDSkipsAnIDThatStatesTheValue(t *testing.T) {
 				want = id
 			}
 		}
-		if got := fam.recordID("relevant"); got != want {
-			t.Errorf("recordID = %q, want the first letter-led candidate that does not state the value, %q", got, want)
+		if got, err := fam.recordID("relevant"); err != nil || got != want {
+			t.Errorf("recordID = %q, %v; want the first letter-led candidate that does not state the value, %q", got, err, want)
 		}
 	}
 	if !found {
@@ -1155,7 +1171,7 @@ func TestRecallSeededIDsHoldNoNumberToken(t *testing.T) {
 			for _, base := range c.Families {
 				fam := base
 				fam.ID, fam.Split = fmt.Sprintf("%s-%s-%d", base.ID, split, i), split
-				_, rel, dist, _ := fam.layout()
+				_, rel, dist, _ := recallTestLayout(t, fam)
 				for _, id := range []string{rel, dist[0], dist[1]} {
 					if !shape.MatchString(id) {
 						t.Fatalf("%s: id %q is not [a-f][0-9a-f]{31}", fam.ID, id)
@@ -1241,6 +1257,40 @@ func TestBuildRecallCorpusProtectsExistingFiles(t *testing.T) {
 			entries, err := os.ReadDir(out)
 			if err != nil || len(entries) != 1 {
 				t.Fatalf("partial publication: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+// The record-ID search is capped: a predicate nothing satisfies exhausts it
+// with a wrapped error naming the family and role, and a satisfiable one
+// returns the first accepted candidate.
+func TestSearchRecallRecordIDCap(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tries   int
+		accept  func(string) bool
+		wantErr string
+		wantK   int
+	}{
+		{"first candidate accepted", 5, func(string) bool { return true }, "", 0},
+		{"third candidate accepted", 5, func() func(string) bool {
+			n := 0
+			return func(string) bool { n++; return n == 3 }
+		}(), "", 2},
+		{"nothing accepted exhausts the cap", 7, func(string) bool { return false }, "recall build: family fam-x: no acceptable d0 record ID in 7 candidates", 0},
+		{"zero tries", 0, func(string) bool { return true }, "no acceptable d0 record ID in 0 candidates", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := searchRecallRecordID("fam-x", "d0", tc.tries, tc.accept)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || got != "" {
+					t.Fatalf("got %q, %v; want an error containing %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != recallSeededID("fam-x", "d0", tc.wantK) {
+				t.Fatalf("got %q, %v; want candidate %d", got, err, tc.wantK)
 			}
 		})
 	}

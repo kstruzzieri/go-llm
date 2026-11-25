@@ -95,9 +95,12 @@ func main() {
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
 	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
-	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
+	capturesFlag := flag.String("captures", "", "With -injection-report or -recall-report: comma-separated capture artifacts paths (local and hosted captures are separate files)")
+	recallReport := flag.Bool("recall-report", false, "Emit the recall-label (#864 Stage 0) gate report from -captures bound to -registration; writes to -report or stdout")
+	recallRun := flag.Int("recall-run", 0, "With -recall-report on a confirmatory registration (not -recall-headroom): required run number, 1 or 2 (2 is the one rerun after a recorded serving fix); it decides invalid vs invalid-final, so it has no default. Refused for a pilot registration, whose report is the pilot view")
+	recallHeadroom := flag.Bool("recall-headroom", false, "With -recall-report: run only the pilot headroom check on gemma4:31b arms 0 and 1")
 	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
-	registrationPath := flag.String("registration", "", "With -calibrate-capture over recall traces: the committed recall pre-registration JSON (recall-label-registration/v1), which pins the full model and trace inventory, decoding and loopback endpoint. Set endpoint for a custom local server; the original llama-swap registration uses "+recallDefaultEndpoint+" (#864). With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over recall traces or -recall-report: the committed recall pre-registration JSON (recall-label-registration/v1), which pins the full model and trace inventory, decoding and loopback endpoint and binds the capture and the report. Set endpoint for a custom local server; the original llama-swap registration uses "+recallDefaultEndpoint+" (#864). With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -225,6 +228,9 @@ func main() {
 	if *injectionReport {
 		modes++
 	}
+	if *recallReport {
+		modes++
+	}
 	if *replayAttempt {
 		modes++
 	}
@@ -247,14 +253,19 @@ func main() {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -build-recall-corpus, -injection-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build, -build-injection-corpus, -build-recall-corpus, -injection-report, -recall-report, -replay-attempt, -interceptor-census, -interceptor-v1-report, -interceptor-benign-report, -interceptor-benign-draft, -build-interceptor-benign, -cache-probe are mutually exclusive")
 	}
-	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport {
-		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report")
+	if providedFlags["registration"] && !*calibrateCapture && !*injectionReport && !*interceptorBenignReport && !*recallReport {
+		log.Fatalf("llm-bench: -registration requires -calibrate-capture, -injection-report or -interceptor-benign-report (or -recall-report)")
 	}
 	if !*replayAttempt {
 		if stray := strayAttemptFlags(providedFlags); len(stray) > 0 {
 			log.Fatalf("llm-bench: %s require -replay-attempt", strings.Join(stray, ", "))
+		}
+	}
+	if !*recallReport {
+		if stray := strayFlags(providedFlags, "recall-run", "recall-headroom"); len(stray) > 0 {
+			log.Fatalf("llm-bench: %s require -recall-report", strings.Join(stray, ", "))
 		}
 	}
 	if *recallBuildPath == "" {
@@ -532,16 +543,9 @@ func main() {
 				}
 				log.Fatalf("llm-bench: -calibrate-capture over %s traces requires -registration", kind)
 			}
-			var decoding map[string]injectionDecoding
-			var digest string
 			if anyRecallTrace(traces) {
-				reg, d, err := loadRecallRegistration(*registrationPath)
-				if err != nil {
-					log.Fatalf("llm-bench: calibrate-capture: %v", err)
-				}
-				digest = d
-				recallEndpoint = reg.Endpoint
-				if decoding, err = reg.bindCapture(traces, targets); err != nil {
+				var err error
+				if registrationDigest, recallEndpoint, injectionTemps, err = prepareRecallCapture(runner, *registrationPath, traces, targets); err != nil {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
 			} else {
@@ -549,16 +553,11 @@ func main() {
 				if err != nil {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
-				digest = d
-				if decoding, err = reg.bindCapture(traces, targets); err != nil {
+				decoding, err := reg.bindCapture(traces, targets)
+				if err != nil {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
-			}
-			runner.InjectionDecoding = decoding
-			registrationDigest = digest
-			injectionTemps = make(map[string]float64, len(decoding))
-			for sel, d := range decoding {
-				injectionTemps[sel] = *d.Options.Temperature // providerOptions always sets it
+				registrationDigest, injectionTemps = d, applyCaptureDecoding(runner, decoding)
 			}
 		} else if strings.TrimSpace(*registrationPath) != "" {
 			log.Fatalf("llm-bench: -registration applies only to injection or recall traces")
@@ -758,6 +757,48 @@ func main() {
 			log.Fatalf("llm-bench: write injection report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: injection report written to %s\n", *reportPath)
+		return
+	}
+
+	if *recallReport {
+		var captures []string
+		for _, c := range strings.Split(*capturesFlag, ",") {
+			if c = strings.TrimSpace(c); c != "" {
+				captures = append(captures, c)
+			}
+		}
+		if len(captures) == 0 || strings.TrimSpace(*registrationPath) == "" {
+			log.Fatalf("llm-bench: -recall-report requires -captures and -registration")
+		}
+		switch {
+		case *recallHeadroom && providedFlags["recall-run"]:
+			log.Fatalf("llm-bench: -recall-run does not apply to -recall-headroom")
+		case providedFlags["recall-run"] && (*recallRun < 1 || *recallRun > recallMaxRun):
+			log.Fatalf("llm-bench: -recall-run must be 1 or 2 (the run number decides invalid vs invalid-final)")
+		}
+		inputs := [][2]string{{"-registration", *registrationPath}}
+		inputs = append(inputs, pathListInputs("-captures", captures)...)
+		for _, c := range captures {
+			inputs = append(inputs, [2]string{"-captures manifest", captureManifestPath(c)})
+		}
+		refuseReportAlias("recall-report", *reportPath, inputs)
+		report, verdict, err := runRecallReport(recallReportOptions{RegistrationPath: *registrationPath, Captures: captures, Run: *recallRun, Headroom: *recallHeadroom})
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+		} else {
+			if err := writeInjectionReport(*reportPath, report); err != nil {
+				log.Fatalf("llm-bench: write recall report: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "llm-bench: recall report written to %s\n", *reportPath)
+		}
+		if verdict == "" {
+			fmt.Fprintln(os.Stderr, "llm-bench: recall pilot view: no verdict")
+		} else {
+			fmt.Fprintf(os.Stderr, "llm-bench: recall verdict: %s\n", verdict)
+		}
 		return
 	}
 
@@ -1673,4 +1714,33 @@ func strayFlags(provided map[string]bool, names ...string) []string {
 		}
 	}
 	return stray
+}
+
+// prepareRecallCapture loads the recall registration at path, binds it to the
+// traces and targets, installs the bound decoding on runner, and returns the
+// registration digest, the registered endpoint (runCalibrateCapture's
+// RecallEndpoint, which binds the capture's destination) and the per-target
+// temperatures the capture manifest records. main and the recall e2e both
+// call it, so the e2e exercises the glue a real capture runs.
+func prepareRecallCapture(runner *Runner, path string, traces []Trace, targets []ModelTarget) (digest, endpoint string, temps map[string]float64, err error) {
+	reg, digest, err := loadRecallRegistration(path)
+	if err != nil {
+		return "", "", nil, err
+	}
+	decoding, err := reg.bindCapture(traces, targets)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return digest, reg.Endpoint, applyCaptureDecoding(runner, decoding), nil
+}
+
+// applyCaptureDecoding installs a bound registration's decoding on runner and
+// returns each target's registered temperature.
+func applyCaptureDecoding(runner *Runner, decoding map[string]injectionDecoding) map[string]float64 {
+	runner.InjectionDecoding = decoding
+	temps := make(map[string]float64, len(decoding))
+	for sel, d := range decoding {
+		temps[sel] = *d.Options.Temperature // providerOptions always sets it
+	}
+	return temps
 }
