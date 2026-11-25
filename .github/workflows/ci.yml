@@ -210,12 +210,12 @@ jobs:
       - name: Bwrap confinement (non-race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
+        run: go test -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem ./cmd/golem
 
       - name: Bwrap confinement (race)
         env:
           GO_LLM_REQUIRE_BWRAP: "1"
-        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem
+        run: go test -race -count=1 -run '^(TestBwrap|TestBuildBwrap|TestCollectBwrap|TestProbeBwrap|TestExistingPolicyPaths|TestNativeBackend)' ./agent/tools ./golem ./cmd/golem
 
       # Golem's own construction paths under real bwrap (#576): startup and
       # late exec, scratch and verification, each after a host positive

@@ -1035,3 +1035,90 @@ func TestStopCommandInvokeUnknownHandle(t *testing.T) {
 		t.Error("unknown handle must not fabricate a state block")
 	}
 }
+
+// TestMultiLineNotesRender: every line of a multi-line note (the post-run git
+// check's) gets its own "note: " prefix, in results, errors and status; a
+// one-line note's error text is unchanged.
+func TestMultiLineNotesRender(t *testing.T) {
+	notes := []string{"one\ntwo"}
+	if got := renderNotes(notes); got != "note: one\nnote: two\n" {
+		t.Errorf("renderNotes: %q", got)
+	}
+	if got := execErr("failed", notes).Content; !strings.HasSuffix(got, "failed\nnote: one\nnote: two") {
+		t.Errorf("execErr: %q", got)
+	}
+	base := fmt.Errorf("start")
+	if got := withCleanupNote(base, "one\ntwo").Error(); got != "start\nnote: one\nnote: two" {
+		t.Errorf("multi-line error: %q", got)
+	}
+	if got := withCleanupNote(base, "one").Error(); got != "start; one" {
+		t.Errorf("one-line error: %q", got)
+	}
+	st := JobStatus{Handle: "h", Argv: []string{"x"}, Notes: notes}
+	if got, _ := renderStatusResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
+		t.Errorf("status: %q", got)
+	}
+	if got, _ := renderStopResult(st); !strings.HasSuffix(got, "note: one\nnote: two\n") {
+		t.Errorf("stop: %q", got)
+	}
+}
+
+// TestStatusNotesFitTheSmallOutputBudget: notes larger than the small-output
+// budget are cut to the lines that fit, then one line counting the rest, in
+// status and in stop.
+func TestStatusNotesFitTheSmallOutputBudget(t *testing.T) {
+	lines := make([]string, 51)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("held back new git metadata: %03d%s", i, strings.Repeat("x", 400))
+	}
+	st := JobStatus{Handle: "h", Argv: []string{"x"}, Cwd: "/w", ExitKnown: true, Notes: []string{strings.Join(lines, "\n")}}
+	status, statusCut := renderStatusResult(st)
+	stop, stopCut := renderStopResult(st)
+	for _, c := range []struct {
+		name string
+		got  string
+		cut  bool
+	}{{"status", status, statusCut}, {"stop", stop, stopCut}} {
+		if len(c.got) > bgSmallOutputCap {
+			t.Errorf("%s: %d bytes, over %d", c.name, len(c.got), bgSmallOutputCap)
+		}
+		if !c.cut {
+			t.Errorf("%s: not reported as truncated", c.name)
+		}
+		// The notes kept are the first ones, in order, then one line with the
+		// exact count of the rest.
+		at := strings.Index(c.got, "note: ")
+		if at < 0 {
+			t.Fatalf("%s has no notes:\n%s", c.name, c.got)
+		}
+		kept := strings.Split(strings.TrimSuffix(c.got[at:], "\n"), "\n")
+		n := len(kept) - 1
+		if n < 1 {
+			t.Fatalf("%s kept no note:\n%s", c.name, c.got)
+		}
+		for i, l := range kept[:n] {
+			if l != "note: "+lines[i] {
+				t.Errorf("%s: note %d is %.60q, want line %d", c.name, i, l, i)
+			}
+		}
+		if want := fmt.Sprintf("note: … %d more note lines not shown", len(lines)-n); kept[n] != want {
+			t.Errorf("%s: last line %q, want %q", c.name, kept[n], want)
+		}
+	}
+	if !strings.Contains(status, `cwd: "/w"`) {
+		t.Errorf("status:\n%s", status)
+	}
+}
+
+// TestStopCommandReturnsNoteTruncation checks the tool-facing flag on a completed job.
+func TestStopCommandReturnsNoteTruncation(t *testing.T) {
+	f := newBGJobFixture(t, []string{"cmd"}, "/w")
+	f.finish(t)
+	f.m.mu.Lock()
+	f.m.jobs[f.handle].notes = []string{strings.Repeat("metadata detail\n", 500)}
+	f.m.mu.Unlock()
+	res := mustInvoke(t, NewStopCommand(f.m), json.RawMessage(fmt.Sprintf(`{"handle":%q}`, f.handle)))
+	if !res.Truncated || !strings.Contains(res.Content, "more note lines not shown") {
+		t.Errorf("stop truncation %v, result %.80q", res.Truncated, res.Content)
+	}
+}

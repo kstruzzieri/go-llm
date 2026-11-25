@@ -231,7 +231,14 @@ func (s *VerifierSlot) Verify(ctx context.Context, approver agent.Approver) (str
 			errors.Is(runErr, context.DeadlineExceeded) {
 			return "", runErr
 		}
-		return verifyRender(e, "error", "reason: "+sanitizeVerifyLine(runErr.Error())+"\n"+renderNotes(res.Notes)), nil
+		reason := sanitizeVerifyLine(runErr.Error())
+		if len(res.Notes) == 0 {
+			return verifyRender(e, "error", "reason: "+reason+"\n"), nil
+		}
+		reason, _ = capVerifyOutput(reason, verifyCommandCap)
+		head := verifyRender(e, "error", "reason: "+reason+"\n")
+		notes, _ := renderVerifyNotes(res.Notes, verifyObservationCap-len(head))
+		return head + notes, nil
 	}
 	return verifyRenderResult(e, res), nil
 }
@@ -269,26 +276,45 @@ func verifyRender(e verifyExecutor, status, tail string) string {
 // cleanup failure must not hide behind a pass. A failure carries the notes
 // and then the bounded streams, because that is the whole point of the check.
 func verifyRenderResult(e verifyExecutor, res VerifyResult) string {
-	notes := renderNotes(res.Notes)
 	if res.ExitCode == 0 && !res.TimedOut {
-		return verifyRender(e, "passed", "exit_code: 0\n"+notes)
+		head := verifyRender(e, "passed", "exit_code: 0\n")
+		notes, _ := renderVerifyNotes(res.Notes, verifyObservationCap-len(head))
+		return head + notes
 	}
-	body, capped := verifyOutputBody(res)
-	// exit_code is omitted on a timeout: the process was killed, so the
-	// platform runner reports -1, and pairing "failed" with a numeric code the
-	// command never chose invites the model to reason about it.
-	head := fmt.Sprintf("exit_code: %d\n", res.ExitCode)
-	if res.TimedOut {
-		head = ""
+	// A timed-out process did not choose an exit code.
+	exit := ""
+	if !res.TimedOut {
+		exit = fmt.Sprintf("exit_code: %d\n", res.ExitCode)
 	}
-	truncated := res.Truncated || capped
-	tail := fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated) + notes
-	body, observationCapped := capVerifyOutput(body, verifyObservationCap-len(verifyRender(e, "failed", tail)))
-	if observationCapped {
-		truncated = true
-		tail = fmt.Sprintf("%stimed_out: %t\noutput_truncated: %t\n", head, res.TimedOut, truncated) + notes
+	head := verifyRender(e, "failed", exit+fmt.Sprintf("timed_out: %t\noutput_truncated: ", res.TimedOut))
+	budget := verifyObservationCap - len(head) - len("false\n")
+	body, streamCut := verifyOutputBody(res, budget)
+	// When both streams and cleanup notes need the space, reserve half for
+	// diagnostics. Short diagnostics leave the unused space to the notes.
+	notes, notesCut := renderVerifyNotes(res.Notes, budget-min(len(body), budget/2))
+	if len(body)+len(notes) > budget {
+		body, streamCut = verifyOutputBody(res, budget-len(notes))
 	}
-	return verifyRender(e, "failed", tail+body)
+	return fmt.Sprintf("%s%t\n%s%s", head, res.Truncated || streamCut || notesCut, notes, body)
+}
+
+// renderVerifyNotes keeps the leading warnings and the check's final line
+// (which can be the original omitted-count and recovery summary). A second
+// omission count accounts for lines dropped to fit this observation.
+func renderVerifyNotes(notes []string, budget int) (string, bool) {
+	lines := noteLines(notes)
+	for i, line := range lines {
+		lines[i] = strings.ToValidUTF8(line, "\uFFFD")
+	}
+	if len(lines) < 2 {
+		return renderNotesWithin(lines, budget)
+	}
+	last := renderNotes(lines[len(lines)-1:])
+	if len(last) > budget/2 {
+		return renderNotesWithin(lines, budget)
+	}
+	first, cut := renderNotesWithin(lines[:len(lines)-1], budget-len(last))
+	return first + last, cut
 }
 
 // verifyOutputBody lays out the captured streams, omitting an empty one so a
@@ -300,8 +326,7 @@ func verifyRenderResult(e verifyExecutor, res VerifyResult) string {
 // where compilers and test runners put the failure the check exists to
 // surface. Splitting the budget only when both streams have content keeps the
 // common single-stream case at full size.
-func verifyOutputBody(res VerifyResult) (string, bool) {
-	budget := verifyObservationCap
+func verifyOutputBody(res VerifyResult, budget int) (string, bool) {
 	if len(res.Stdout) > 0 && len(res.Stderr) > 0 {
 		budget /= 2
 	}
@@ -314,9 +339,10 @@ func verifyOutputBody(res VerifyResult) (string, bool) {
 		if len(section.data) == 0 {
 			continue
 		}
-		text, cut := capVerifyOutput(string(section.data), budget)
+		header := "--- " + section.label + " ---\n"
+		text, cut := capVerifyOutput(string(section.data), budget-len(header)-1)
 		capped = capped || cut
-		fmt.Fprintf(&b, "--- %s ---\n", section.label)
+		b.WriteString(header)
 		b.WriteString(text)
 		if !strings.HasSuffix(text, "\n") {
 			b.WriteByte('\n')

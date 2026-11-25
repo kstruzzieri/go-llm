@@ -20,6 +20,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
+	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/recipe"
@@ -374,6 +375,19 @@ func interruptContext(ctx context.Context, interrupts <-chan struct{}) (context.
 	return childCtx, func() { cancel(); <-stopped }
 }
 
+// sandboxNoticeContext routes trusted cleanup notices to the session display
+// independently of the model's reply. Keep the session's async sink for jobs
+// that finish after this turn or while the REPL is at an idle prompt.
+func (sess *replSession) sandboxNoticeContext(ctx context.Context) context.Context {
+	notify := sess.notice
+	if notify == nil {
+		return ctx
+	}
+	return tools.WithSandboxNotice(ctx, func(note string) {
+		notify("note: " + promptfence.FlattenLine(sanitizeApprovalPreview(note)))
+	})
+}
+
 // runOnce runs a single agent turn, rendering all progress and errors to out.
 // It returns the run result so runOneShot can extract the final answer; the
 // REPL ignores it.
@@ -382,7 +396,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 }
 
 func runOnceWithRecipeHint(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, src lineSource, hint *recipeInvocationHint) (_ agent.Result, retErr error) {
-	runCtx, cancel := interruptContext(ctx, interrupts)
+	runCtx, cancel := interruptContext(sess.sandboxNoticeContext(ctx), interrupts)
 	defer cancel()
 	if err := refreshProjectContext(runCtx, out, sess); err != nil {
 		_, _ = fmt.Fprintln(out, gitContextText(err.Error()))

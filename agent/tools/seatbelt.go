@@ -440,7 +440,14 @@ type cleanupNoteError struct {
 	note string
 }
 
-func (e *cleanupNoteError) Error() string { return e.err.Error() + "; " + e.note }
+// Error is the error's text, then a one-line note after "; ", or a
+// multi-line note (the post-run git check's) as one "note: " line each.
+func (e *cleanupNoteError) Error() string {
+	if !strings.Contains(e.note, "\n") {
+		return e.err.Error() + "; " + e.note
+	}
+	return e.err.Error() + "\nnote: " + strings.ReplaceAll(e.note, "\n", "\nnote: ")
+}
 func (e *cleanupNoteError) Unwrap() error { return e.err }
 
 // withCleanupNote joins note onto err. A nil err or an empty note returns err

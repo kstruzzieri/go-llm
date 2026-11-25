@@ -2212,7 +2212,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File, testHooks ...ru
 	// One boundary for both AgentFlow routes, after setup hooks and immediately
 	// before invocation. Internal planner/task steps keep this captured snapshot.
 	invokeAgentflow := func(src lineSource) error {
-		runCtx, cancel := interruptContext(ctx, interrupts)
+		runCtx, cancel := interruptContext(sess.sandboxNoticeContext(ctx), interrupts)
 		defer cancel()
 		if err := refreshProjectContext(runCtx, stderr, sess); err != nil {
 			return err

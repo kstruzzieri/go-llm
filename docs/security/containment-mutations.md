@@ -1,14 +1,14 @@
 # Containment mutation ledger (#452)
 
-Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 426 entries: 421 guard and five effect-detection entries.
+Each entry proves one security property's assertions can fail. Entries are point-in-time evidence at their baseline revision. The ledger contains 450 entries: 445 guard and five effect-detection entries.
 
 The original #777 and #789 history is preserved by tag `archive/pr-797-before-restack-254431e` at `254431e5f65387835807392d76739e472777c519`. PR #792 was squash-merged, and #797 was then rebased onto that squash; the baseline hashes below still name the original tested revisions. Fetch the archive with `git fetch origin tag archive/pr-797-before-restack-254431e` before reproducing those entries. Do not substitute the rebased commit hashes for the recorded baselines.
 
-Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099, M-100 and M-374, whose tests run only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user), the #721 entries M-395 to M-399, M-401 and M-402, which ran only on Linux as their batch's sentence below describes, the #584 entries M-406 to M-417, which ran only on Linux as their batch's sentence below describes, M-419 (#821), which ran only on Linux as its sentences below describe, and M-180 and M-420, which ran only on Linux as their sentence below describes. After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native, and M-180 (bwrap) Linux-native. Of the #789 entries, M-347, M-349 (its Linux patch), M-350, M-354 to M-373 and M-375 to M-377, and the re-recorded M-178, were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from the same export, and M-374 ran only there; the Darwin-read entries (M-348, M-351 to M-353 and M-349's Darwin patch) ran on darwin arm64 and again under `GOARCH=amd64`, and have no Linux line. M-378 ran on darwin arm64 and, from a second export of its baseline, on Linux in the same image with the container capped at 4 GiB of memory and every test command at `-timeout 60s`. The 22 other #777 entries whose patches touch `paths_unix.go`, `screen_build.go` or `screen_classify.go` (M-174 to M-177, M-181 to M-183, M-185, M-188, M-247 to M-251, M-258, M-259, M-317 to M-320, M-339 and M-340) were re-applied at `9ce6e39f`, each patch applying without fuzz at moved line offsets, and are red on the leaves they quote on darwin and Linux.
+Platform: every proof in this ledger ran on darwin (arm64, go1.27.1), except M-099, M-100 and M-374, whose tests run only on Linux and which ran only there (arm64, go1.27.1, the Docker `ci-local` image as its non-root `ci` user), the #721 entries M-395 to M-399, M-401 and M-402, which ran only on Linux as their batch's sentence below describes, the #584 entries M-406 to M-417, which ran only on Linux as their batch's sentence below describes, M-419 (#821), which ran only on Linux as its sentences below describe, M-180 and M-420, which ran only on Linux as their sentence below describes, and the #802 entries M-428 to M-448, which ran on Linux, M-428, M-429, M-431, M-441 and M-446 on darwin as well, as their sentence below describes, and M-449 and M-450, which ran only on Linux as recorded in those entries. After the rebase onto the model-resistance PR, the entries whose patches touch build-tagged or platform-sensitive code (M-005 to M-008, the unix path walks; M-009 and M-014 to M-018, the host exec path; M-011, the MCP stdio child environment) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image) at their baseline: each entry's `Platform:` line records the result, and a Linux line that differs would be recorded beside the darwin evidence, never in place of it. M-010 (it needs an AgentFlow source checkout) and M-012 (Seatbelt is darwin-native) were not re-run on Linux, and no entry has run on Windows. Of the #777 entries, those whose patches touch build-tagged or platform-sensitive code (M-172 to M-178, M-181 to M-185, M-188 to M-190, M-247 to M-251, M-258, M-259, M-317, M-319, M-320, M-339 and M-340: the walk, the screen build, the skip classification, the key rules, the unix runner and the background rings) were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from a second export of their baseline, and each `Platform:` line records that run; M-258's test was also run in that image as root (`--user 0`), and its `Platform:` line records that run too; M-179 (Seatbelt) is darwin-native, and M-180 (bwrap) Linux-native. Of the #789 entries, M-347, M-349 (its Linux patch), M-350, M-354 to M-373 and M-375 to M-377, and the re-recorded M-178, were re-run on Linux (arm64, go1.27.1, the Docker `ci-local` image, as its non-root `ci` user) from the same export, and M-374 ran only there; the Darwin-read entries (M-348, M-351 to M-353 and M-349's Darwin patch) ran on darwin arm64 and again under `GOARCH=amd64`, and have no Linux line. M-378 ran on darwin arm64 and, from a second export of its baseline, on Linux in the same image with the container capped at 4 GiB of memory and every test command at `-timeout 60s`. The 22 other #777 entries whose patches touch `paths_unix.go`, `screen_build.go` or `screen_classify.go` (M-174 to M-177, M-181 to M-183, M-185, M-188, M-247 to M-251, M-258, M-259, M-317 to M-320, M-339 and M-340) were re-applied at `9ce6e39f`, each patch applying without fuzz at moved line offsets, and are red on the leaves they quote on darwin and Linux.
 
 Entries M-001 to M-059 were run at `a6114bff` on a darwin host (the two attack-only variants added later, M-045 B and M-047 B, at `34b2ff38`, whose production and scenario trees are identical; M-051 to M-053 at `731f2d1d`, the commit that adds them; M-054 to M-058 at `3d423ce1`, the commit that adds them; M-059 at `1166b276`, the commit that adds it): the baseline passed, the mutant failed as shown, and the tree was restored with `git checkout` and passed again. M-028 was re-recorded when tool frames moved to per-result keys: variant A on the commit that makes that change (parent `140524de`), variant B on the commit that adds the cross-Run check (parent `d75c78cb`). Each baseline passed, each mutant failed as shown, and an editor edit restored the baseline bytes, which passed again. Entries M-067 to M-071 ran on the commit that adds fence-key rotation (parent `72b6eb47`) in the same way, the restored file's sha256 matching the baseline's each time; M-072 and M-073 ran the same way on the commit that makes every exposed key rotate and matches keys through separators (parent `00912c90`), and M-074 on the commit that pins key minting before assembly (parent `caa84426`). Entries M-075 to M-078 ran the same way in an isolated `git archive` export of the commit that adds system keys (parent `3346b711`). M-079 and M-080 ran the same way on the commit that scans the durable summary and staged advice (parent `c17e940d`). Entries M-081 to M-085 ran the same way in an isolated `git archive` export of the commit that adds the #712 launchd acceptance tests, each applied with `patch -p1` and reverted with `patch -R -p1`, the restored file's sha256 matching the baseline's. Their baseline is recorded as `c4ca1a8d`: the runs used that commit's tree before two comment-only amends (a driver comment and the M-083 note) produced it, and the patches apply to `c4ca1a8d` at the recorded hunk offsets, with the quoted failing lines at the same line numbers. M-086 ran the same way in an export of `461fdcdc`, the commit that holds `syscall.ForkLock` across the guard and posix_spawn, where M-081 and M-083 were re-run against the new spawn order. All six were re-run the same way at `231baa07`, after the final #712 fix wave changed their tests and moved M-086's lock into a closure; each entry's last note records that run. Entries M-087 to M-105 ran the same way in an isolated `git archive` export of `88f33cfb`, the commit that adds the #725 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (the export sat inside a checkout, where `git apply` silently skips paths outside the current directory, so both ran with `GIT_CEILING_DIRECTORIES` set to the export's parent); M-099 and M-100 ran in the Docker `ci-local` image from that export. Entries M-106 to M-140 ran the same way in an isolated `git archive` export of `f3581fda`, the commit that adds the #784 inventory rows, each applied with `git apply` and reverted with `git apply -R`, the restored file's sha256 matching the baseline's (that export sat outside any checkout; both still ran with `GIT_CEILING_DIRECTORIES` set to its parent), and no test in their commands skipped; M-131 records two variants, each run that way. The commit that adds them also makes `TestHarnessPlanReferencesKinds` a PATH-HARNESS-REF ref, an inventory change only, so their quoted line numbers hold there too. Entries M-141 to M-190 (but M-180, reserved there and recorded later as described below) ran in isolated `git archive` exports of `18ca5d70`, the #777 commit that pins the D4 and D5 request counts, one export per platform and one mutant at a time: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every ref passed at the baseline and again on the restored export after the last mutant. Every one of those mutants turned its named refs red on its first run. Entries M-191 to M-195 ran the same way in an isolated `git archive` export of `b97c0aeb`, the later commit that adds the rows they turn red: each of their mutants, which bypasses a preprocessing step (CSI stripping, the split at `\r`, trimming) for one rule only, left every ref green at `18ca5d70`, so they could only be recorded once those rows existed. Entries M-196 to M-204 ran the same way in an isolated `git archive` export of `6bd57929`, the commit that adds the rows they turn red: hand-written mutants (M-196 to M-198: a floor raised for one key rule, and the decode of the whole userinfo) and an enumeration that removes each key form `credentialFileKeys` and its helpers emit, one at a time (M-199 to M-204), found mutants that left every ref green at `45548f4f`. Entries M-205 to M-251 ran the same way in an isolated `git archive` export of `f350333c`, the commit that adds the rows they turn red and cites seven existing tests on CMP-EXEC-CREDENTIAL-OUTPUT: a third sweep removed or moved one decision at a time in the argv rule (`credential_argv.go`, `IsGitConfigPath`) and the screen (`screen_path.go`, `screen.go`, `screen_classify.go`, `screen_build.go`), and these are the mutants that left every ref of the row green at `c9cc9155` and let through what the original refuses, cuts or replaces. Entries M-252 to M-255 ran the same way in an isolated `git archive` export of `b7666790`, the commit that adds the last of the rows they turn red: M-252 and M-253 remove or misread the argv rule's reading of a git pathspec with long-form magic, added after that sweep; M-254 reads that pathspec's pattern after its last `)` and left every ref green at `a72009d3`, the commit before its row; M-255 is the sweep's announce-only `S-cut-no-mark` (a cut no longer counted in the notes), which left every ref green until a cut-only notes row existed. Entries M-256 to M-319 ran the same way in isolated `git archive` exports of `d1d7fa91`, the commit that adds the rows they turn red, four exports in parallel, one mutant at a time in each: M-256 to M-259 are hand-written mutants for four gaps (`stripCSI`'s ESC test and its bound check, a `.git/config` that cannot be opened for a reason other than a change, and a failed read after a successful open, which `6194e105` gives a test-only read seam); M-260 to M-319 come from a generated sweep that mutated every condition, comparison, statement and integer offset of the argv rule, the screen and the walk lines this branch changed (1,185 generated mutants plus eight hand-written ones, at `6194e105`), and are the mutants that left every ref of the row green there and let through what the original refuses, cuts, replaces or withholds, or crash the stream writer. Entries M-320 to M-338 ran the same way, serially, in one isolated `git archive` export of `3e4fedce`, the last commit that adds or reorders the rows they turn red: M-320 discards the read error, which goes red only because `1338d3ec` reshaped the screen's read seam into a reader hook so that the injected failure arrives through the read itself; M-321 to M-338 are generated sweep mutants (and two hand-written ones) first classed as equivalent, withholding more or only widening, for which an input was later built, or found by re-arguing the classification from the code, on which they lose a key the original emits. M-258 and M-259 were re-recorded at `3e4fedce` in the same export, because their rows changed (each entry's Notes say how). Entries M-339 to M-346 ran the same way, serially, in one isolated `git archive` export of `8058e5a6`, the last commit that changes test or production code before them: they are the mutants of the lines that key a credential-store line's userinfo (`122ec242`), count a key once across files and give a `.git/config` line with too many settings its own cause (`e804533a`), generated by the same sweep operators plus one hand-written mutant, that let through what the original withholds; each is red on a row added with that change or at `8058e5a6`. M-163 and M-283 were re-recorded at `8058e5a6` in the same export, because `122ec242` re-indented the line their patches change (each entry's Notes say how). Entries M-347 to M-377 ran the same way, serially, in one isolated `git archive` export of `9ce6e39f`, the commit that registers the #789 refs and the last commit that adds rows or changes test or production code before them: hand-written mutants of the #789 walk (the directory read and its parser, the tolerant listing, the refusal of an entry listed without metadata, the matcher's fast route, and the credential screen's budget setting), each red on its named leaves wherever it ran. Entry M-378 ran the same way in an isolated `git archive` export of `56d7c158`, the commit that adds the row it turns red. It is the one decision a generated sweep of the #789 changes found unpinned: at `b22459c3`, the four operators of the #777 sweep (each condition and operand to true and false, each comparison to its neighbour, each call, assignment, increment, branch and defer removed, each integer offset in an index, slice bound or arithmetic expression plus and minus one) were applied to every line #789 changed in the tolerant listing, the two directory reads and the record parser, the screen, the budget and its routes, and the matcher: 358 mutants generated; 47 dropped as not building (44 removals of a `:=` declaration, one offset that made a constant index negative, and two removals of `defer runtime.KeepAlive(f)`, one in each directory read, that failed only because `runtime` was then imported and not used, a generator artifact; those two were not run, and are equivalent in production because the caller's deferred `f.Close()` keeps `f` reachable through the read); 275 red; 36 survivors in 27 decisions (one delivers more, M-378; six only withhold more; one only announces; 16 equivalent; two unreachable, one of them only on Windows; one test-only seam). Each mutant ran its own package's cited refs only: a matcher mutant the six refs in ./agent/interceptor, any other mutant the 42 refs in ./agent/tools; the `cmd/golem` scenarios D4 and D5 were not run on any sweep mutant. The 28 mutants of the Linux directory read ran in Docker in two parts, the second under the memory cap. M-178 was re-recorded at `9ce6e39f` in the same export, because #789 rewrote the listing its patch changes (its Notes say how). Entries M-379 to M-402 (#721) ran serially, one mutant at a time, in one isolated `git archive` export of `4f21580d`, the commit that adds the GITMETA rows they turn red: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and every command passed at the baseline and again on the restored export after the last mutant. The Seatbelt, discovery and builder entries (M-379 to M-394 and M-400) ran on darwin under a watchdog that killed the test process group above 4 GiB resident; the discovery, builder and prepare entries (M-388 to M-394 and M-400 to M-402) ran in the Docker `ci-local` image capped at 4 GiB of memory, M-401 and M-402, whose code is Linux-only, there and in the container below but not on darwin. The bwrap entries (M-395 to M-399, and M-401 and M-402 a second time) ran in a throwaway privileged Docker Desktop container (Ubuntu 24.04, bubblewrap 0.9.0, git 2.43.0, capped at 4 GiB, the fixtures on the container's own filesystem) with a test binary cross-compiled from the export, not on the CI VM, whose `linux-sandbox` job runs the bwrap profile's own check. Entries M-403 and M-404 (#721) ran the same way, serially, in an isolated `git archive` export of `ad0ccf57`, the commit that adds the GITMETA-PREVIEW row they turn red, on darwin under the same watchdog and in the `ci-local` image capped at 4 GiB. Entry M-405 (#721) ran the same way in an isolated `git archive` export of `b8b4a40d`, the commit that adds the GITMETA-DISCOVERY ref it turns red, on darwin under the same watchdog and in the `ci-local` image capped at 4 GiB. Entries M-406 to M-417 (#584) ran the same way, serially, one mutant at a time, in one isolated `git archive` export of `2eb896e1`, the commit that adds the #584 rows: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), and both commands passed at the baseline and again on the restored export after the last mutant. They ran only on Linux, in the Docker `ci-local` image with the container capped at 4 GiB of memory and swap and every `go test` at `-timeout 60s`; none of their patches touches darwin-only or build-tagged code, so no darwin pass ran. Each ran every #584 scenario ref and the four unit refs, and each entry lists exactly the refs that went red. Entry M-418 (#584 network narrowing) ran the same way, serially, in an isolated `git archive` export of `44528492`, the commit that adds the tests it turns red; the commit that adds STRICT-8 and STRICT-9 adds only marker comments to those test files, so its quoted line numbers hold there too. It ran only on darwin, under the real Seatbelt backend, with its `go test` at `-timeout 60s` in its own process group under a watchdog that summed the resident set of the test's whole process tree every 200 ms and would have killed the group and every descendant above 4 GiB, darwin having no cgroup to cap it. The bwrap twin of its row, STRICT-9, has its own entry. Entry M-419 (#821) applies M-418's patch on bwrap, serially, in an isolated `git archive` export of `63f580a5`, where the patch applies at its recorded hunk without offset or fuzz. The Docker `ci-local` image has no bubblewrap, so it ran in a throwaway privileged Docker Desktop container like the #721 bwrap entries' (Ubuntu 24.04, bubblewrap 0.9.0, capped at 4 GiB of memory and swap, the fixtures on the container's own filesystem), as a non-root user, with a test binary cross-compiled from the export and the run at `-timeout 60s`. The patch was applied with `patch -p1` and reverted with `patch -R -p1`, the restored file was compared byte for byte with the baseline's (`cmp`), and the command passed at the baseline and again on the restored export. Entries M-180 and M-420 ran the same way, serially, one mutant at a time, in one isolated `git archive` export of `63f580a5`, in a throwaway privileged Docker Desktop container like M-419's, as a non-root user, with the test binaries and the export mounted read-only and each run started in the export's `agent/tools` directory: each patch was applied with `patch -p1` and reverted with `patch -R -p1`, each restored file was compared byte for byte with the baseline's (`cmp`), the test binary rebuilt from the restored export was byte-identical to the baseline's, and both commands passed at the baseline (M-180's with and without the variable) and again, with the variable, on the restored export after the last mutant. The #777 entries therefore have ten baselines: M-141 to M-190 at `18ca5d70` (but M-163, re-recorded at `8058e5a6`, M-178, re-recorded at `9ce6e39f`, and M-180, recorded at `63f580a5`), M-191 to M-195 at `b97c0aeb`, M-196 to M-204 at `6bd57929`, M-205 to M-251 at `f350333c`, M-252 to M-255 at `b7666790`, M-256 to M-319 at `d1d7fa91` (but M-258 and M-259, re-recorded at `3e4fedce`, and M-283, re-recorded at `8058e5a6`), M-320 to M-338 at `3e4fedce`, M-339 to M-346 at `8058e5a6`. Each entry is evidence at its own baseline. M-173, M-179 and M-180 each record two variants, and M-390 three. M-180 was reserved for the bwrap backend's screen mutation, which needs a Linux host with bwrap that the Docker `ci-local` image is not; it was recorded at `63f580a5` in the container described above, and CMP-EXEC-CREDENTIAL-OUTPUT-BWRAP cites it. The entry for the unverified-root rule including the repository boundary itself, whose mutant narrowed the rule to strictly below the boundary, was withdrawn when that narrowing became the production rule; later entries were renumbered to close the gap. Entries M-060 and M-061 ran in isolated exports of immutable code commit `23f0c0bbca83f0c9d6e02163dd09c4856698ddcd`: each baseline passed, its mutant failed, and restored files matched the baseline bytes and passed again. Entries M-062 and M-063 ran on this branch at `dbe5c315b40f8b973b96cf623d5cdcbe00c616fc`, the commit that adds their rules: each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again; M-062's comparison against the previous rule ran in an isolated `git archive` export of `ac053567`. Entries M-064 to M-066 ran on the #387 branch at `72d0bedeb1d264b3da62cf812df7505a8bd7e776`, the commit that tightens PV1's probe and cites the exec and verification preview tests (M-064 and M-065 were first recorded at `b9cea9154746758026fd9bb58d467f665be5952f`, the commit that makes PV1 executable): each baseline passed, its mutant failed, and `git checkout -- <file>` restored the baseline bytes, which passed again. Entries quote test output, the containment judge's message text and line numbers included, as it read at their baseline; later wording changes do not rewrite them. Entries carried over from the PR 2 delivery record name the draft entry they were first recorded as; they were re-run here so every command, diff and line number matches one revision. Apply a patch with `git apply`, run the command, then restore with `git checkout -- <file>`. `guard` entries remove or weaken the protection the refs assert. `effect-detection` entries change the effect path of an uncontained scenario: they show its probe can read a change in outcome, not that a guard is absent. Rows exempt from this ledger (pending, out-of-scope, unobserved and administrative META- rows; the inventory lint allows no other verified or uncontained row an exemption) carry their exempt reason in the inventory (`docs/security/containment-inventory.json`, rendered in `docs/security/containment-inventory.md`).
 
-Entries M-421 to M-426 (#722) were run serially at `7c83d9bf` on the developer's Mac, one mutation at a time in the worktree: the baseline passed, the one-hunk patch shown made the cited leaves fail as recorded, and `git checkout` of the file restored a passing run. Entry M-427 (#845) was run the same way at `4b181d28`, on darwin and again in the Docker `ci-local` image capped at 4 GiB of memory and swap: the baseline passed, the two-hunk patch shown made the cited leaves fail as recorded on both, and `git checkout` of the file restored a byte-identical file (`cmp`) and a passing run.
+Entries M-421 to M-426 (#722) were run serially at `7c83d9bf` on the developer's Mac, one mutation at a time in the worktree: the baseline passed, the one-hunk patch shown made the cited leaves fail as recorded, and `git checkout` of the file restored a passing run. Entry M-427 (#845) was run the same way at `4b181d28`, on darwin and again in the Docker `ci-local` image capped at 4 GiB of memory and swap: the baseline passed, the two-hunk patch shown made the cited leaves fail as recorded on both, and `git checkout` of the file restored a byte-identical file (`cmp`) and a passing run. Entries M-428 to M-448 (#802) were run serially, one mutation at a time in the worktree at `eb504852` with the marker comments of the commit that adds the GITMETA-POSTRUN rows, on Linux in a Lima VM (Ubuntu 24.04, kernel 6.8, bubblewrap 0.9.0, git 2.43.0, ext4, a non-root user) with a test binary cross-compiled from the worktree; M-428, M-429, M-431, M-441 and M-446, whose GITMETA-POSTRUN-DIFF refs also run on darwin, were run there too. The baseline passed, the patch shown made the cited leaves fail as recorded, and restoring the file (`cmp` identical to the committed bytes) gave a passing run.
 
 ## M-001 — Absolute paths are rejected by the workspace path cleaner
 - Affected refs: PATH-ABS: `TestHardeningContracts/Active/Workspace/confinement_and_arguments/public_confinement/owned_absolute_sibling`, `TestWorkspaceCleanRelContainment/absolute_escape`, `TestContainment/W1`
@@ -11292,3 +11292,612 @@ These mutations prove the harness, inventory lint, checker and gate rules can fa
 - Baseline: pass on both platforms (exit 0; 32 tests and subtests passed, none skipped). Mutant: FAIL `TestInspectSandboxWorkspaceRewalksAfterChange` and all eight of its leaves, each with `sandbox_links_unix_test.go:516: passes = 1, want 2: the changed pass is discarded and one clean pass follows`; besides, `gitfile_removed` fails `sandbox_links_unix_test.go:478: gitFiles holds libs/a/.git = true, want false: [...]`, `nested_.git_removed` fails `sandbox_links_unix_test.go:483: dotGitDirs holds nested/.git = true, want false: [...]`, `checkout_renamed` fails `sandbox_links_unix_test.go:489: dotGitDirs holds nested-moved/.git = false, want true: ["<tmp>/.git"]` and lines 490 and 491 for its `config` and `hooks`, and each of those three fails `sandbox_links_unix_test.go:526: layout after <path> changed:` (`<tmp>` is the test's temp directory); FAIL `TestInspectSandboxWorkspaceChangeRefusals/changes_in_every_pass` (`sandbox_links_unix_test.go:584: err = <nil> after 1 passes, want a change naming churn after 3`); every other test passes (exit 1; 21 of 32 passed). Restored (`git checkout` of the file, `cmp` identical to the baseline file) and passed again on both platforms.
 - Kind: guard
 - Notes: The patch is the design the fix replaced: an entry that no longer resolves is skipped and the pass goes on. A checkout renamed after its parent was listed is then never visited under its new name, so its `.git`, config and hooks reach neither backend, and a `.git` or gitfile removed during the walk stays in the layout. The same patch also fails `TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused`, which no inventory row cites: `go test -count=1 -v -timeout 60s -run '^TestInspectSandboxWorkspaceRenamedOutsideLinkStillRefused$' ./agent/tools`, run the same way on both platforms at the same tree (`agent/` unchanged since `4b181d28`), passes at the baseline and after the restore and fails under the patch with `sandbox_links_unix_test.go:603: err = <nil> after 1 passes, want b refused in pass 2`: a file linked outside the workspace and renamed during the walk is accepted.
+
+M-428, M-429 and M-446 document the old name-folding and listed-name implementation at its recorded baseline. Their targets have been removed. They are retained on the historical inventory row only. Current name-resolution coverage uses real filesystem lookups in `TestBwrapPostRunGitMetadataNames` and the identity assertions in `TestLookupDirectoryKeys` and `TestLookupKeysIgnoreListedHardLinks`.
+
+## M-428 — The post-run check finds other spellings of metadata names
+- Affected refs: GITMETA-POSTRUN-HISTORICAL-NAMES: archived baseline only.
+- Original refs: GITMETA-POSTRUN-DIFF: `TestNewGitMachinery` (subtest `baseline HOOKS replaced in place`), `TestGitNameFold`; GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `new HOOKS in an existing .git`, `new COMMONDIR in an existing .git`, `new CONFIG.WORKTREE in an existing .git`, `new Kelvin-sign hooks in an existing .git`, `new ligature config.worktree in an existing .git`)
+- Baseline: `eb504852` with the marker comments of the commit that adds the GITMETA-POSTRUN rows (#802), in the worktree
+- Platform: linux (arm64, the Lima VM: Ubuntu 24.04, kernel 6.8.0-149-generic, bubblewrap 0.9.0, git 2.43.0, ext4, a non-root user; the test binary cross-compiled with go1.27.1 on darwin from the worktree, run with `GO_LLM_REQUIRE_BWRAP=1`); the GITMETA-POSTRUN-DIFF refs also on darwin (arm64, macOS 26.6.2, go1.27.1, APFS), which fail as quoted for `TestGitNameFold` and the same `TestNewGitMachinery` leaf
+- Profile / command: linux-host and bwrap / `tools.test -test.count=1 -test.v -test.run 'TestNewGitMachinery$|TestEntryKindPrecedence|TestGitNameFold|TestListedAs|TestBwrapPrepareUnchangedByLookups|TestHoldGitMachinery|TestHoldAlreadySetAsideSpelling|TestBwrapRunHoldsNewGitMachinery|TestBwrapRunErrorKeepsHeldNotes|TestBwrapStartHoldsAtExit|TestBwrapStartErrorStillChecks|TestBwrapRunWorkspaceReplaced|TestBwrapWorkspacePinReleased'` (every GITMETA-POSTRUN ref); darwin-host / `go test -count=1 -v -timeout 60s -run 'NewGitMachinery$|EntryKindPrecedence|NameFold|ListedAs' ./agent/tools`
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -560,6 +560,7 @@ func gitFoldExpand(s string) string {
+   // not a metadata or container name (scanGitDir's) but gitNameFold matches it
+   // to one, and kindUnknown otherwise.
+   func foldedGitNameKind(base string) heldKind {
+  +	return kindUnknown
+   	for _, n := range [...]string{"hooks", "info", "config", "config.worktree", "commondir", "gitdir"} {
+   		if base != n && gitNameFold(base, n) {
+   			return heldGitMetadata
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the five `TestHoldGitMachinery` leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:` `got []` (and `new HOOKS` also `sandbox_heldgit_linux_test.go:810: want ".git/HOOKS" gone`); FAIL `TestNewGitMachinery/baseline_HOOKS_replaced_in_place` (`sandbox_heldgit_unix_test.go:321: held:` `got []`); FAIL `TestGitNameFold` (`sandbox_heldgit_unix_test.go:348: foldedGitNameKind("HOOKS") = 0, want 4`, and the same line for each other spelling); every other test passes (exit 1; 137 passed, 9 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch is the matching before the fix: only the exact names are metadata and containers, so a `.git/HOOKS` or a ligature `conﬁg.worktree` the command creates in an existing `.git` stays where it is. On case-sensitive ext4 git does not read those names; a case-insensitive Linux filesystem would serve them under git's own, where the exact-name lookups find them anyway.
+
+## M-429 — The post-run check folds the Kelvin sign, the long s, ß and ligatures, not only ASCII case
+- Affected refs: GITMETA-POSTRUN-HISTORICAL-NAMES: archived baseline only.
+- Original refs: GITMETA-POSTRUN-DIFF: `TestGitNameFold`; GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `new Kelvin-sign hooks in an existing .git`, `new ligature config.worktree in an existing .git`), `TestHoldAlreadySetAsideSpelling` (subtests `a ligature spelling`, `a Kelvin-sign spelling`)
+- Baseline: as M-428
+- Platform: as M-428; on darwin `TestGitNameFold` fails as quoted
+- Profile / command: as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -526,7 +526,7 @@ func (l *sandboxGitLayout) noteEntry(name string, kind fs.FileMode) {
+   // on a case-sensitive file system other spellings are ordinary names. #721's
+   // mount lists keep their own matching.
+   func gitNameFold(a, b string) bool {
+  -	return strings.EqualFold(gitFoldExpand(a), gitFoldExpand(b))
+  +	return len(a) == len(b) && strings.EqualFold(a, b)
+   }
+   
+   // gitFoldExpand spells s's ß and ẞ as ss and each Latin ligature U+FB00 to
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the two `TestHoldGitMachinery` leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:`; FAIL both `TestHoldAlreadySetAsideSpelling` leaves above, each with `sandbox_heldgit_linux_test.go:848: hold = no such file or directory, want already set aside true`; FAIL `TestGitNameFold` (`sandbox_heldgit_unix_test.go:348: foldedGitNameKind("hooKs") = 0, want 4`, `foldedGitNameKind("conﬁg") = 0, want 4`, `foldedGitNameKind("worKtrees") = 0, want 5`, and `sandbox_heldgit_unix_test.go:361: gitNameFold("ß", "ss") = false, want true` for each expansion); every other test passes (exit 1; 139 passed, 7 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The quoted spellings `hooKs` and `worKtrees` contain U+212A KELVIN SIGN. The patch is ASCII-only folding (equal byte length keeps `strings.EqualFold` from matching a multi-byte rune to an ASCII letter), as #721's mount lists match. The ASCII case spellings stay held under it.
+
+## M-430 — A folder another user owns is reported as such, not as a refused operation
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `a locked directory another user owns gives a warning`, `a directory another user owns gives a warning`)
+- Baseline: as M-428
+- Platform: as M-428, linux only (the owner-access code is Linux-only)
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -460,8 +460,7 @@ func (l *sandboxGitLayout) openUp(dir string) {
+   	if err != nil {
+   		return
+   	}
+  -	if err := l.access.openUpPath(filepath.ToSlash(rel)); errors.Is(err, errAccessMoved) || errors.Is(err, errAccessLimit) ||
+  -		errors.Is(err, errAccessNotOwned) {
+  +	if err := l.access.openUpPath(filepath.ToSlash(rel)); errors.Is(err, errAccessMoved) || errors.Is(err, errAccessLimit) {
+   		l.why(dir, err)
+   	}
+   }
+  diff --git a/agent/tools/sandbox_owneraccess_linux.go b/agent/tools/sandbox_owneraccess_linux.go
+  --- a/agent/tools/sandbox_owneraccess_linux.go
+  +++ b/agent/tools/sandbox_owneraccess_linux.go
+  @@ -160,8 +160,6 @@ func (a *ownerAccess) retry(dir int, dirRel string, need uint32, op func() error
+   		switch {
+   		case errors.Is(gerr, errAccessMoved):
+   			return movedErr{err}
+  -		case errors.Is(gerr, errAccessNotOwned):
+  -			return notOwnedErr{err}
+   		}
+   		return err
+   	}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL both leaves above, with `sandbox_heldgit_linux_test.go:777: notes:` `got ["WARNING: could not check sub for new git metadata (permission denied); do not run git in it or below it until you have checked it"]` and `got [... "WARNING: could not set aside new git metadata at src/.git (permission denied); do not run git in that directory until you have checked it"]`; every other test passes (exit 1; 143 passed, 3 failed). Restored (both files `cmp` identical) and passed again.
+- Kind: guard
+- Notes: The patch reports the kernel's refusal instead of the reason. The behaviour (a warning, nothing opened up) is the same; the WARNING then hides that only git's `safe.directory` stands between host git and such a folder.
+
+## M-431 — A baseline name only the fold or a lookup matches is not excused as a host-side change
+- Affected refs: GITMETA-POSTRUN-DIFF: `TestNewGitMachinery` (subtest `baseline HOOKS replaced in place`); GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `config replaced in a casefold .git directory from before the run`)
+- Baseline: as M-428
+- Platform: as M-428; on darwin the `TestNewGitMachinery` leaf fails as quoted
+- Profile / command: as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_unix.go b/agent/tools/sandbox_heldgit_unix.go
+  --- a/agent/tools/sandbox_heldgit_unix.go
+  +++ b/agent/tools/sandbox_heldgit_unix.go
+  @@ -103,7 +103,7 @@ func newGitMachinery(before, after sandboxGitLayout) []heldItem {
+   		folded[p] = true
+   	}
+   	hostSide := func(p string) bool {
+  -		if _, was := before.ids[p]; !was || folded[p] {
+  +		if _, was := before.ids[p]; !was || false && folded[p] {
+   			return false
+   		}
+   		if !mounted(beforeKinds[p]) || !mounted(afterKinds[p]) {
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestNewGitMachinery/baseline_HOOKS_replaced_in_place` (`sandbox_heldgit_unix_test.go:321: held:` `got []`) and `TestHoldGitMachinery/config_replaced_in_a_casefold_.git_directory_from_before_the_run` (`sandbox_heldgit_linux_test.go:777: notes:`); every other test passes (exit 1; 142 passed, 4 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The host-side exception rests on the sandbox mounting each baseline metadata entry over itself. No mount covers a name only `gitNameFold` matches, or one only a lookup found, so a command can replace one in place; under the patch that replacement is excused.
+
+## M-432 — The bwrap backend runs the post-run check
+- Affected refs: GITMETA-POSTRUN-WIRING: `TestBwrapRunHoldsNewGitMachinery`, `TestBwrapRunWorkspaceReplaced`, `TestBwrapWorkspacePinReleased` (subtests `background job waited for`, `start fails`), `TestBwrapRunErrorKeepsHeldNotes`, `TestBwrapStartHoldsAtExit`, `TestBwrapStartErrorStillChecks`
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -508,7 +508,6 @@ func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, erro
+   	}
+   	defer closePin(before)
+   	res, err := b.runner.Run(ctx, wrapped)
+  -	res.Notes = append(res.Notes, b.holdNewGit(before)...)
+   	return res, err
+   }
+   
+  @@ -525,13 +524,10 @@ func (b *bwrapBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroun
+   	}
+   	proc, err := b.starter.Start(wrapped, stdout, stderr)
+   	if err != nil {
+  -		defer closePin(before)
+  -		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before), "\n"))
+  +		return nil, err
+   	}
+  -	return &heldGitProcess{backgroundProcess: proc, check: func() []string {
+  -		defer closePin(before)
+  -		return b.holdNewGit(before)
+  -	}}, nil
+  +	_ = before
+  +	return proc, nil
+   }
+   
+   // holdNewGit is the post-run check (#802): it walks the workspace again,
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestBwrapRunHoldsNewGitMachinery` (`exec_linux_test.go:1489: no notes`), `TestBwrapRunWorkspaceReplaced` (`exec_linux_test.go:1549: notes:` `got []`), both `TestBwrapWorkspacePinReleased` leaves above (`exec_linux_test.go:1606: 8 descriptors open after, 7 before`: no check, so no one closes the pin), `TestBwrapRunErrorKeepsHeldNotes` (`exec_linux_test.go:1624: notes ["earlier"]`), `TestBwrapStartHoldsAtExit` (`exec_linux_test.go:1645: notes []`), `TestBwrapStartErrorStillChecks` (`exec_linux_test.go:1687: no notes on observe background process exit: injected`); every other test passes (exit 1; 138 passed, 8 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch is the backend before the check: what a command plants stays live and unnamed.
+
+## M-433 — The post-run check runs on the error paths too
+- Affected refs: GITMETA-POSTRUN-WIRING: `TestBwrapRunErrorKeepsHeldNotes`, `TestBwrapStartErrorStillChecks`
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -508,7 +508,9 @@ func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, erro
+   	}
+   	defer closePin(before)
+   	res, err := b.runner.Run(ctx, wrapped)
+  -	res.Notes = append(res.Notes, b.holdNewGit(before)...)
+  +	if err == nil {
+  +		res.Notes = append(res.Notes, b.holdNewGit(before)...)
+  +	}
+   	return res, err
+   }
+   
+  @@ -526,7 +528,7 @@ func (b *bwrapBackend) Start(spec execSpec, stdout, stderr io.Writer) (backgroun
+   	proc, err := b.starter.Start(wrapped, stdout, stderr)
+   	if err != nil {
+   		defer closePin(before)
+  -		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before), "\n"))
+  +		return nil, err
+   	}
+   	return &heldGitProcess{backgroundProcess: proc, check: func() []string {
+   		defer closePin(before)
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestBwrapRunErrorKeepsHeldNotes` (`exec_linux_test.go:1624: notes ["earlier"]`) and `TestBwrapStartErrorStillChecks` (`exec_linux_test.go:1687: no notes on observe background process exit: injected`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: A timed-out or cancelled command, and a background start that fails after the child ran, may already have planted something; under the patch it stays live.
+
+## M-434 — The after-walk looks git's names up in every directory that may fold them
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `casefold .git directory`, `casefold bare layout`, `casefold .git directory with a casefold HEAD`, `casefold .git file`, `casefold .git symlink`, `casefold bare layout when the flags cannot be read`, `vfat without a flag`, `an unknown file system type`, `the directory cannot be opened`, `fstat fails`, `statfs fails`, `vfat mounted below an ext4 root`, `new hooks in a casefold .git directory from before the run`, `config replaced in a casefold .git directory from before the run`)
+- Baseline: as M-428
+- Platform: as M-428, linux only (the gate looks nothing up on darwin)
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -349,7 +349,6 @@ func (l *sandboxGitLayout) walkAfter(start string) {
+   		}
+   		if entry.IsDir() {
+   			l.openUp(name)
+  -			l.lookupGitNames(name)
+   		}
+   		l.noteEntry(name, entry.Type())
+   		return nil
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the 14 leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:`, and `vfat mounted below an ext4 root` also with `sandbox_heldgit_linux_test.go:696: statfs read 1 times, want 3`; every other test passes (exit 1; 131 passed, 15 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch leaves the after-walk to its listing: on a directory that resolves git's names to other spellings (the rows simulate a casefold directory that ignores U+200D), a `.g\u200dit` entry or a layout with `H\u200dEAD` is never found, so host git reaches what the command planted there.
+
+## M-435 — The before-walk records the user's repository however a lookup finds it
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `vfat mounted below an ext4 root`, `casefold .git directory from before the run`, `new hooks in a casefold .git directory from before the run`, `casefold bare layout from before the run`, `new repository in a casefold bare layout from before the run`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -230,9 +230,6 @@ func inspectSandboxWorkspaceOnce(root string, walk func(string, fs.WalkDirFunc)
+   			return fmt.Errorf("%w %q: entry type changed", errSandboxWorkspaceChanged, rel)
+   		}
+   		layout.noteEntry(name, kind)
+  -		if info.IsDir() {
+  -			layout.lookupGitNames(name)
+  -		}
+   		if info.IsDir() || kind&os.ModeSymlink != 0 {
+   			return nil
+   		}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the five leaves above, four with `sandbox_heldgit_linux_test.go:777: notes:` (the user's `.g\u200dit` or `H\u200dEAD` is held as new) and `vfat mounted below an ext4 root` with `sandbox_heldgit_linux_test.go:696: statfs read 2 times, want 3`; every other test passes (exit 1; 140 passed, 6 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: Without the before-walk's lookups the user's own repository spelled another way is missing from the baseline, so the check sets it aside after every command.
+
+## M-436 — The lookup gate looks up on any file system that may fold names without the casefold flag
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `vfat without a flag`, `an unknown file system type`, `statfs fails`, `vfat mounted below an ext4 root`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_casefold_linux.go b/agent/tools/sandbox_casefold_linux.go
+  --- a/agent/tools/sandbox_casefold_linux.go
+  +++ b/agent/tools/sandbox_casefold_linux.go
+  @@ -97,6 +97,6 @@ func (l *sandboxGitLayout) mayFoldNames(dir string) bool {
+   	case unix.XFS_SUPER_MAGIC, unix.BTRFS_SUPER_MAGIC:
+   		return false
+   	default:
+  -		return true
+  +		return false
+   	}
+   }
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the four leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:`; every other test passes (exit 1; 141 passed, 5 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch trusts the casefold flag alone, which FAT, exFAT, NTFS, SMB and an unidentified file system never set: a plant spelled their way is not looked up.
+
+## M-437 — The lookup gate looks up when it cannot read a directory or its flags
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `casefold bare layout when the flags cannot be read`, `the directory cannot be opened`, `fstat fails`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_casefold_linux.go b/agent/tools/sandbox_casefold_linux.go
+  --- a/agent/tools/sandbox_casefold_linux.go
+  +++ b/agent/tools/sandbox_casefold_linux.go
+  @@ -73,12 +73,12 @@ const fsTypeUnknown int64 = -1
+   func (l *sandboxGitLayout) mayFoldNames(dir string) bool {
+   	p, err := openDirProbe(dir)
+   	if err != nil {
+  -		return true
+  +		return false
+   	}
+   	defer p.close()
+   	dev, err := p.dev()
+   	if err != nil {
+  -		return true
+  +		return false
+   	}
+   	t, ok := l.fsTypes[dev]
+   	if !ok {
+  @@ -93,7 +93,7 @@ func (l *sandboxGitLayout) mayFoldNames(dir string) bool {
+   	switch t {
+   	case unix.EXT4_SUPER_MAGIC, unix.F2FS_SUPER_MAGIC, unix.TMPFS_MAGIC:
+   		f, err := p.flags()
+  -		return err != nil || f&fsCasefoldFL != 0
+  +		return err == nil && f&fsCasefoldFL != 0
+   	case unix.XFS_SUPER_MAGIC, unix.BTRFS_SUPER_MAGIC:
+   		return false
+   	default:
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the three leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:`; every other test passes (exit 1; 142 passed, 4 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch fails open on each error branch of the gate. A failed `statfs` is the type rule's (M-436): it caches the device as unknown, which looks up.
+
+## M-438 — The before-walk's lookups change no mount and add no refusal
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestBwrapPrepareUnchangedByLookups`, `TestHoldGitMachinery` (subtest `config replaced in a casefold .git directory from before the run`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -378,9 +378,6 @@ func (l *sandboxGitLayout) lookupGitNames(dir string) {
+   	}
+   	if fi, err := os.Lstat(gitLookupPath(dir, ".git")); err == nil {
+   		dirs, files, links := &l.dotGitDirs, &l.gitFiles, &l.dotGitLinks
+  -		if !l.afterWalk {
+  -			dirs, files, links = &l.lookupDotGitDirs, &l.lookupGitFiles, &l.lookupDotGitLinks
+  -		}
+   		switch p := listedAs(dir, ".git", fi); {
+   		case fi.IsDir():
+   			*dirs = append(*dirs, p)
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestBwrapPrepareUnchangedByLookups` (`exec_linux_test.go:686: prepare refused: tools: bwrap cannot protect git metadata "src/.g\u200dit/config": it is a symbolic link; replace the link with the file or directory itself (for hooks, core.hooksPath keeps them in the working tree)`) and the `TestHoldGitMachinery` leaf above (`sandbox_heldgit_linux_test.go:777: notes:`); every other test passes (exit 1; 143 passed, 3 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch records the before-walk's `.git` hits with the listed ones, which the bind-mount builder and the fail-closed scan read: a casefold-spelled repository from before the run then gets mounts of its own, and its symlinked config refuses the spawn.
+
+## M-439 — Lookup-only baseline records are never excused as host-side changes
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `config replaced in a casefold .git directory from before the run`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_unix.go b/agent/tools/sandbox_heldgit_unix.go
+  --- a/agent/tools/sandbox_heldgit_unix.go
+  +++ b/agent/tools/sandbox_heldgit_unix.go
+  @@ -98,8 +98,7 @@ func newGitMachinery(before, after sandboxGitLayout) []heldItem {
+   	// anything only the before-walk's lookups found, is never mounted, so a
+   	// command can replace it in place.
+   	folded := make(map[string]bool)
+  -	for _, p := range slices.Concat(before.foldMetadata, before.foldContainers, before.lookupMetadata,
+  -		before.lookupContainers, before.lookupGitDirs, before.containerLinks) {
+  +	for _, p := range slices.Concat(before.foldMetadata, before.foldContainers, before.containerLinks) {
+   		folded[p] = true
+   	}
+   	hostSide := func(p string) bool {
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the leaf above (`sandbox_heldgit_linux_test.go:777: notes:`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: No mount covers a repository only a lookup found, so its config replaced in place under the unchanged `.git` is the command's doing; under the patch it is excused as the host's.
+
+## M-440 — A workspace moved or replaced during the run is not compared with the old baseline
+- Affected refs: GITMETA-POSTRUN-WIRING: `TestBwrapRunWorkspaceReplaced`
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -477,7 +477,7 @@ func pinWorkspace(root string) *os.File {
+   // names the directory pinned for l (it was moved or replaced during the
+   // run), or "" when it still does or nothing was pinned.
+   func workspaceRebound(l sandboxGitLayout) string {
+  -	if l.pin == nil {
+  +	if true {
+   		return ""
+   	}
+   	var pinned, now unix.Stat_t
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestBwrapRunWorkspaceReplaced` (`exec_linux_test.go:1549: notes:` `got ["WARNING: could not set aside new git metadata at .git (it was moved or replaced during the run) (no such file or directory); do not run git in that directory until you have checked it"]`); every other test passes (exit 1; 145 passed, 1 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: Without the rebind check the after-walk compares the checkout now at the path with the moved workspace's baseline and finds its `.git` new. The hold still reaches the workspace through the pin, so it renames nothing in the other checkout and warns instead; the patch loses the check's own explanation, and a hold reaching the path would rename another checkout's `.git`.
+
+## M-441 — A new symbolic link at a container name is held, not skipped
+- Affected refs: GITMETA-POSTRUN-DIFF: `TestNewGitMachinery` (subtest `new worktrees symlink`); GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `new worktrees symlink`)
+- Baseline: as M-428
+- Platform: as M-428; on darwin the `TestNewGitMachinery` leaf fails as quoted
+- Profile / command: as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -860,7 +860,7 @@ func scanGitDir(d string, out *sandboxGitLayout) error {
+   	// but host git follows it (worktree pruning removes entries in its
+   	// target), so the post-run check records it to hold a new one.
+   	for _, name := range []string{"worktrees", "modules"} {
+  -		if fi, err := os.Lstat(filepath.Join(d, name)); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+  +		if fi, err := os.Lstat(filepath.Join(d, name)); err == nil && false && fi.Mode()&fs.ModeSymlink != 0 {
+   			out.containerLinks = append(out.containerLinks, filepath.Join(d, name))
+   		}
+   	}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestNewGitMachinery/new_worktrees_symlink` (`sandbox_heldgit_unix_test.go:321: held:` `got []`) and `TestHoldGitMachinery/new_worktrees_symlink` (`sandbox_heldgit_linux_test.go:777: notes:` `got []`); every other test passes (exit 1; 142 passed, 4 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The scan lists a container only when it is a directory, so without the link record a new `.git/worktrees` link is never compared; host git's worktree pruning follows it and removes entries in its target.
+
+## M-442 — New metadata in a baseline repository moved under a held item is held first
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `new metadata in a baseline checkout moved into a new .git`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_unix.go b/agent/tools/sandbox_heldgit_unix.go
+  --- a/agent/tools/sandbox_heldgit_unix.go
+  +++ b/agent/tools/sandbox_heldgit_unix.go
+  @@ -190,7 +190,7 @@ func newGitMachinery(before, after sandboxGitLayout) []heldItem {
+   			// Hidden by the held item above, unless a baseline repository
+   			// lies between them.
+   			r := tree.up(tree.parent[i], baselineRepo)
+  -			if r < 0 || tree.up(r, hides) != above || r == above {
+  +			if true || r < 0 || tree.up(r, hides) != above || r == above {
+   				continue
+   			}
+   		}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the leaf above (`sandbox_heldgit_linux_test.go:777: notes:` `got ["held back new git metadata: n/.git → n/.git.golem-held-r1 (rename it back to restore)"]` and `sandbox_heldgit_linux_test.go:810: want "n/.git.golem-held-r1/x/.git/config.worktree" gone`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The moved checkout keeps its baseline `HEAD`, so git started in it under the held name uses what the command added; the patch leaves that to the item above, which only moves it.
+
+## M-443 — A baseline layout needs objects and refs git can enter
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `placeholder layout completed`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -597,7 +597,7 @@ func (l *sandboxGitLayout) noteLayout(dir string) {
+   		}
+   		l.headIDs[listed] = id
+   	}
+  -	searchable := func(name string) bool { return unix.Access(gitLookupPath(dir, name), unix.X_OK) == nil }
+  +	searchable := func(name string) bool { _ = unix.X_OK; _, err := os.Lstat(gitLookupPath(dir, name)); return err == nil }
+   	present := func(name string) bool {
+   		_, err := os.Lstat(gitLookupPath(dir, name))
+   		return err == nil
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the leaf above (`sandbox_heldgit_linux_test.go:777: notes:` `got []`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: With any entry named `objects` and `refs` counting, a folder with a valid `HEAD` and two placeholder files is baseline, and the command can complete it into a repository the check leaves alone.
+
+## M-444 — A HEAD replaced after the walk is not renamed
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `a HEAD replaced before the hold`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_linux.go b/agent/tools/sandbox_heldgit_linux.go
+  --- a/agent/tools/sandbox_heldgit_linux.go
+  +++ b/agent/tools/sandbox_heldgit_linux.go
+  @@ -228,7 +228,7 @@ func (h *holder) holdHEAD(dir int, r, hr, hd string, pre bool) error {
+   	id, known := h.headIDs[hd]
+   	return h.renameNoting(at, atRel, name, pre, func() error {
+   		return h.acc.retry(at, atRel, 0o500, func() error {
+  -			if known {
+  +			if false && known {
+   				return recheck(at, name, id)
+   			}
+   			var st unix.Stat_t
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the leaf above (`sandbox_heldgit_linux_test.go:777: notes:`, and `sandbox_heldgit_linux_test.go:805: want "bare/HEAD": lstat <tmp>/001/bare/HEAD: no such file or directory`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch accepts any regular file or link at the HEAD's name, so a replacement written there between the walk and the hold is renamed in place of the one the walk found.
+
+## M-445 — Moving a HEAD that was there before the run is a WARNING
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtests `placeholder layout completed`, `a HEAD from before the run in a layout the command completes`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_linux.go b/agent/tools/sandbox_heldgit_linux.go
+  --- a/agent/tools/sandbox_heldgit_linux.go
+  +++ b/agent/tools/sandbox_heldgit_linux.go
+  @@ -196,7 +196,7 @@ func (h *holder) hold(it heldItem, r string) error {
+   			h.warn(hp, errors.New("outside the item"))
+   			continue
+   		}
+  -		if err := h.holdHEAD(dir, r, hr, hd, slices.Contains(it.PreHEADs, hd)); err != nil {
+  +		if err := h.holdHEAD(dir, r, hr, hd, false); err != nil {
+   			h.warn(path.Join(r, hr), err)
+   		}
+   	}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL both leaves above, each with `sandbox_heldgit_linux_test.go:777: notes:` `got ["held back new git metadata: fx/HEAD → fx/HEAD.golem-held-r1 (rename it back to restore)"]`; every other test passes (exit 1; 143 passed, 3 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The `HEAD` is still moved (the folder would be live otherwise), but under the patch the note does not tell the user that the file was theirs.
+
+## M-446 — A lookup renames only the entry it resolves, not a file's other names
+- Affected refs: GITMETA-POSTRUN-HISTORICAL-NAMES: archived baseline only.
+- Original refs: GITMETA-POSTRUN-DIFF: `TestListedAs` (subtest `a hard-linked file`); GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `a casefold .git hard-linked to an ordinary file`)
+- Baseline: as M-428
+- Platform: as M-428; on darwin the `TestListedAs` leaf fails as quoted
+- Profile / command: as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_links_unix.go b/agent/tools/sandbox_links_unix.go
+  --- a/agent/tools/sandbox_links_unix.go
+  +++ b/agent/tools/sandbox_links_unix.go
+  @@ -441,10 +441,10 @@ func listedAs(dir, name string, fi fs.FileInfo) string {
+   			out = append(out, filepath.Join(dir, e.Name()))
+   		}
+   	}
+  -	if len(out) != 1 {
+  +	if len(out) == 0 {
+   		return exact
+   	}
+  -	return out[0]
+  +	return out[len(out)-1]
+   }
+   
+   // openUp opens up dir, a directory the walk is about to read, when its owner
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestListedAs/a_hard-linked_file` (`sandbox_heldgit_unix_test.go:392: listedAs = "x", want "HEAD"`) and the `TestHoldGitMachinery` leaf above (`sandbox_heldgit_linux_test.go:777: notes:`, and `sandbox_heldgit_linux_test.go:805: want "src/notes.txt": lstat <tmp>/001/src/notes.txt: no such file or directory`); every other test passes (exit 1; 142 passed, 4 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch picks one listed name of a hard-linked file, which need not be the one the file system resolves for git: the user's `notes.txt` is renamed.
+
+## M-447 — A move is excused only by a baseline name of the same kind no longer at its path
+- Affected refs: GITMETA-POSTRUN-DIFF: `TestNewGitMachinery` (subtest `second name for an existing .git symlink`); GITMETA-POSTRUN-HOLD: `TestHoldGitMachinery` (subtest `a metadata name of a baseline .git file becomes a second .git file`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: linux-host and bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/sandbox_heldgit_unix.go b/agent/tools/sandbox_heldgit_unix.go
+  --- a/agent/tools/sandbox_heldgit_unix.go
+  +++ b/agent/tools/sandbox_heldgit_unix.go
+  @@ -149,8 +149,7 @@ func newGitMachinery(before, after sandboxGitLayout) []heldItem {
+   			fresh[p] = !hostSide(p)
+   		case before.ids[p] == id:
+   			// unchanged at its path
+  -		case k != kindUnknown && allow[idKind{id, k}] > 0:
+  -			allow[idKind{id, k}]--
+  +		case k != kindUnknown && slices.ContainsFunc(baseline[id], func(b place) bool { return b.kind == k }):
+   		default:
+   			fresh[p] = true
+   		}
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL `TestNewGitMachinery/second_name_for_an_existing_.git_symlink` (`sandbox_heldgit_unix_test.go:321: held:` `got []`) and the `TestHoldGitMachinery` leaf above (`sandbox_heldgit_linux_test.go:777: notes:` `got []`); every other test passes (exit 1; 142 passed, 4 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: The patch excuses any name of a baseline identity whose kind the baseline had, without counting the names that stayed: a metadata name turned into a second `.git` file, or a second name for a `.git` link, passes as a move.
+
+## M-448 — The workspace pin is closed after a foreground run
+- Affected refs: GITMETA-POSTRUN-WIRING: `TestBwrapWorkspacePinReleased` (subtest `foreground run`)
+- Baseline: as M-428
+- Platform: as M-428, linux only
+- Profile / command: bwrap / as M-428
+- Patch:
+  ```diff
+  diff --git a/agent/tools/exec_linux.go b/agent/tools/exec_linux.go
+  --- a/agent/tools/exec_linux.go
+  +++ b/agent/tools/exec_linux.go
+  @@ -506,7 +506,6 @@ func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, erro
+   	if err != nil {
+   		return execResult{}, err
+   	}
+  -	defer closePin(before)
+   	res, err := b.runner.Run(ctx, wrapped)
+   	res.Notes = append(res.Notes, b.holdNewGit(before)...)
+   	return res, err
+  ```
+- Baseline: pass (146 tests and subtests passed, none skipped). Mutant: FAIL the leaf above (`exec_linux_test.go:1606: 11 descriptors open after, 10 before`); every other test passes (exit 1; 144 passed, 2 failed). Restored (`cmp` identical to the committed file) and passed again.
+- Kind: guard
+- Notes: Each foreground command would leave one descriptor for the workspace open.
+
+## M-449 — Each sandbox recovery notice reaches the operator and model once
+
+- Affected refs: GITMETA-POSTRUN-WIRING: `TestBwrapPostRunGitAcceptance`
+- Baseline: the #802 remediation of PR head `de81d637`. Git blobs `e27e90cd0d1d20a9e3b51a27708ccd1915add741` (agent/tools/exec.go) and `99b5bacfa6a62105a619f56dac64804b8f3815c7` (agent/tools/bwrap_postrun_acceptance_linux_test.go).
+- Platform: Linux arm64, Ubuntu 24.04.4, kernel 6.8.0-134, Bubblewrap 0.12, uid 1000. Compiled with Go 1.27.1.
+- Profile / command: bwrap / build `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c ./agent/tools`, then run `GO_LLM_REQUIRE_BWRAP=1 ./tools.test -test.count=1 -test.v -test.run '^TestBwrapPostRunGitAcceptance$'`. Build the variant using a Go file overlay for the single hunk below.
+- Patch:
+
+  ```diff
+  --- a/agent/tools/exec.go
+  +++ b/agent/tools/exec.go
+  @@ -106 +106,2 @@ func (s execSpec) reportSandboxNotes(notes []string) []string {
+  -			s.sandboxNotice(note)
+  +			s.sandboxNotice(note)
+  +			s.sandboxNotice(note)
+  ```
+
+- Baseline: PASS (exit 0). Mutant: FAIL (exit 1); `bwrap_postrun_acceptance_linux_test.go:109` reported two identical operator notices for `sub/HEAD.golem-held-946a8b7b` and one notice in the model result. Restored: the same baseline executable passed again (exit 0).
+- Kind: guard
+- Notes: The variant duplicates delivery of a screened notice after an ordinary bare-repository initialization. The hold, note formatting and model result use their original implementation.
+
+## M-450 — Casefold lookup selection distinguishes directories on the same device
+
+- Affected refs: GITMETA-POSTRUN-HOLD: `TestCasefoldFlagsPerDirectory`
+- Baseline: the #802 remediation of PR head `de81d637`. Git blob `809c7e624bcf02eff2c0b5752661ee1ec87f942f` (agent/tools/sandbox_casefold_linux.go).
+- Platform: Linux arm64, Ubuntu 24.04.4, kernel 6.8.0-134, uid 1000. Compiled with Go 1.27.1.
+- Profile / command: linux-host / build as M-449, with the overlay below for the variant, then run `./tools.test -test.count=1 -test.v -test.run '^TestCasefoldFlagsPerDirectory$'`.
+- Patch:
+
+  ```diff
+  --- a/agent/tools/sandbox_casefold_linux.go
+  +++ b/agent/tools/sandbox_casefold_linux.go
+  @@ -143 +143 @@ func (l *sandboxGitLayout) mayFoldNames(dir string) bool {
+  -		return err != nil || f&fsCasefoldFL != 0
+  +		return err != nil || f|fsCasefoldFL != 0
+  ```
+
+- Baseline: PASS (exit 0). Mutant: FAIL (exit 1); `sandbox_heldgit_linux_test.go:1013` reported `exact=true fold=true statfs=1` for ext4 (`ef53`), f2fs (`f2f52010`) and tmpfs (`1021994`). Restored: the same baseline executable passed again (exit 0).
+- Kind: guard
+- Notes: The variant requests named lookups even for directories with a clear casefold flag. The test uses two synthetic directory probes per filesystem. Separately, the unmodified `TestBwrapPostRunGitMetadataNames` passed all ten cases on ext4, casefold-enabled ext4 and vfat using inert files and directories and the real sandbox.
