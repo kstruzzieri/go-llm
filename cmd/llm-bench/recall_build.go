@@ -174,22 +174,19 @@ func (c recallCases) validate(split string, skipBalance bool) error {
 		ranks[f.rank()]++
 		s7 += f.s7()
 	}
-	want := map[string]int{"pilot": 3, "confirmatory": 10}[split]
+	want := recallSplitFamilyCount(split) / 4
 	for _, t := range c.Templates {
 		if perTemplate[t.ID] != want {
 			return recallErr("template %s has %d %s families, want %d", t.ID, perTemplate[t.ID], split, want)
 		}
 	}
-	if split == "confirmatory" {
-		// The gate's integer thresholds assume 4 templates x 10 families, the
-		// four (value_type, task_style) pairs once each.
-		pairs := map[[2]string]bool{}
-		for _, t := range c.Templates {
-			pairs[[2]string{t.ValueType, t.TaskStyle}] = true
-		}
-		if len(c.Templates) != 4 || len(pairs) != 4 {
-			return recallErr("confirmatory needs exactly 4 templates covering each (value_type, task_style) pair once (number/direct, number/task, identifier/direct, identifier/task); got %d templates over %d pairs", len(c.Templates), len(pairs))
-		}
+	// Both splits use one template for each value type and task style.
+	pairs := map[[2]string]bool{}
+	for _, t := range c.Templates {
+		pairs[[2]string{t.ValueType, t.TaskStyle}] = true
+	}
+	if len(c.Templates) != 4 || len(pairs) != 4 {
+		return recallErr("%s needs exactly 4 templates covering each (value_type, task_style) pair once; got %d templates over %d pairs", split, len(c.Templates), len(pairs))
 	}
 	n := len(sel)
 	for r := 1; r <= 3; r++ {
@@ -333,10 +330,11 @@ func (f recallFamily) validate(tmpls map[string]recallTemplate, sys string) erro
 		return fmt.Errorf("a distractor states the lesson value %q", v.Lesson)
 	case statesValue(sys, v, v.Lesson):
 		return fmt.Errorf("the system prompt states the lesson value %q", v.Lesson)
-	case v.Identifier != "" && (!strings.Contains(f.FileBefore, v.Identifier) || !strings.Contains(f.FileS1, v.Identifier)):
-		return fmt.Errorf("value.identifier %q must appear in file_before and file_s1", v.Identifier)
 	case !strings.Contains(f.Lesson, f.NamedFile):
 		return fmt.Errorf("lesson record does not name named_file %q", f.NamedFile)
+	}
+	if err := f.validateSource(); err != nil {
+		return err
 	}
 	for _, p := range f.TaskPaths {
 		if !strings.Contains(f.Task, p) {
@@ -941,25 +939,22 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", recallErr("%w", err)
 	}
-	// Prune only this split's own stale traces: foreign files and the other
-	// split's traces stay.
-	stale, err := filesWithPrefix(outDir, "recall-")
-	if err != nil {
-		return "", recallErr("list %s: %w", outDir, err)
+	// Serialize the ownership check and publication across both splits.
+	lock := filepath.Join(outDir, ".recall-build.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		if os.IsExist(err) {
+			return "", recallErr("output lock %s exists; if a previous build was interrupted, remove the empty lock directory after it exits", lock)
+		}
+		return "", recallErr("acquire output lock %s: %w", lock, err)
 	}
-	var removals []string
-	for _, p := range stale {
-		if names[strings.TrimSuffix(filepath.Base(p), ".json")] {
-			continue
+	defer func() {
+		if err := os.Remove(lock); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "recall build: release output lock: %v\n", err)
 		}
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var t Trace
-		if json.Unmarshal(raw, &t) == nil && t.Recall != nil && t.Recall.Split == split {
-			removals = append(removals, p)
-		}
+	}()
+	removals, err := recallOutputRemovals(casesPath, outDir, split, files)
+	if err != nil {
+		return "", recallErr("%w", err)
 	}
 	out, err := publishFileSet(files, removals)
 	for _, w := range out.cleanupWarnings {
@@ -969,6 +964,75 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 		return "", err
 	}
 	return digest, nil
+}
+
+// recallOutputRemovals preflights every replacement and finds obsolete outputs
+// of this split. A recall-like filename alone never confers ownership.
+func recallOutputRemovals(casesPath, dir, split string, files []filePublication) ([]string, error) {
+	input, err := os.Stat(casesPath)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := filesWithPrefix(dir, "recall-")
+	if err != nil {
+		return nil, err
+	}
+	planned := make(map[string]bool, len(files))
+	for _, f := range files {
+		planned[f.target] = true
+	}
+	// Lstat the requested spellings too: on a case-insensitive filesystem a
+	// differently cased directory entry can still occupy a requested path.
+	for _, p := range entries {
+		if _, exists := planned[p]; !exists {
+			planned[p] = false
+		}
+	}
+	var removals []string
+	for p, replace := range planned {
+		info, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if os.SameFile(input, info) {
+			if replace {
+				return nil, fmt.Errorf("output %q aliases the cases input", p)
+			}
+			continue
+		}
+		owned, err := ownedRecallOutput(p, split, info)
+		if err != nil {
+			return nil, err
+		}
+		if replace && !owned {
+			return nil, fmt.Errorf("refuse to replace %q: not a %s recall output", p, split)
+		}
+		if !replace && owned {
+			removals = append(removals, p)
+		}
+	}
+	sort.Strings(removals)
+	return removals, nil
+}
+
+func ownedRecallOutput(path, split string, info os.FileInfo) (bool, error) {
+	id := strings.TrimSuffix(filepath.Base(path), ".json")
+	family, cell, err := parseRecallTraceID(id)
+	if !info.Mode().IsRegular() || err != nil {
+		return false, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	var tr Trace
+	if json.Unmarshal(raw, &tr) != nil || tr.ID != id || tr.Source != recallTraceSource || tr.Recall == nil {
+		return false, nil
+	}
+	return tr.Recall.Split == split && tr.Recall.FamilyID == family && recallCellKey(tr) == cell, nil
 }
 
 // recallCasesDigest is "sha256:" plus the hex SHA-256 of the canonical JSON of

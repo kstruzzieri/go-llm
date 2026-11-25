@@ -20,20 +20,33 @@ import (
 // and capture binds to its digest.
 const recallRegistrationSchema = "recall-label-registration/v1"
 
-// recallRegistration is the loaded recall pre-registration. Every field is
-// required and unknown fields are rejected. CasesSHA256 is recallCasesDigest of
-// the cases file for Split (the line "cases_sha256 ..." the corpus builder
-// prints), stable when families of the other split are appended later.
+// recallRegistration is the loaded recall pre-registration. Unknown fields are rejected.
+// CasesSHA256 is recallCasesDigest of the cases file for Split (the line
+// "cases_sha256 ..." the corpus builder prints), stable when families of the other split are appended later.
 type recallRegistration struct {
 	Schema         string                        `json:"schema"`
 	Split          string                        `json:"split"`
 	CasesSHA256    string                        `json:"cases_sha256"`
 	ScorerRevision string                        `json:"scorer_revision"`
 	RuleText       string                        `json:"rule_text"`
+	Endpoint       string                        `json:"endpoint,omitempty"` // omitted in v1 means the Stage 0 llama-swap endpoint
 	Primary        string                        `json:"primary"`
 	Models         []string                      `json:"models"`
 	Decoding       map[string]registeredDecoding `json:"decoding"`
 	Traces         []registeredTrace             `json:"traces"`
+}
+
+// recallStageModels is the Stage 0 lineup for both registered splits.
+var recallStageModels = [recallModelCount]string{
+	recallPrimaryModel, "openai-compat/qwen3-coder-next:latest",
+	"openai-compat/qwen3.6:35b-a3b", "openai-compat/qwen3.8:27b",
+}
+
+func recallSplitFamilyCount(split string) int {
+	if split == "pilot" {
+		return 12
+	}
+	return recallFamilyCount
 }
 
 // recallNumPredict is the registered num_predict for every recall model.
@@ -121,9 +134,40 @@ func (r recallRegistration) validate() error {
 			return fmt.Errorf("model %q: num_predict must be %d; got %d", m, recallNumPredict, d.NumPredict)
 		}
 	}
+	if len(r.Models) != len(recallStageModels) {
+		return fmt.Errorf("models must contain the %d Stage 0 models", len(recallStageModels))
+	}
+	for _, model := range recallStageModels {
+		if _, ok := seenModel[model]; !ok {
+			return fmt.Errorf("models is missing Stage 0 model %q", model)
+		}
+	}
+	dest, err := registeredRecallDestination(r.Endpoint)
+	if err != nil {
+		return err
+	}
+	for model, d := range r.Decoding {
+		const legacyStack = "llama.cpp via llama-swap " + recallDefaultHost
+		if r.Endpoint == "" && d.ServingStack != legacyStack {
+			return fmt.Errorf("model %q: an explicit loopback endpoint is required for this serving_stack", model)
+		}
+		if d.ServingStack == legacyStack && dest.BaseURL() != recallDefaultEndpoint {
+			return fmt.Errorf("model %q: endpoint disagrees with serving_stack", model)
+		}
+	}
+	return r.validateTraceInventory()
+}
+
+func (r recallRegistration) validateTraceInventory() error {
 	if len(r.Traces) == 0 {
 		return errors.New("traces is empty")
 	}
+	cells := recallCells(r.Split)
+	allowed := make(map[string]bool, len(cells))
+	for _, c := range cells {
+		allowed[c.Suffix] = true
+	}
+	counts := map[string]int{}
 	seen := make(map[string]struct{}, len(r.Traces))
 	for i, c := range r.Traces {
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.SHA256) == "" {
@@ -136,6 +180,22 @@ func (r recallRegistration) validate() error {
 			return fmt.Errorf("trace row %d: duplicate id %q", i, c.ID)
 		}
 		seen[c.ID] = struct{}{}
+		if !recallDigestPattern.MatchString("sha256:" + strings.TrimPrefix(c.SHA256, "sha256:")) {
+			return fmt.Errorf("trace %q: invalid sha256", c.ID)
+		}
+		family, cell, err := parseRecallTraceID(c.ID)
+		if err != nil || !injectionNamePattern.MatchString(family) || !allowed[cell] {
+			return fmt.Errorf("trace %q is not a %s family/cell ID", c.ID, r.Split)
+		}
+		counts[family]++
+	}
+	for family, n := range counts {
+		if n != len(cells) {
+			return fmt.Errorf("family %q has %d registered cells, want %d", family, n, len(cells))
+		}
+	}
+	if n := recallSplitFamilyCount(r.Split); len(counts) != n {
+		return fmt.Errorf("registration has %d %s families, want %d", len(counts), r.Split, n)
 	}
 	return nil
 }
@@ -161,6 +221,10 @@ func (r recallRegistration) bindCapture(traces []Trace, targets []ModelTarget) (
 		if !ok {
 			return nil, fmt.Errorf("recall registration: trace %q is not registered", t.ID)
 		}
+		family, cell, err := parseRecallTraceID(t.ID)
+		if err != nil || family != t.Recall.FamilyID || cell != recallCellKey(t) {
+			return nil, fmt.Errorf("recall registration: trace %q disagrees with its family or cell", t.ID)
+		}
 		if got := canonicalTraceHash(t); got != want {
 			return nil, fmt.Errorf("recall registration: trace %q hash %s does not match the registered %s", t.ID, got, want)
 		}
@@ -169,6 +233,9 @@ func (r recallRegistration) bindCapture(traces []Trace, targets []ModelTarget) (
 	for _, tg := range targets {
 		if !slices.Contains(r.Models, tg.Display) {
 			return nil, fmt.Errorf("recall registration: model %q is not registered", tg.Display)
+		}
+		if tg.Provider != openAICompatTransport || tg.Display != tg.Provider+"/"+tg.Model {
+			return nil, fmt.Errorf("recall registration: model %q disagrees with its transport or model ID", tg.Display)
 		}
 		// validate guarantees every registered model has a decoding.
 		dec, err := r.Decoding[tg.Display].decoding()

@@ -22,7 +22,7 @@ func validRecallTrace() Trace {
 		return json.RawMessage(`{"type":"function","function":{"name":"` + n + `","description":"d","parameters":{"type":"object"}}}`)
 	}
 	return Trace{
-		ID: "recall-a-1", Source: "recall", System: "sys",
+		ID: "recall-f1-A-1", Source: recallTraceSource, System: "sys",
 		Tools: []json.RawMessage{tool("agent_memory_search"), tool("read_file")},
 		Turns: []Turn{
 			{Role: "user", Content: "Which retry limit applies?"},

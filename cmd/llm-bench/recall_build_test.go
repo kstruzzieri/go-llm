@@ -102,6 +102,24 @@ func TestRecallCasesValidate(t *testing.T) {
 		{"lesson missing from file_before", "confirmatory", func(c *recallCases) { c.Families[0].FileBefore = "package worker\n" }, "file_before does not state"},
 		{"lesson present in file_s1", "confirmatory", func(c *recallCases) { c.Families[0].FileS1 = "const maxRetries = 12 // was 7\n" }, "file_s1 states"},
 		{"changed missing from file_s1", "confirmatory", func(c *recallCases) { c.Families[0].FileS1 = "package worker\n" }, "file_s1 does not state the changed"},
+		{"changed value belongs to another setting", "confirmatory", func(c *recallCases) {
+			c.Families[0].FileS1 = "package worker\nconst maxRetries = 9\nconst historyDepth = 12\n"
+		}, "file_s1: value.identifier"},
+		{"lesson value belongs to another setting", "confirmatory", func(c *recallCases) {
+			f := &c.Families[0]
+			f.FileBefore = "package worker\nconst maxRetries = 9\nconst depth = 7\n"
+			f.FileS2 = f.FileBefore + "\n"
+		}, "file_before: value.identifier"},
+		{"formatting comments out setting", "confirmatory", func(c *recallCases) {
+			f := &c.Families[0]
+			f.FileBefore = "package worker\n// retry limit\nconst maxRetries = 7\n"
+			f.FileS2 = strings.Replace(f.FileBefore, "limit\n", "limit ", 1)
+		}, "file_s2: value.identifier"},
+		{"formatting changes another string literal", "confirmatory", func(c *recallCases) {
+			f := &c.Families[0]
+			f.FileBefore += "const other = \"a b\"\n"
+			f.FileS2 += "const other = \"a   b\"\n"
+		}, "formatting changes the meaning"},
 		{"file_s2 differs beyond whitespace", "confirmatory", func(c *recallCases) { c.Families[0].FileS2 += "// extra\n" }, "file_s2 differs"},
 		{"file_s2 merges tokens", "confirmatory", func(c *recallCases) { c.Families[0].FileS2 = "package worker\n\nconst maxRetries =7\n" }, "file_s2 differs"},
 		{"file_s2 lacks the lesson value", "confirmatory", func(c *recallCases) { c.Families[0].FileS2 = "package worker\n" }, "file_s2 does not state"},
@@ -249,7 +267,7 @@ func TestRecallCasesValidateBalance(t *testing.T) {
 			c.Families = c.Families[:11]
 			return c
 		}, "has 2 pilot families, want 3"},
-		{"balanced pilot with n=15 (rank 5/5/5)", "pilot", func() recallCases { return recallScaledCases(t, 15, 5, "pilot") }, ""},
+		{"balanced pilot with n=15 (rank 5/5/5)", "pilot", func() recallCases { return recallScaledCases(t, 15, 5, "pilot") }, "exactly 4 templates"},
 		{"pilot rank counts off", "pilot", func() recallCases {
 			c := recallScaledCases(t, 12, 4, "pilot")
 			for i := range c.Families {
@@ -257,13 +275,11 @@ func TestRecallCasesValidateBalance(t *testing.T) {
 			}
 			return c
 		}, "rank 1 has 12 of 12 families; want 3..5"},
-		{"n=15 pilot rank counts name the derived range", "pilot", func() recallCases {
-			c := recallScaledCases(t, 15, 5, "pilot")
-			for i := range c.Families {
-				c.Families[i].Rank = intPtr(1)
-			}
+		{"pilot with a repeated template pair", "pilot", func() recallCases {
+			c := recallScaledCases(t, 12, 4, "pilot")
+			c.Templates[2].TaskStyle = c.Templates[0].TaskStyle
 			return c
-		}, "want 4..6"},
+		}, "exactly 4 templates"},
 		{"n=40 s7 counts name the derived range", "confirmatory", func() recallCases {
 			c := recallScaledCases(t, 40, 4, "confirmatory")
 			for i := range c.Families {
@@ -880,7 +896,9 @@ func writeStale(t *testing.T, dir, name, split string) {
 	t.Helper()
 	body := `{"id":"x"}`
 	if split != "" {
-		body = `{"id":"x","recall":{"split":"` + split + `"}}`
+		id := strings.TrimSuffix(name, ".json")
+		family, _, _ := parseRecallTraceID(id)
+		body = fmt.Sprintf(`{"id":%q,"source":%q,"recall":{"split":%q,"family_id":%q,"trace":"A","arm":"0"}}`, id, recallTraceSource, split, family)
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -1151,5 +1169,79 @@ func TestRecallSeededIDsHoldNoNumberToken(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestRecallYAMLFixtureBindings(t *testing.T) {
+	f := recallFamily{NamedFile: "worker.yaml", Value: RecallValue{Identifier: "retries", Type: "number", Lesson: "7", Changed: "12"},
+		FileBefore: "worker:\n  retries: 7\n  depth: 9\n",
+		FileS1:     "worker:\n  retries: 12\n  depth: 9\n",
+		FileS2:     "worker:\n    retries: 7\n    depth: 9\n",
+	}
+	if err := f.validateSource(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ s1, s2 string }{
+		{"worker:\n  retries: 9\n  depth: 12\n", f.FileS2},
+		{"worker:\n  retries: 12\nother:\n  retries: 12\n", f.FileS2},
+		{"other:\n  retries: 12\n", f.FileS2},
+		{f.FileS1, "worker:\n  retries: 7\ndepth: 9\n"},
+	} {
+		bad := f
+		bad.FileS1, bad.FileS2 = tc.s1, tc.s2
+		if err := bad.validateSource(); err == nil {
+			t.Errorf("accepted invalid source: S1 %q S2 %q", tc.s1, tc.s2)
+		}
+	}
+}
+
+func TestBuildRecallCorpusProtectsExistingFiles(t *testing.T) {
+	const name = "recall-num-retry-A-0.json"
+	for _, kind := range []string{"input", "hardlinked input", "other split", "foreign", "symlink", "lookalike"} {
+		t.Run(kind, func(t *testing.T) {
+			out := t.TempDir()
+			p := filepath.Join(out, name)
+			cases := recallCasesWithSplit(t, "pilot")
+			var err error
+			switch kind {
+			case "input":
+				raw, readErr := os.ReadFile(cases)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				cases = p
+				err = os.WriteFile(p, raw, 0600)
+			case "hardlinked input":
+				err = os.Link(cases, p)
+			case "other split":
+				writeStale(t, out, name, "confirmatory")
+			case "foreign":
+				err = os.WriteFile(p, []byte("unrelated"), 0600)
+			case "symlink":
+				if err := os.Symlink(cases, p); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			case "lookalike":
+				err = os.WriteFile(p, []byte(`{"id":"other","recall":{"split":"pilot"}}`), 0600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := buildRecallCorpusWith(t.Context(), cases, out, "pilot", recallBuildOptions{SkipBalance: true}); err == nil {
+				t.Fatal("expected output collision")
+			}
+			got, err := os.ReadFile(p)
+			if err != nil || string(got) != string(original) {
+				t.Fatalf("colliding file changed: %v", err)
+			}
+			entries, err := os.ReadDir(out)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("partial publication: %v, %v", entries, err)
+			}
+		})
 	}
 }

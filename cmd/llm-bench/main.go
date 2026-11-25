@@ -50,7 +50,7 @@ func main() {
 	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (paired legacy/mixed arms + optional topline)")
 	injectionBuildPath := flag.String("build-injection-corpus", "", "Build frozen-real-wire injection traces from this cases JSON (#452; a cases source of \"forged-close\" builds the E1 forged-close corpus, docs/llm/traces/injection-forged-close)")
 	injectionOut := flag.String("injection-out", filepath.Join("docs", "llm", "traces", "injection", "traces"), "Output directory for -build-injection-corpus")
-	recallBuildPath := flag.String("build-recall-corpus", "", "Build the recall-label frozen-wire traces (#864 Stage 0) from this cases JSON (requires -recall-split and -recall-out)")
+	recallBuildPath := flag.String("build-recall-corpus", "", "Build the recall-label frozen-wire traces (#864 Stage 0) from this cases JSON. Named settings use Go package declarations or YAML block mappings with plain scalars (requires -recall-split and -recall-out)")
 	recallOut := flag.String("recall-out", "", "Output directory for -build-recall-corpus (required; only that split's stale recall-*.json files are pruned)")
 	recallSplit := flag.String("recall-split", "", "With -build-recall-corpus: pilot or confirmatory (required)")
 	interceptorCensus := flag.Bool("interceptor-census", false, "Run the deterministic interceptor census (#517): render every -census-manifest file through Golem's production tools under interceptor.Defaults() and report the findings per carrier")
@@ -97,7 +97,7 @@ func main() {
 	injectionReport := flag.Bool("injection-report", false, "Emit the injection-resistance report from -captures (artifacts JSONL files, comma-separated, each with its .manifest.json) bound to -registration (#452)")
 	capturesFlag := flag.String("captures", "", "With -injection-report: comma-separated injection capture artifacts paths (local and hosted captures are separate files)")
 	injectionAdjudications := flag.String("injection-adjudications", "", "With -injection-report: optional JSONL of {trace_id, model, outcome, reviewer, note}; may only replace manual cells")
-	registrationPath := flag.String("registration", "", "With -calibrate-capture over recall traces: the committed recall pre-registration JSON (recall-label-registration/v1), whose trace hashes and decoding bind the capture (#864). With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
+	registrationPath := flag.String("registration", "", "With -calibrate-capture over recall traces: the committed recall pre-registration JSON (recall-label-registration/v1), which pins the full model and trace inventory, decoding and loopback endpoint. Set endpoint for a custom local server; the original llama-swap registration uses "+recallDefaultEndpoint+" (#864). With -calibrate-capture over injection traces or -injection-report: the committed pre-registration JSON (llm-bench.injection-registration/v1); its census, decoding and digest bind captures and reports (#452). With -interceptor-benign-report: the #517 benign registration (llm-bench.interceptor-registration/v1), e.g. docs/llm/traces/interceptor-benign/registration.json")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -518,7 +518,7 @@ func main() {
 			CandidateCacheAffinity: *cacheAffinity,
 			Scorer:                 &CaptureScorer{},
 		}
-		var registrationDigest string
+		var registrationDigest, recallEndpoint string
 		var injectionTemps map[string]float64
 		// Refused before any network call, not only inside runCalibrateCapture.
 		if anyRecallTrace(traces) && (anyInjectionTrace(traces) || anyPrefilledAssemblyTrace(traces)) {
@@ -540,6 +540,7 @@ func main() {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
 				digest = d
+				recallEndpoint = reg.Endpoint
 				if decoding, err = reg.bindCapture(traces, targets); err != nil {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
@@ -578,6 +579,7 @@ func main() {
 			OllamaURL:             *ollamaURL,
 			OpenAICompatBaseURL:   ct.baseURL,
 			RegistrationDigest:    registrationDigest,
+			RecallEndpoint:        recallEndpoint,
 			InjectionTemperatures: injectionTemps,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)

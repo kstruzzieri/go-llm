@@ -105,7 +105,7 @@ func TestCalibrateCaptureRecallByMain(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	tr := validRecallTrace()
-	regPath := recallRegistrationFile(t, []Trace{tr}, nil)
+	regPath := recallRegistrationFile(t, []Trace{tr}, recallTestEndpoint(srv.URL))
 	out := filepath.Join(t.TempDir(), "art.jsonl")
 	code, log := runLLMBenchMain(t, nil, "-calibrate-capture", "-traces", writeTraceFiles(t, tr), "-models", recallPrimaryModel,
 		"-candidate-base-url", srv.URL, "-registration", regPath, "-labels-out", out)
@@ -128,5 +128,24 @@ func TestCalibrateCaptureRecallByMain(t *testing.T) {
 	arts, err := loadArtifacts(out)
 	if err != nil || len(arts) != 1 || len(arts[0].ActualRawToolCalls) != 1 {
 		t.Fatalf("artifacts: %v %+v", err, arts)
+	}
+}
+
+func TestRecallCaptureRefusesUnregisteredEndpoint(t *testing.T) {
+	tr := validRecallTrace()
+	corpus := writeTraceFiles(t, tr)
+	reg := recallRegistrationFile(t, []Trace{tr}, nil)
+	for _, endpoint := range []string{"https://example.invalid", "http://127.0.0.1:1"} {
+		out := filepath.Join(t.TempDir(), "art.jsonl")
+		code, log := runLLMBenchMain(t, nil, "-calibrate-capture", "-traces", corpus,
+			"-models", recallPrimaryModel, "-candidate-base-url", endpoint, "-registration", reg, "-labels-out", out)
+		if code != 1 || !strings.Contains(log, "differs from the registered loopback endpoint") {
+			t.Fatalf("endpoint %q: exit %d, output %q", endpoint, code, log)
+		}
+		for _, p := range []string{out, captureManifestPath(out)} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatalf("refused capture left %q: %v", p, err)
+			}
+		}
 	}
 }

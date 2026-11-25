@@ -32,6 +32,15 @@ func recallRegistrationFile(t *testing.T, traces []Trace, mutate func(map[string
 	for _, tr := range traces {
 		rows = append(rows, map[string]string{"id": tr.ID, "sha256": canonicalTraceHash(tr)})
 	}
+	overrides := map[string]bool{}
+	for _, tr := range traces {
+		overrides[tr.ID] = true
+	}
+	for _, row := range recallTestInventory("pilot") {
+		if !overrides[row["id"]] {
+			rows = append(rows, row)
+		}
+	}
 	dec := map[string]any{}
 	for _, m := range recallRegModels {
 		dec[m] = map[string]any{"temperature": 0.0, "num_predict": 4096, "think": false, "think_mode": "toggle",
@@ -56,6 +65,27 @@ func recallRegistrationFile(t *testing.T, traces []Trace, mutate func(map[string
 	return p
 }
 
+func recallTestEndpoint(endpoint string) func(map[string]any) {
+	return func(r map[string]any) {
+		r["endpoint"] = endpoint
+		for _, d := range r["decoding"].(map[string]any) {
+			d.(map[string]any)["serving_stack"] = "local test server"
+		}
+	}
+}
+
+func recallTestInventory(split string) []map[string]string {
+	var rows []map[string]string
+	for i := 1; i <= recallSplitFamilyCount(split); i++ {
+		for _, cell := range recallCells(split) {
+			id := fmt.Sprintf("recall-f%d-%s", i, cell.Suffix)
+			hash := sha256.Sum256([]byte(id))
+			rows = append(rows, map[string]string{"id": id, "sha256": hex.EncodeToString(hash[:])})
+		}
+	}
+	return rows
+}
+
 func TestLoadRecallRegistration(t *testing.T) {
 	tr := validRecallTrace()
 	dec := func(r map[string]any) map[string]any { return r["decoding"].(map[string]any) }
@@ -68,6 +98,28 @@ func TestLoadRecallRegistration(t *testing.T) {
 		want   string // empty = valid
 	}{
 		{"valid", nil, ""},
+		{"valid confirmatory", func(r map[string]any) {
+			r["split"], r["traces"] = "confirmatory", recallTestInventory("confirmatory")
+		}, ""},
+		{"incomplete model roster", func(r map[string]any) {
+			r["models"] = recallRegModels[:3]
+			delete(dec(r), recallRegModels[3])
+		}, "Stage 0 models"},
+		{"substituted model", func(r map[string]any) {
+			ms := slices.Clone(recallRegModels)
+			ms[1] = "ollama/other"
+			dec(r)[ms[1]] = dec(r)[recallRegModels[1]]
+			delete(dec(r), recallRegModels[1])
+			r["models"] = ms
+		}, "missing Stage 0 model"},
+		{"unspecified endpoint for a different stack", func(r map[string]any) { setDec(r, "serving_stack", "local test server") }, "explicit loopback endpoint"},
+		{"conflicting legacy endpoint", func(r map[string]any) { r["endpoint"] = "http://127.0.0.1:43210" }, "disagrees with serving_stack"},
+		{"explicit endpoint", recallTestEndpoint("http://127.0.0.1:43210"), ""},
+		{"remote endpoint", func(r map[string]any) { r["endpoint"] = "https://example.org" }, "loopback"},
+		{"malformed hash", func(r map[string]any) { r["traces"].([]map[string]string)[0]["sha256"] = "abcd" }, "invalid sha256"},
+		{"missing cell", func(r map[string]any) { r["traces"] = r["traces"].([]map[string]string)[1:] }, "registered cells"},
+		{"missing family", func(r map[string]any) { r["traces"] = r["traces"].([]map[string]string)[:55] }, "11 pilot families"},
+		{"other-split cell", func(r map[string]any) { r["traces"].([]map[string]string)[0]["id"] = "recall-f1-A-2-s7" }, "pilot family/cell ID"},
 		{"rule text differs", func(r map[string]any) { r["rule_text"] = recallDecisionRuleText + " " }, "rule_text"},
 		{"scorer revision differs", func(r map[string]any) { r["scorer_revision"] = "recall-scorer/v0" }, "scorer_revision"},
 		{"primary differs", func(r map[string]any) { r["primary"] = "openai-compat/qwen3.8:27b" }, "primary"},
@@ -168,6 +220,10 @@ func TestRecallRegistrationBindCaptureFailsClosed(t *testing.T) {
 	confirm.Recall.Split = "confirmatory"
 	edited := validRecallTrace()
 	edited.System = "edited"
+	wrongFamily := validRecallTrace()
+	wrongFamily.Recall.FamilyID = "different"
+	wrongCell := validRecallTrace()
+	wrongCell.Recall.Arm = "0"
 	// A registered sha written with the sha256: prefix still binds, and a subset
 	// of the registered traces and models binds (as the injection bindCapture).
 	prefixed, _, err := loadRecallRegistration(recallRegistrationFile(t, []Trace{tr}, func(r map[string]any) {
@@ -188,6 +244,10 @@ func TestRecallRegistrationBindCaptureFailsClosed(t *testing.T) {
 		targets []ModelTarget
 		want    string
 	}{
+		"different family":   {[]Trace{wrongFamily}, []ModelTarget{target}, "disagrees with its family or cell"},
+		"different cell":     {[]Trace{wrongCell}, []ModelTarget{target}, "disagrees with its family or cell"},
+		"other transport":    {[]Trace{tr}, []ModelTarget{{Display: target.Display, Provider: "ollama", Model: target.Model}}, "disagrees with its transport"},
+		"other wire model":   {[]Trace{tr}, []ModelTarget{{Display: target.Display, Provider: target.Provider, Model: "wrong"}}, "disagrees with its transport"},
 		"unregistered trace": {[]Trace{other}, []ModelTarget{target}, "not registered"},
 		"edited trace":       {[]Trace{edited}, []ModelTarget{target}, "does not match"},
 		"plain trace":        {[]Trace{plain}, []ModelTarget{target}, "not a recall trace"},
@@ -368,7 +428,7 @@ func TestCalibrateCaptureRecallUsesRegisteredDecoding(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	tr := validRecallTrace()
-	reg, digest, err := loadRecallRegistration(recallRegistrationFile(t, []Trace{tr}, nil))
+	reg, digest, err := loadRecallRegistration(recallRegistrationFile(t, []Trace{tr}, recallTestEndpoint(srv.URL)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +449,7 @@ func TestCalibrateCaptureRecallUsesRegisteredDecoding(t *testing.T) {
 	err = runCalibrateCapture(context.Background(), calibrateCaptureOptions{
 		Runner: runner, Targets: []ModelTarget{target}, Traces: []Trace{tr}, OutputPath: out,
 		Clock: func() time.Time { return time.Unix(0, 0).UTC() }, OpenAICompatBaseURL: srv.URL,
-		RegistrationDigest: digest, InjectionTemperatures: temps, Stdout: io.Discard,
+		RecallEndpoint: reg.Endpoint, RegistrationDigest: digest, InjectionTemperatures: temps, Stdout: io.Discard,
 	})
 	if err != nil {
 		t.Fatal(err)

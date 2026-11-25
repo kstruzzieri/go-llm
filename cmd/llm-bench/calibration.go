@@ -241,6 +241,8 @@ type calibrateCaptureOptions struct {
 	// pre-registration file (#452); required for injection captures and
 	// recorded on the v3 manifest.
 	RegistrationDigest string
+	// RecallEndpoint is the endpoint pinned by the recall registration.
+	RecallEndpoint string
 	// InjectionTemperatures is the registered temperature per target Display
 	// selector (#452); required for injection captures. It is stamped on each
 	// artifact's provenance and, being common to the capture, on the manifest.
@@ -1123,6 +1125,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 				return fmt.Errorf("calibrate-capture: %s capture mixes registered temperatures; run one capture per temperature", frozenNoun(opts.Traces, "injection", "recall"))
 			}
 			captureTemp = temp
+		}
+	}
+	if anyRecallTrace(opts.Traces) {
+		var err error
+		ctx, err = bindRecallDestination(ctx, opts.RecallEndpoint, opts.OpenAICompatBaseURL, opts.Targets)
+		if err != nil {
+			return fmt.Errorf("calibrate-capture: %w", err)
 		}
 	}
 	var endpoint, transport string
