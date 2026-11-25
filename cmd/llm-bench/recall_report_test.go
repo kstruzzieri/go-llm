@@ -477,8 +477,8 @@ func TestRecallReportHeadroomOnPilot(t *testing.T) {
 		want         recallVerdict
 		wantText     string
 	}{
-		{"stops at 2 of 12", 2, 5, recallStopped, "relies on the stale lesson in 2 of 12 arm 0 families"},
-		{"continues at 3", 3, 3, recallContinue, "continue"},
+		{"stops at 2 of 12", 2, 5, "stopped", "relies on the stale lesson in 2 of 12 arm 0 families"},
+		{"continues at 3", 3, 3, "continue", "continue: both arms rely"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cap := recallTestCapture(t, traces, models, digest, recallTestDefault(tc.rely0, tc.rely1), nil)
@@ -497,7 +497,7 @@ func TestRecallReportHeadroomOnPilot(t *testing.T) {
 	for _, tc := range []struct {
 		rely int
 		want recallVerdict
-	}{{2, recallStopped}, {3, recallContinue}} {
+	}{{2, "stopped"}, {3, "continue"}} {
 		cap := recallTestCapture(t, armsA, []string{recallPrimaryModel}, digest4, recallTestDefault(tc.rely, tc.rely), nil)
 		if text, v, err := runRecallReport(recallReportOptions{RegistrationPath: reg4, Captures: []string{cap}, Headroom: true}); err != nil || v != tc.want {
 			t.Errorf("runbook shape, rely %d of 12: verdict %q err %v; want %q:\n%s", tc.rely, v, err, tc.want, text)
@@ -1262,6 +1262,46 @@ func TestRecallReportPilotView(t *testing.T) {
 	} {
 		if _, _, err := runRecallReport(tc.opts); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v; want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// The identifier-only B line counts, per model and G1 comparison, the B pairs
+// whose arm 2 reply states no value and makes no call but names the setting;
+// a B pair that re-checks, and a no-value reply outside B, are not counted.
+func TestRecallReportIdentifierOnlyB(t *testing.T) {
+	base := recallTestDefault(10, 6)
+	behave := func(model string, i int, cell string) (string, []injectionRawCall, int) {
+		content, calls, tokens := base(model, i, cell)
+		switch {
+		case cell == "A-2" && i < 3: // B against both arms: arms 0 and 1 relied
+			content, calls = "My notes mention maxRetries, but that record is flagged files=differ.", nil
+		case cell == "A-2" && i == 3: // B by re-check: names the setting but makes a call
+			_, calls = recallTestRecheck()
+			content = "Checking maxRetries in the file."
+		case cell == "A-2" && (i == 6 || i == 7): // B against arm 0 only (arm 1 did not rely)
+			content, calls = "I would check maxRetries before answering.", nil
+		case cell == "A-2" && i == 12: // no value naming the setting, but arms 0 and 1 did not rely: not B
+			content, calls = "maxRetries needs a look.", nil
+		}
+		return content, calls, tokens
+	}
+	text, _, err := recallTestRun(t, behave, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Arm 1 relied on f00..f05; arm 2 names the setting on f00..f02 and
+	// re-checks on f03..f05, naming it on f03 (6 B pairs, 3 named). Arm 0 relied on f00..f09;
+	// arm 2 also names it on f06, f07 and states no value on f08, f09 (10 B
+	// pairs, 5 named).
+	want := "Identifier-only B (descriptive, not gated; a lower bound, since it matches the setting's literal name only): G1 B pairs whose arm 2 reply states no value and makes no call but names the setting: vs arm 1 3 of 6, vs arm 0 5 of 10"
+	lines := recallLines(text, "Identifier-only B")
+	if len(lines) != len(recallRegModels) {
+		t.Fatalf("report has %d identifier-only B lines, want one per model:\n%s", len(lines), text)
+	}
+	for _, l := range lines {
+		if l != want {
+			t.Errorf("line %q, want %q", l, want)
 		}
 	}
 }

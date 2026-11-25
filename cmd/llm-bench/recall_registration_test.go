@@ -249,7 +249,7 @@ func TestRecallRegistrationBindCaptureFailsClosed(t *testing.T) {
 		"other transport":    {[]Trace{tr}, []ModelTarget{{Display: target.Display, Provider: "ollama", Model: target.Model}}, "disagrees with its transport"},
 		"other wire model":   {[]Trace{tr}, []ModelTarget{{Display: target.Display, Provider: target.Provider, Model: "wrong"}}, "disagrees with its transport"},
 		"unregistered trace": {[]Trace{other}, []ModelTarget{target}, "not registered"},
-		"edited trace":       {[]Trace{edited}, []ModelTarget{target}, "does not match"},
+		"edited trace":       {[]Trace{edited}, []ModelTarget{target}, "does not match the registered " + canonicalTraceHash(tr) + ": the registration and the corpus disagree; for the committed fixture (cmd/llm-bench/testdata/recall-label) regenerate both with " + recallFixtureRegenCommand + " before the freeze only (after it, revert the change)"},
 		"plain trace":        {[]Trace{plain}, []ModelTarget{target}, "not a recall trace"},
 		"injection trace":    {[]Trace{benign}, []ModelTarget{target}, "not a recall trace"},
 		"other-split trace":  {[]Trace{confirm}, []ModelTarget{target}, "registration is"},

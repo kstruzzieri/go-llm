@@ -20,6 +20,11 @@ import (
 // and capture binds to its digest.
 const recallRegistrationSchema = "recall-label-registration/v1"
 
+// recallFixtureRegenCommand regenerates the committed recall fixture's traces
+// and registrations (TestRecallRegistrationsLoad); errors that a stale
+// fixture can cause name it.
+const recallFixtureRegenCommand = "go test ./cmd/llm-bench -run TestRecallRegistrationsLoad -update-recall-registration"
+
 // recallRegistration is the loaded recall pre-registration. Unknown fields are rejected.
 // CasesSHA256 is recallCasesDigest of the cases file for Split (the line
 // "cases_sha256 ..." the corpus builder prints), stable when families of the other split are appended later.
@@ -226,7 +231,8 @@ func (r recallRegistration) bindCapture(traces []Trace, targets []ModelTarget) (
 			return nil, fmt.Errorf("recall registration: trace %q disagrees with its family or cell", t.ID)
 		}
 		if got := canonicalTraceHash(t); got != want {
-			return nil, fmt.Errorf("recall registration: trace %q hash %s does not match the registered %s", t.ID, got, want)
+			return nil, fmt.Errorf("recall registration: trace %q hash %s does not match the registered %s: the registration and the corpus disagree; for the committed fixture (cmd/llm-bench/testdata/recall-label) regenerate both with %s before the freeze only (after it, revert the change), otherwise rebuild the corpus with -build-recall-corpus and register it again",
+				t.ID, got, want, recallFixtureRegenCommand)
 		}
 	}
 	out := make(map[string]injectionDecoding, len(targets))

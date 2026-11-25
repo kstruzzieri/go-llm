@@ -396,11 +396,11 @@ func searchRecallRecordID(familyID, role string, maxTries int, accept func(id st
 
 // layout derives the seeded records of a family: IDs from recordID, contents,
 // and the order a search must return. The record at position p gets the date
-// 2026-03-(09-p), newest first. Every record matches the query, so bm25 ties
+// 2026-03-(28-p), newest first. Every record matches the query, so bm25 ties
 // among records of equal token and query-term counts and the dates
 // (updated_at DESC) decide the order; checkRecallInvariants enforces the
-// result equals Rank. Day numbers carry a leading zero, so they never read as
-// a canonical number.
+// result equals Rank. The days 26..28 lie outside the 2..20 a fixture value
+// takes, so a reply quoting a record's date never restates a value.
 func (f recallFamily) layout() (recs []recallSeedRecord, relID string, distIDs [2]string, order []string, err error) {
 	if relID, err = f.recordID("relevant"); err != nil {
 		return nil, "", distIDs, nil, err
@@ -412,7 +412,7 @@ func (f recallFamily) layout() (recs []recallSeedRecord, relID string, distIDs [
 	}
 	d := 0
 	for p := 0; p < 3; p++ {
-		r := recallSeedRecord{CreatedAt: time.Date(2026, 3, 9-p, 0, 0, 0, 0, time.UTC)}
+		r := recallSeedRecord{CreatedAt: time.Date(2026, 3, 28-p, 0, 0, 0, 0, time.UTC)}
 		if p == f.rank()-1 {
 			r.ID, r.Content = relID, f.Lesson
 		} else {

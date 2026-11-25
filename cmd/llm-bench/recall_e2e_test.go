@@ -177,12 +177,16 @@ func recallE2ERegistration(t *testing.T, traces []Trace, casesDigest, endpoint s
 	})
 }
 
-// recallE2ECapture captures traces for the four registered models against
-// srvURL through the capture glue main runs (prepareRecallCapture,
-// runCalibrateCapture) and returns the artifacts path and the artifacts.
-func recallE2ECapture(t *testing.T, srvURL, regPath string, traces []Trace) (string, []Artifact) {
+// recallE2ECapture captures traces for models (the four registered models
+// when none is given) against srvURL through the capture glue main runs
+// (prepareRecallCapture, runCalibrateCapture) and returns the artifacts path
+// and the artifacts.
+func recallE2ECapture(t *testing.T, srvURL, regPath string, traces []Trace, models ...string) (string, []Artifact) {
 	t.Helper()
-	targets, err := parseModelTargets(strings.Join(recallRegModels, ","))
+	if len(models) == 0 {
+		models = recallRegModels
+	}
+	targets, err := parseModelTargets(strings.Join(models, ","))
 	if err != nil {
 		t.Fatal(err)
 	}
