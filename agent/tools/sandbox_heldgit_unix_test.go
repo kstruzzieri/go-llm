@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -240,8 +241,9 @@ func TestNewGitMachinery(t *testing.T) {
 			want:   []held{{"link/.git", heldDotGitFile, nil}}},
 		// A baseline identity in another kind's slot is not a move.
 		{name: "baseline .git symlink renamed into an absent commondir", setup: link,
-			change: `mv link/.git nested/.git/commondir`,
-			want:   []held{{"nested/.git/commondir", heldGitMetadata, nil}}},
+			change:   `mv link/.git nested/.git/commondir`,
+			want:     []held{{"nested/.git/commondir", heldGitMetadata, nil}},
+			unlisted: []string{"nested/.git"}},
 		{name: "bare repository renamed to a .git",
 			setup: `mkdir -p bare.git/objects bare.git/refs bare.git/hooks && ` + validHEADBody + ` > bare.git/HEAD && ` +
 				`echo '[core]' > bare.git/config`,
@@ -527,7 +529,7 @@ func TestInspectSandboxWorkspaceAfterMatchesBefore(t *testing.T) {
 		}
 	}
 	// The layouts inside .git keep their stronger kinds; only .git/evil is a layout.
-	kinds := entryKinds(before)
+	kinds := entryKinds(context.Background(), before)
 	for rel, want := range map[string]heldKind{".git": heldDotGitDir, ".git/modules/m": kindGitDir,
 		".git/worktrees/wt": kindGitDir, ".git/evil": heldRepoLayout, "bare.git": heldRepoLayout} {
 		if got := kinds[filepath.Join(root, rel)]; got != want {
@@ -548,7 +550,7 @@ func TestInspectSandboxWorkspaceAfterMatchesBefore(t *testing.T) {
 	after := inspectSandboxWorkspaceAfter(root)
 	// Every recorded identity has a kind, so none falls to the zero kind.
 	for _, l := range []sandboxGitLayout{before, after} {
-		kinds := entryKinds(l)
+		kinds := entryKinds(context.Background(), l)
 		for p := range l.ids {
 			if _, ok := kinds[p]; !ok {
 				t.Errorf("ids[%s] has no kind", p)
@@ -682,7 +684,51 @@ func BenchmarkGitLayoutFinishDeep(b *testing.B) {
 			for b.Loop() {
 				l := sandboxGitLayout{root: after.root, collect: true, dotGitDirs: slices.Clone(after.dotGitDirs),
 					layoutHEADs: slices.Clone(after.layoutHEADs)}
-				l.finish()
+				l.finish(context.Background())
+			}
+		})
+	}
+}
+
+func TestGitLayoutCanonicalSharedPrefixes(t *testing.T) {
+	const root = "/workspace"
+	const repo = root + "/project/.GIT"
+	const hooks = repo + "/HOOKS"
+	const sibling = root + "/archive/.GIT/HOOKS"
+	repoKey := gitDirKey{entry: gitEntryID{Dev: 1, Ino: 1, Mode: fs.ModeDir}}
+	hooksKey := gitDirKey{parent: repoKey.entry, entry: gitEntryID{Dev: 1, Ino: 2, Mode: fs.ModeDir}}
+	l := sandboxGitLayout{
+		root:       root,
+		metadata:   []string{hooks + "/first", hooks + "/second", sibling + "/first"},
+		listedDirs: map[string]gitDirKey{repo: repoKey, hooks: hooksKey},
+		namedDirs:  map[gitDirKey]string{repoKey: ".git", hooksKey: "hooks"},
+	}
+	l.finish(context.Background())
+	want := []string{sibling + "/first", root + "/project/.git/hooks/first", root + "/project/.git/hooks/second"}
+	if !slices.Equal(l.metadata, want) {
+		t.Fatalf("resolved paths %q, want %q", l.metadata, want)
+	}
+}
+
+// BenchmarkGitLayoutFinishSharedLookupPrefix measures many entries below the
+// same differently spelled directory on filesystems that need named lookups.
+func BenchmarkGitLayoutFinishSharedLookupPrefix(b *testing.B) {
+	for _, depth := range []int{1, 64, 256} {
+		b.Run(fmt.Sprintf("depth=%d", depth), func(b *testing.B) {
+			const root = "/workspace"
+			const listed = root + "/.GIT"
+			_, after := syntheticMachinery(listed+strings.Repeat("/c", depth), 256)
+			key := gitDirKey{entry: gitEntryID{Dev: 1, Ino: 1, Mode: fs.ModeDir}}
+			for b.Loop() {
+				l := sandboxGitLayout{
+					root: root, collect: true, ids: after.ids,
+					dotGitDirs: slices.Clone(after.dotGitDirs), layoutHEADs: slices.Clone(after.layoutHEADs),
+					listedDirs: map[string]gitDirKey{listed: key}, namedDirs: map[gitDirKey]string{key: ".git"},
+				}
+				l.finish(context.Background())
+				if len(l.layoutHEADs) != 256 || !strings.HasPrefix(l.layoutHEADs[0], root+"/.git/") {
+					b.Fatal("shared directory alias was not applied")
+				}
 			}
 		})
 	}
@@ -698,7 +744,7 @@ func BenchmarkGitLayoutFinish(b *testing.B) {
 			for b.Loop() {
 				l := sandboxGitLayout{root: after.root, collect: true, dotGitDirs: slices.Clone(after.dotGitDirs),
 					layoutHEADs: slices.Clone(after.layoutHEADs)}
-				l.finish()
+				l.finish(context.Background())
 				if len(l.repoLayouts) != n {
 					b.Fatalf("repoLayouts %d, want %d", len(l.repoLayouts), n)
 				}
@@ -720,6 +766,9 @@ func TestLayoutMarkersRequireDirectories(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("GIT_OBJECT_DIRECTORY", "")
+			if err := os.Unsetenv("GIT_OBJECT_DIRECTORY"); err != nil {
+				t.Fatal(err)
+			}
 			root := canonGitTempDir(t)
 			runIn(t, root, validHEADBody+" > HEAD && "+c.setup)
 			l := inspectSandboxWorkspaceAfter(root)
@@ -775,7 +824,7 @@ func inspectSandboxWorkspaceAfter(root string) sandboxGitLayout {
 	if err == nil {
 		defer func() { _ = pin.Close() }()
 	}
-	return inspectSandboxWorkspaceAfterPinned(root, pin, testScreen())
+	return inspectSandboxWorkspaceAfterPinned(context.Background(), root, pin, testScreen())
 }
 
 // BenchmarkGitMachineryHardLinks measures unchanged names sharing one identity.
@@ -831,7 +880,7 @@ func TestFinalLayoutLookupErrors(t *testing.T) {
 	}{{"missing", false}, {"file/child", true}} {
 		p := filepath.Join(root, c.path)
 		l := sandboxGitLayout{root: root, afterWalk: true, collect: true, gitDirs: []string{p}}
-		l.finish()
+		l.finish(context.Background())
 		if _, ok := l.ids[p]; ok || (len(l.unlisted) > 0) != c.warned {
 			t.Errorf("lookup %q: ids %v, warnings %v", c.path, l.ids, l.unlisted)
 		}
@@ -864,7 +913,7 @@ func TestLookupKeysIgnoreListedHardLinks(t *testing.T) {
 		for _, e := range entries {
 			l.visit(filepath.Join(root, e.Name()), e.Type(), false)
 		}
-		l.finish()
+		l.finish(context.Background())
 		key := filepath.Join(root, ".git")
 		if len(l.dotGitLinks) != 1 || l.dotGitLinks[0] != key || len(l.ids) != 1 || l.ids[key] != entryIDOf(t, filepath.Join(root, ".GIT")) {
 			t.Fatalf("ordinary link present %v: names %v, identities %v", links, l.dotGitLinks, l.ids)
@@ -931,7 +980,7 @@ func TestNewGitMachineryUnlistableParent(t *testing.T) {
 
 // newGitMachinery returns the entries selected by the comparison.
 func newGitMachinery(before, after sandboxGitLayout) []heldItem {
-	return compareGitMachinery(before, after, nil)
+	return compareGitMachinery(context.Background(), before, after, nil)
 }
 
 // TestUnknownGitBaselineKeepsEntries checks failed observations and a known-new sibling.
@@ -994,8 +1043,8 @@ func TestListedGitDirectoryMatchesLookupIdentity(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			l.walkAfter(path)
-			l.finish()
+			l.walkAfter(context.Background(), path)
+			l.finish(context.Background())
 			if len(l.ids) != 1 || l.ids[lookup] != entryIDOf(t, path) ||
 				!slices.Equal(l.layoutHEADs, []string{filepath.Join(lookup, "HEAD")}) {
 				t.Fatalf("directory identities %v, layout HEADs %v", l.ids, l.layoutHEADs)

@@ -939,3 +939,54 @@ func TestBackgroundManagerTailStreamsAndEOF(t *testing.T) {
 		t.Errorf("stderr chunk = %+v, want oops with EOF", echunk)
 	}
 }
+
+// Publishing process completion must not wait for a terminal to accept its
+// recovery note. The backend may produce the note at the end of Wait.
+func TestBackgroundNoticeAfterJobCompletion(t *testing.T) {
+	proc := newFakeProc(42)
+	startedNotice, releaseDisplay := make(chan struct{}), make(chan struct{})
+	noticeDone := make(chan struct{})
+	spec := bgSpec("example")
+	spec.sandboxNotice = func(string) {
+		close(startedNotice)
+		<-releaseDisplay
+		close(noticeDone)
+	}
+	starter := &fakeStarter{fn: func(spec execSpec, _, _ io.Writer) (backgroundProcess, error) {
+		return &noticeTestProcess{backgroundProcess: proc, notify: spec.sandboxNotice}, nil
+	}}
+	manager := newBackgroundManager(starter, &countingRandom{})
+	defer manager.Shutdown()
+	defer close(releaseDisplay)
+	job, err := manager.start(context.Background(), spec, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc.release()
+	select {
+	case <-startedNotice:
+	case <-time.After(5 * time.Second):
+		t.Fatal("missing sandbox notice")
+	}
+	select {
+	case <-jobDoneChan(t, manager, job.Handle):
+	default:
+		t.Fatal("display blocked job completion")
+	}
+	select {
+	case <-noticeDone:
+		t.Fatal("display should still be blocked")
+	default:
+	}
+}
+
+type noticeTestProcess struct {
+	backgroundProcess
+	notify func(string)
+}
+
+func (p *noticeTestProcess) Wait() (int, bool, error) {
+	code, killed, err := p.backgroundProcess.Wait()
+	p.notify("held fixture metadata")
+	return code, killed, err
+}

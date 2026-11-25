@@ -1641,7 +1641,15 @@ func TestBwrapHeldNotesScreenPaths(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					notes = res.Notes
+					// The foreground result snapshots its screen after the hold.
+					wantScreen := "credential screen: 2 match(es) withheld from output (credential_path)"
+					if incomplete {
+						wantScreen = "credential screen: output withheld; credential files could not be read completely (incomplete read)"
+					}
+					if len(res.Notes) == 0 || res.Notes[0] != wantScreen {
+						t.Fatalf("final screen summary: %q, want %q", res.Notes, wantScreen)
+					}
+					notes = res.Notes[1:]
 				case "background":
 					p, err := b.Start(spec, io.Discard, io.Discard)
 					if err != nil {
@@ -1997,7 +2005,7 @@ func TestBwrapHeldNotesCapped(t *testing.T) {
 		plant          string // one more planted .git, at this path
 		warns          int    // WARNING lines kept
 		summary        string // with %[1]s for the run id; "" for none
-		want           []string
+		shownPath      string // bounded source displayed for a long path
 	}{
 		{name: "exactly the cap", plants: heldNotesMax},
 		{name: "one past the cap", plants: heldNotesMax + 1,
@@ -2007,9 +2015,9 @@ func TestBwrapHeldNotesCapped(t *testing.T) {
 		{name: "WARNINGs past the cap", locked: 55, plants: 5, warns: heldNotesMax - 1,
 			summary: "… and 11 more notes (5 reporting renames, 6 with warnings, run %[1]s); look for *.golem-held-%[1]s* to find renamed entries"},
 		{name: "a long path is cut", plant: long + "/.git",
-			want: []string{heldNote(long[:200]+"…[cut]", long[:200]+"…[cut]")}},
+			shownPath: long[:200] + "…[cut]"},
 		{name: "a path is cut at a rune boundary", plant: multi + "/.git",
-			want: []string{heldNote(multi[:199]+"…[cut]", multi[:199]+"…[cut]")}},
+			shownPath: multi[:199] + "…[cut]"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ws := wsTempDir(t)
@@ -2032,9 +2040,19 @@ func TestBwrapHeldNotesCapped(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if c.want != nil {
-				if !slices.Equal(res.Notes, c.want) {
-					t.Fatalf("notes:\n got %q\nwant %q", res.Notes, c.want)
+			if c.shownPath != "" {
+				entries, err := os.ReadDir(filepath.Join(ws, filepath.Dir(c.plant)))
+				if err != nil || len(entries) != 1 {
+					t.Fatalf("expected one held entry on disk, got %v, err %v", entries, err)
+				}
+				held := entries[0].Name()
+				if !regexp.MustCompile(`^\.git\.golem-held-[0-9a-f]{8}$`).MatchString(held) {
+					t.Fatalf("unexpected held name %q", held)
+				}
+				suffix := strings.TrimPrefix(held, ".git")
+				want := "held back new git metadata at " + c.shownPath + " (its name now ends in " + suffix + "; rename it back to restore)"
+				if !slices.Equal(res.Notes, []string{want}) {
+					t.Fatalf("notes:\n got %q\nwant %q", res.Notes, want)
 				}
 				return
 			}
@@ -2366,5 +2384,144 @@ func TestHeldNotesCountWarningRenames(t *testing.T) {
 	want := "… and 2 more notes (1 reporting renames, 2 with warnings, run r); look for *.golem-held-r* to find renamed entries"
 	if got := lines[len(lines)-1]; got != want {
 		t.Errorf("summary %q, want %q", got, want)
+	}
+}
+
+// A verifier queued behind another check must report its own deadline as an
+// outcome without starting the command or aborting the parent agent turn.
+func TestBwrapVerifierDeadlineDuringPreparation(t *testing.T) {
+	ws := verifyWorkspace(t)
+	runner := &captureRunner{}
+	cfg := mustNormalizeSandbox(t, SandboxConfig{Runtime: SandboxRuntimeBwrap})
+	b := testBwrapBackend(runner, &captureStarter{}, cfg, 0)
+	if err := b.lockHeld(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer b.unlockHeld()
+	v, err := newVerifyCommandWithBackend(ws, bindExecBackend(b, cfg), []string{"/bin/sh"}, "", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := v.Run(context.Background())
+	if err != nil || !res.TimedOut || runner.called != 0 {
+		t.Fatalf("timed out %v, error %v, spawns %d", res.TimedOut, err, runner.called)
+	}
+}
+
+// The independent budget can expire behind another job without leaking the
+// workspace pin or comparing an incomplete snapshot. A canceled hold that
+// has already granted owner access must put the original mode back.
+func TestBwrapCleanupBudget(t *testing.T) {
+	ws := wsTempDir(t)
+	b := testBwrapBackend(&captureRunner{}, &captureStarter{}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	_, before, err := b.prepare(bwrapTestSpec(t, ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePin(before)
+	t.Run("waiting for lock", func(t *testing.T) {
+		if err := b.lockHeld(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer b.unlockHeld()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+		defer cancel()
+		if got := b.holdNewGitContext(ctx, before, testScreen()); !slices.Equal(got, []string{incompleteGitCheck}) {
+			t.Fatalf("incomplete warning: %q", got)
+		}
+	})
+	t.Run("restores permission and stops before renaming", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("requires ordinary owner permissions")
+		}
+		dir := filepath.Join(ws, "ordinary")
+		meta := filepath.Join(dir, ".git")
+		if err := os.MkdirAll(meta, 0755); err != nil {
+			t.Fatal(err)
+		}
+		restoreModes(t, ws)
+		if err := os.Chmod(dir, 0555); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		// End the cleanup budget immediately after its temporary grant. The
+		// second attempt must stop and its deferred restoration must still run.
+		chmod := ownerAccessChmod
+		t.Cleanup(func() { ownerAccessChmod = chmod })
+		ownerAccessChmod = func(path string, mode uint32) error {
+			err := chmod(path, mode)
+			if err == nil && mode&0200 != 0 {
+				cancel()
+			}
+			return err
+		}
+		if got := b.holdNewGitContext(ctx, before, testScreen()); !slices.Equal(got, []string{incompleteGitCheck}) {
+			t.Fatalf("incomplete warning: %q", got)
+		}
+		fi, err := os.Stat(dir)
+		if err != nil || fi.Mode().Perm() != 0555 {
+			t.Fatalf("restored directory: %v, error %v", fi, err)
+		}
+		if _, err := os.Stat(meta); err != nil {
+			t.Fatalf("canceled rename: %v", err)
+		}
+	})
+}
+
+// A temporary grant to a candidate's parent lets the check set aside a new
+// repository. That grant alone must never justify moving a pre-run HEAD.
+func TestBwrapLockedParentKeepsPreexistingHEAD(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary owner permissions")
+	}
+	ws := wsTempDir(t)
+	parent := filepath.Join(ws, "parent")
+	fixture := filepath.Join(parent, "fixture")
+	newRepo := filepath.Join(parent, "new")
+	if err := os.MkdirAll(fixture, 0755); err != nil {
+		t.Fatal(err)
+	}
+	head := []byte("ref: refs/heads/main\n")
+	if err := os.WriteFile(filepath.Join(fixture, "HEAD"), head, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restoreModes(t, ws)
+	b := testBwrapBackend(&captureRunner{}, &captureStarter{}, SandboxConfig{Runtime: SandboxRuntimeBwrap}, 0)
+	_, before, err := b.prepare(bwrapTestSpec(t, ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closePin(before)
+	for _, dir := range []string{fixture, newRepo} {
+		for _, marker := range []string{"objects", "refs"} {
+			if err := os.MkdirAll(filepath.Join(dir, marker), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.WriteFile(filepath.Join(newRepo, "HEAD"), head, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0); err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(b.holdNewGit(before, testScreen()), "\n")
+	if !strings.Contains(notes, "WARNING: could not compare parent/fixture/HEAD") ||
+		!strings.Contains(notes, "held back new git metadata: parent/new/HEAD") {
+		t.Fatalf("notes: %s", notes)
+	}
+	fi, err := os.Stat(parent)
+	if err != nil || fi.Mode().Perm() != 0 {
+		t.Fatalf("parent mode was not restored: %v, %v", fi, err)
+	}
+	if err := os.Chmod(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(fixture, "HEAD")); err != nil || string(got) != string(head) {
+		t.Fatalf("original HEAD changed: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(newRepo, "HEAD")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new HEAD still present: %v", err)
 	}
 }

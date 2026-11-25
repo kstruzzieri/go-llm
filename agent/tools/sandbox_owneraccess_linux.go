@@ -271,12 +271,14 @@ func (e notOwnedErr) Unwrap() []error { return []error{e.err, errAccessNotOwned}
 // procFd is the /proc path that reaches the file open at fd.
 func procFd(fd int) string { return "/proc/self/fd/" + strconv.Itoa(fd) }
 
-// originalMode returns the permission bits from before the first temporary grant.
-func (a *ownerAccess) originalMode(st *unix.Stat_t) uint32 {
-	if a != nil {
-		if mode, ok := a.counted[[2]uint64{uint64(st.Dev), uint64(st.Ino)}]; ok {
-			return mode
-		}
+// hasTemporaryGrants reports whether this inspection changed any mode.
+func (a *ownerAccess) hasTemporaryGrants() bool { return a != nil && len(a.grants) != 0 }
+
+// originalOwnerMode reports a directory's mode before we temporarily changed it.
+func (a *ownerAccess) originalOwnerMode(st *unix.Stat_t) (uint32, bool) {
+	if a == nil || uint32(os.Getuid()) != st.Uid {
+		return 0, false
 	}
-	return st.Mode
+	mode, ok := a.counted[[2]uint64{uint64(st.Dev), uint64(st.Ino)}]
+	return mode, ok
 }

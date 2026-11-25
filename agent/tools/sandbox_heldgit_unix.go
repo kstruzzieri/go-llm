@@ -7,6 +7,7 @@ package tools
 // and after it (inspectSandboxWorkspaceAfter). It reads only the two layouts.
 
 import (
+	"context"
 	"maps"
 	"path/filepath"
 	"slices"
@@ -72,18 +73,27 @@ type heldItem struct {
 // HEAD, so its new items are held on their own, before the item above. Its
 // walks cost the entries times their depth (pathTree). An unknown baseline
 // excludes the affected entry and reports its path and reason to unchecked.
-func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, string)) []heldItem {
+func compareGitMachinery(ctx context.Context, before, after sandboxGitLayout, unchecked func(string, string)) []heldItem {
+	if ctx.Err() != nil {
+		return nil
+	}
 	if before.baseline != nil {
 		before = *before.baseline
 	}
-	beforeKinds, afterKinds := entryKinds(before), entryKinds(after)
+	beforeKinds, afterKinds := entryKinds(ctx, before), entryKinds(ctx, after)
 	var tree pathTree
 	for p := range afterKinds {
+		if ctx.Err() != nil {
+			return nil
+		}
 		tree.node(p)
 	}
 	unknown := maps.Clone(before.unknown)
 	heads := make([]int, len(after.layoutHEADs))
 	for i, h := range after.layoutHEADs {
+		if ctx.Err() != nil {
+			return nil
+		}
 		dir := filepath.Dir(h)
 		heads[i] = tree.node(dir)
 		if why := before.unknown[h]; why != "" {
@@ -147,6 +157,9 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	allow := make(map[idKind]int)
 	known := make(map[gitEntryID]bool, len(before.ids))
 	for p, id := range before.ids {
+		if ctx.Err() != nil {
+			return nil
+		}
 		known[id] = true
 		if now, ok := after.ids[p]; !ok || now != id || beforeKinds[p] != afterKinds[p] {
 			allow[idKind{id, beforeKinds[p]}]++
@@ -154,11 +167,17 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	}
 	paths := make([]string, 0, len(after.ids))
 	for p := range after.ids {
+		if ctx.Err() != nil {
+			return nil
+		}
 		paths = append(paths, p)
 	}
 	slices.Sort(paths) // allowances go to names in path order
 	fresh := make(map[string]bool, len(paths))
 	for _, p := range paths {
+		if ctx.Err() != nil {
+			return nil
+		}
 		id, k := after.ids[p], afterKinds[p]
 		if reportUnknown(p) {
 			continue
@@ -181,6 +200,9 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	// entry (not new), wherever it is now.
 	repos := make([]string, 0, len(after.dotGitDirs)+len(after.gitDirs))
 	for _, d := range slices.Concat(after.dotGitDirs, after.gitDirs) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if _, ok := after.ids[d]; ok && !fresh[d] {
 			repos = append(repos, d)
 		}
@@ -188,6 +210,9 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 
 	cands := make([]string, 0, len(afterKinds))
 	for p, k := range afterKinds {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if k != kindGitDir {
 			cands = append(cands, p)
 		}
@@ -201,6 +226,9 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	isHeld := make([]bool, len(tree.parent))
 	hides := make([]bool, len(tree.parent)) // the held nodes renamed whole
 	for _, p := range cands {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if _, ok := after.ids[p]; !ok || !isNew(p) {
 			continue
 		}
@@ -224,9 +252,15 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	// Each new layout's HEAD goes to the nearest held item at or above it.
 	preexisting := make(map[gitEntryID]bool, len(before.headIDs))
 	for _, id := range before.headIDs {
+		if ctx.Err() != nil {
+			return nil
+		}
 		preexisting[id] = true
 	}
 	for n, h := range after.layoutHEADs {
+		if ctx.Err() != nil {
+			return nil
+		}
 		dir := tree.path[heads[n]]
 		if _, recorded := after.ids[dir]; recorded && !isNew(dir) {
 			continue // a baseline repository, in place or moved in: the user's
@@ -234,6 +268,14 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 		if i := tree.up(heads[n], isHeld); i >= 0 && !reportUnknown(h) {
 			it := &held[heldAt[i]]
 			id := after.headIDs[h]
+			if preexisting[id] {
+				if _, granted := slices.BinarySearch(after.grantReachedHEADs, h); granted {
+					if unchecked != nil {
+						unchecked(h, "its parent was only reachable with temporary search permission")
+					}
+					continue
+				}
+			}
 			it.InnerHEADs = append(it.InnerHEADs, heldHEAD{Path: h, ID: id, Preexisting: preexisting[id]})
 		}
 	}
@@ -241,11 +283,17 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 	// at its path before that one is renamed.
 	inside := make(map[int][]int)
 	for j, a := range under {
+		if ctx.Err() != nil {
+			return nil
+		}
 		inside[a] = append(inside[a], j)
 	}
 	out := make([]heldItem, 0, len(held))
 	var emit func(j int)
 	emit = func(j int) {
+		if ctx.Err() != nil {
+			return
+		}
 		kids := inside[j]
 		slices.Sort(kids)
 		for _, k := range kids {
@@ -254,6 +302,9 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 		out = append(out, held[j])
 	}
 	for j := range held {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if _, ok := under[j]; !ok {
 			emit(j)
 		}
@@ -267,7 +318,7 @@ func compareGitMachinery(before, after sandboxGitLayout, unchecked func(string, 
 // container, a git dir, a layout. So a new hooks directory or container that
 // is also shaped like a repository is still renamed whole, and a git dir in a
 // container (most are layouts) stays its container's to hold.
-func entryKinds(l sandboxGitLayout) map[string]heldKind {
+func entryKinds(ctx context.Context, l sandboxGitLayout) map[string]heldKind {
 	kinds := make(map[string]heldKind, len(l.ids))
 	for _, g := range []struct {
 		kind  heldKind
@@ -279,6 +330,9 @@ func entryKinds(l sandboxGitLayout) map[string]heldKind {
 		{heldRepoLayout, l.repoLayouts}, {heldRepoLayout, l.innerLayouts},
 	} {
 		for _, p := range g.paths {
+			if ctx.Err() != nil {
+				return nil
+			}
 			if _, taken := kinds[p]; !taken {
 				kinds[p] = g.kind
 			}

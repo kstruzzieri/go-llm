@@ -4,6 +4,7 @@ package tools
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -956,7 +957,7 @@ func TestHoldGitMachineryMergesTwins(t *testing.T) {
 			[]heldItem{item("bare.git", hooks, heldRepoLayout, "bare.git/HEAD"), item("src/.git", inner, heldDotGitDir)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := mergeHeldDirs(c.in); !reflect.DeepEqual(got, c.want) {
+			if got := mergeHeldDirs(context.Background(), c.in); !reflect.DeepEqual(got, c.want) {
 				t.Errorf("got  %+v\nwant %+v", got, c.want)
 			}
 		})
@@ -987,14 +988,15 @@ func TestLookupDirectoryKeys(t *testing.T) {
 		if !maps.Equal(layout.headIDs, map[string]gitEntryID{filepath.Join(root, ".git/HEAD"): entryIDOf(t, filepath.Join(root, ".GIT/head"))}) {
 			t.Errorf("HEAD keys %v", layout.headIDs)
 		}
-		if len(entryKinds(layout)) != len(want) {
-			t.Errorf("unexpected git names %v", entryKinds(layout))
+		if len(entryKinds(context.Background(), layout)) != len(want) {
+			t.Errorf("unexpected git names %v", entryKinds(context.Background(), layout))
 		}
 	}
 }
 
 // TestCasefoldFlagsPerDirectory distinguishes siblings sharing the same filesystem.
 func TestCasefoldFlagsPerDirectory(t *testing.T) {
+	// containment: GITMETA-POSTRUN-HOLD
 	for _, typ := range []int64{unix.EXT4_SUPER_MAGIC, unix.F2FS_SUPER_MAGIC, unix.TMPFS_MAGIC} {
 		f := &fakeFS{typ: typ}
 		original := openDirProbe
@@ -1038,7 +1040,7 @@ func TestLayoutUsesOriginalSearchMode(t *testing.T) {
 	old := gitLookupPath
 	gitLookupPath = casefoldLookup
 	t.Cleanup(func() { gitLookupPath = old })
-	l := sandboxGitLayout{access: acc, lookupDirs: map[string]bool{root: true}}
+	l := sandboxGitLayout{root: root, access: acc, lookupDirs: map[string]bool{root: true}}
 	l.noteLayout(root)
 	if len(l.layoutHEADs) != 0 {
 		t.Fatal("temporary search grant activated the layout")
@@ -1127,7 +1129,7 @@ func TestHoldWarningsAndContinuation(t *testing.T) {
 				want = append(want, heldNote("item/later", "item/later.golem-held-r"), heldNote("item", "item.golem-held-r"))
 			}
 			var got []string
-			reportGitHolds(layout, []heldItem{it}, "r", func(line string, _ bool) { got = append(got, line) })
+			reportGitHolds(context.Background(), layout, []heldItem{it}, "r", func(line string, _ bool) { got = append(got, line) })
 			if !slices.Equal(got, want) {
 				t.Fatalf("got %q, want %q", got, want)
 			}
@@ -1227,7 +1229,7 @@ func holdGitMachinery(after sandboxGitLayout, items []heldItem, runID string) (n
 			after.pin = pin
 		}
 	}
-	reportGitHolds(after, items, runID, func(line string, _ bool) { notes = append(notes, line) })
+	reportGitHolds(context.Background(), after, items, runID, func(line string, _ bool) { notes = append(notes, line) })
 	return notes
 }
 
@@ -1331,5 +1333,45 @@ func TestOwnerAccessForeignSetgid(t *testing.T) {
 	err = acc.retry(acc.root, ".", 0300, func() error { return unix.EACCES })
 	if !errors.Is(err, errAccessSpecial) {
 		t.Fatalf("grant error %v", err)
+	}
+}
+
+func TestHeldRenameRecoverySuffix(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		parent string
+		hidden bool
+	}{
+		{"shortened parent", strings.Repeat("d", noteNameMax+5), false},
+		{"withheld parent", ".ssh", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := canonGitTempDir(t)
+			parent := filepath.Join(root, tc.parent)
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			entry := filepath.Join(parent, ".git")
+			for _, path := range []string{entry, entry + ".golem-held-r1"} {
+				if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			items := []heldItem{{Path: entry, ID: entryIDOf(t, entry), Kind: heldDotGitFile}}
+			got := holdGitMachinery(sandboxGitLayout{root: root, screen: testScreen()}, items, "r1")
+			source := noteName(filepath.Join(tc.parent, ".git"))
+			prefix := "held back new git metadata at " + source
+			if tc.hidden {
+				prefix = "WARNING: held back new git metadata at " + withheldPath
+			}
+			const suffix = ".golem-held-r1-2"
+			want := prefix + " (its name now ends in " + suffix + "; rename it back to restore)"
+			if !slices.Equal(got, []string{want}) {
+				t.Errorf("rename note %q, want %q", got, want)
+			}
+			if id := entryIDOf(t, entry+suffix); id != items[0].ID {
+				t.Error("the reported suffix does not locate the original entry")
+			}
+		})
 	}
 }

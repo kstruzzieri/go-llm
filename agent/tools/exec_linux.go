@@ -217,6 +217,9 @@ type bwrapBackend struct {
 // lockHeld takes the post-run check's lock, or returns ctx's error if ctx
 // ends first.
 func (b *bwrapBackend) lockHeld(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.heldOnce.Do(func() { b.held = make(chan struct{}, 1) })
 	select {
 	case b.held <- struct{}{}:
@@ -275,7 +278,7 @@ func newBwrapExecBackendAt(bwrapPath, prlimitPath string, probe bwrapProbeFunc, 
 		prlimitPath: prlimitPath,
 		cfg:         cfg,
 		capBytes:    capBytes,
-		runner:      unixRunner{},
+		runner:      unixRunner{deferScreenNotes: true},
 		starter:     unixStarter{},
 		collect:     defaultBwrapCollect,
 	}, nil
@@ -458,7 +461,7 @@ func (b *bwrapBackend) prepareContext(ctx context.Context, spec execSpec) (execS
 	if err := b.lockHeld(ctx); err != nil {
 		return fail(err)
 	}
-	layout, err := inspectSandboxWorkspaceNamed(ctx, pinnedRoot, filepath.Base(spec.WorkspaceRoot), filepath.WalkDir)
+	layout, err := inspectSandboxWorkspaceNamed(ctx, pinnedRoot, spec.WorkspaceRoot, filepath.WalkDir)
 	b.unlockHeld()
 	if err != nil {
 		return fail(err)
@@ -557,11 +560,15 @@ func closePin(l sandboxGitLayout) {
 func (b *bwrapBackend) Run(ctx context.Context, spec execSpec) (execResult, error) {
 	wrapped, before, err := b.prepareContext(ctx, spec)
 	if err != nil {
-		return execResult{}, err
+		return execResult{TimedOut: errors.Is(err, context.DeadlineExceeded)}, err
 	}
 	defer closePin(before)
 	res, err := b.runner.Run(ctx, wrapped)
-	res.Notes = append(res.Notes, b.holdNewGit(before, spec.Screen)...)
+	held := spec.reportSandboxNotes(b.holdNewGit(before, spec.Screen))
+	if spec.Screen != nil {
+		res.Notes = append(res.Notes, spec.Screen.notes()...)
+	}
+	res.Notes = append(res.Notes, held...)
 	return res, err
 }
 
@@ -592,11 +599,11 @@ func (b *bwrapBackend) StartContext(ctx context.Context, spec execSpec, stdout, 
 	proc, err := b.starter.Start(wrapped, stdout, stderr)
 	if err != nil {
 		defer closePin(before)
-		return nil, withCleanupNote(err, strings.Join(b.holdNewGit(before, spec.Screen), "\n"))
+		return nil, withCleanupNote(err, strings.Join(spec.reportSandboxNotes(b.holdNewGit(before, spec.Screen)), "\n"))
 	}
 	return &heldGitProcess{backgroundProcess: proc, check: func() []string {
 		defer closePin(before)
-		return b.holdNewGit(before, spec.Screen)
+		return spec.reportSandboxNotes(b.holdNewGit(before, spec.Screen))
 	}}, nil
 }
 
@@ -610,13 +617,26 @@ func (b *bwrapBackend) StartContext(ctx context.Context, spec execSpec, stdout, 
 // Every path a note shows passes through screen, the command's credential
 // screen, first (screenedName): one it flags, or cannot screen, is withheld.
 func (b *bwrapBackend) holdNewGit(before sandboxGitLayout, screen *outputScreen) []string {
-	_ = b.lockHeld(context.Background()) // never fails: the background context never ends
+	// Cleanup still runs when the command itself was canceled. The separate
+	// budget includes waiting behind checks and examining the new workspace.
+	ctx, cancel := context.WithTimeout(context.Background(), heldCleanupTimeout)
+	defer cancel()
+	return b.holdNewGitContext(ctx, before, screen)
+}
+
+const heldCleanupTimeout = 30 * time.Second
+const incompleteGitCheck = "WARNING: the post-run git check was incomplete (time budget ended); check the workspace before using git"
+
+func (b *bwrapBackend) holdNewGitContext(ctx context.Context, before sandboxGitLayout, screen *outputScreen) []string {
+	if err := b.lockHeld(ctx); err != nil {
+		return []string{incompleteGitCheck}
+	}
 	defer b.unlockHeld()
 	if w := workspaceRebound(before, screen); w != "" {
 		return []string{w}
 	}
 	runID := newHeldRunID()
-	after := inspectSandboxWorkspaceAfterPinned(before.baseline.root, before.pin, screen)
+	after := inspectSandboxWorkspaceAfterPinned(ctx, before.baseline.root, before.pin, screen)
 	if w := workspaceRebound(before, screen); w != "" {
 		var notes heldNotes
 		notes.add(w, false)
@@ -627,7 +647,7 @@ func (b *bwrapBackend) holdNewGit(before sandboxGitLayout, screen *outputScreen)
 	}
 	after.pin = before.pin
 	var notes heldNotes
-	items := compareGitMachinery(before, after, func(p, why string) {
+	items := compareGitMachinery(ctx, before, after, func(p, why string) {
 		rel, _ := filepath.Rel(after.root, p)
 		name, ok := screenedName(screen, rel)
 		if !ok {
@@ -637,7 +657,10 @@ func (b *bwrapBackend) holdNewGit(before sandboxGitLayout, screen *outputScreen)
 		notes.add("WARNING: could not compare "+name+" with its state before the run ("+why+
 			"); do not run git there until you have checked it", false)
 	})
-	reportGitHolds(after, items, runID, notes.add)
+	reportGitHolds(ctx, after, items, runID, notes.add)
+	if ctx.Err() != nil {
+		notes.first = incompleteGitCheck
+	}
 	return notes.lines(runID)
 }
 
@@ -647,42 +670,65 @@ const heldNotesMax = 50
 
 // heldNotes retains a bounded sample for each priority and counts every detail.
 type heldNotes struct {
-	warnings, details     []string
-	total, warningCount   int
-	omittedWarningRenames int
+	first                            string // workspace-wide warning, shown even if the detail samples are full
+	warnings, details                []heldNoteSample
+	total, warningCount, renameCount int
+}
+
+type heldNoteSample struct {
+	line    string
+	renamed bool
 }
 
 // add counts the note even when its priority already has a full sample.
 func (n *heldNotes) add(line string, renamed bool) {
 	n.total++
+	if renamed {
+		n.renameCount++
+	}
 	sample := &n.details
 	if strings.HasPrefix(line, "WARNING:") {
 		n.warningCount++
-		if renamed && n.warningCount >= heldNotesMax {
-			n.omittedWarningRenames++
-		}
 		sample = &n.warnings
 	}
 	if len(*sample) < heldNotesMax {
-		*sample = append(*sample, line)
+		*sample = append(*sample, heldNoteSample{line: line, renamed: renamed})
 	}
 }
 
 // lines reserves the final line for counts on overflow.
 func (n *heldNotes) lines(runID string) []string {
-	out := append(n.warnings, n.details...)
-	if n.total <= heldNotesMax {
+	total, warnings := n.total, n.warningCount
+	var out []string
+	if n.first != "" {
+		out = append(out, n.first)
+		total++
+		warnings++
+	}
+	keep := heldNotesMax
+	if total > keep {
+		keep--
+	}
+	renames := n.renameCount
+	for _, sample := range [][]heldNoteSample{n.warnings, n.details} {
+		for _, note := range sample {
+			if len(out) == keep {
+				break
+			}
+			out = append(out, note.line)
+			if note.renamed {
+				renames--
+			}
+		}
+	}
+	if total <= keep {
 		return out
 	}
-	const keep = heldNotesMax - 1
-	omitted := n.total - keep
-	warnings := max(0, n.warningCount-keep)
-	renames := omitted - warnings + n.omittedWarningRenames
-	summary := fmt.Sprintf("… and %d more notes (%d reporting renames, %d with warnings, run %s)", omitted, renames, warnings, runID)
+	summary := fmt.Sprintf("… and %d more notes (%d reporting renames, %d with warnings, run %s)", total-keep, renames, max(0, warnings-keep), runID)
 	if renames > 0 {
 		summary += "; look for *.golem-held-" + runID + "* to find renamed entries"
 	}
-	return append(out[:keep], summary)
+	return append(out, summary)
 }
 
 // newHeldRunID is a fresh run id for held names: eight random hex digits.

@@ -30,5 +30,8 @@ func (*ownerAccess) restore() []string { return nil }
 // close has nothing to release.
 func (*ownerAccess) close() {}
 
-// originalMode returns the unmodified mode on Darwin.
-func (*ownerAccess) originalMode(st *unix.Stat_t) uint32 { return uint32(st.Mode) }
+// hasTemporaryGrants reports no temporary permission grants on Darwin.
+func (*ownerAccess) hasTemporaryGrants() bool { return false }
+
+// originalOwnerMode reports no temporary permission grants on Darwin.
+func (*ownerAccess) originalOwnerMode(*unix.Stat_t) (uint32, bool) { return 0, false }

@@ -11,6 +11,7 @@ package tools
 // deleted or replaced; each rename is one note, and each failure one warning.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -67,12 +68,24 @@ var errHeldChanged = errors.New("a different entry is there now")
 // per directory the after-walk could not check, and the after-walk's own
 // warnings. Paths in notes are relative to the root, quoted when a name could
 // break or forge a line (noteName).
-func reportGitHolds(after sandboxGitLayout, items []heldItem, runID string, note func(string, bool)) {
+func reportGitHolds(ctx context.Context, after sandboxGitLayout, items []heldItem, runID string, note func(string, bool)) {
+	// Restoration warnings survive an interrupted scan or hold.
+	defer func() {
+		for _, w := range after.warnings {
+			note(w, false)
+		}
+	}()
+	if ctx.Err() != nil {
+		return
+	}
 	acc := newOwnerAccess(after.pin)
 	defer acc.close()
 	acc.screen = after.screen
-	h := &holder{acc: acc, rootPath: after.root, runID: runID, screen: after.screen, note: note}
-	for _, it := range mergeHeldDirs(items) {
+	h := &holder{ctx: ctx, acc: acc, rootPath: after.root, runID: runID, screen: after.screen, note: note}
+	for _, it := range mergeHeldDirs(ctx, items) {
+		if ctx.Err() != nil {
+			return
+		}
 		r, in := h.rel(it.Path)
 		var err error
 		switch {
@@ -83,11 +96,14 @@ func reportGitHolds(after sandboxGitLayout, items []heldItem, runID string, note
 		default:
 			err = h.holdRestoring(it, r)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, ctx.Err()) {
 			h.warn(r, err)
 		}
 	}
 	for _, u := range after.unlisted {
+		if ctx.Err() != nil {
+			return
+		}
 		r, _ := h.rel(u)
 		why := after.unlistedWhy[u]
 		if why == "" {
@@ -101,13 +117,11 @@ func reportGitHolds(after sandboxGitLayout, items []heldItem, runID string, note
 		h.note("WARNING: could not check "+name+" for new git metadata ("+why+
 			"); do not run git in it or below it until you have checked it", false)
 	}
-	for _, w := range after.warnings {
-		note(w, false)
-	}
 }
 
 // holder carries the pinned root, run ID and screened note sink for one check.
 type holder struct {
+	ctx      context.Context
 	acc      *ownerAccess
 	rootPath string
 	runID    string
@@ -201,6 +215,9 @@ func (h *holder) hold(it heldItem, r string) error {
 		}
 	}
 	for _, observed := range it.InnerHEADs {
+		if err := h.ctx.Err(); err != nil {
+			return err
+		}
 		hd := observed.Path
 		hr, err := filepath.Rel(it.Path, hd)
 		if err != nil || hr == ".." || strings.HasPrefix(hr, "../") {
@@ -213,6 +230,9 @@ func (h *holder) hold(it heldItem, r string) error {
 			continue
 		}
 		if err := h.holdHEAD(dir, r, hr, observed); err != nil {
+			if h.ctx.Err() != nil {
+				return err
+			}
 			h.warn(path.Join(r, hr), err)
 		}
 	}
@@ -257,13 +277,16 @@ func (h *holder) renameNoting(dir int, dirRel, name string, pre bool, check func
 	var to string
 	err := h.acc.retry(dir, dirRel, 0o300, func() (err error) {
 		to, err = renameAside(dir, name, h.runID, func() error {
+			if err := h.ctx.Err(); err != nil {
+				return err
+			}
 			if err := is(name); err != nil {
 				return err
 			}
 			if heldGitBeforeRename != nil {
 				heldGitBeforeRename(r)
 			}
-			return nil
+			return h.ctx.Err()
 		})
 		return err
 	})
@@ -276,12 +299,20 @@ func (h *holder) renameNoting(dir int, dirRel, name string, pre bool, check func
 	from, fromOK := screenedName(h.screen, r)
 	held, heldOK := screenedName(h.screen, path.Join(dirRel, to))
 	switch {
-	case !fromOK || !heldOK:
+	case !fromOK || !heldOK || strings.HasSuffix(held, noteNameCut):
+		// A clipped destination can hide the entire basename. The generated
+		// suffix identifies this rename even when its path is withheld.
+		location := from
 		what := "held back new git metadata"
-		if pre {
-			what = "moved a HEAD that was there before the run"
+		if !fromOK || !heldOK {
+			location = withheldPath
+			what = "WARNING: " + what
 		}
-		h.note("WARNING: "+what+" at "+withheldPath+" (its name now ends in .golem-held-"+h.runID+
+		if pre {
+			what = "WARNING: moved a HEAD that was there before the run"
+		}
+		suffix := strings.TrimPrefix(to, name) // renameAside appends this, including any collision number
+		h.note(what+" at "+location+" (its name now ends in "+suffix+
 			"; rename it back to restore)", true)
 	case pre:
 		h.note("WARNING: moved a HEAD that was there before the run: "+from+" → "+held+
@@ -306,11 +337,14 @@ func (h *holder) renameNoting(dir int, dirRel, name string, pre bool, check func
 // before it is renamed whole, in whichever order the spellings sort. Other
 // entries are left alone: two names for one file are two hard links, each
 // held.
-func mergeHeldDirs(items []heldItem) []heldItem {
+func mergeHeldDirs(ctx context.Context, items []heldItem) []heldItem {
 	merged := make(map[gitEntryID]heldItem)
 	spellings := make(map[gitEntryID]int)
 	byPath := make(map[string]gitEntryID) // each directory item's path
 	for _, it := range items {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if it.ID.Mode != fs.ModeDir {
 			continue
 		}
@@ -327,6 +361,9 @@ func mergeHeldDirs(items []heldItem) []heldItem {
 		}
 		heads := slices.Clone(keep.InnerHEADs)
 		for _, h := range other.InnerHEADs {
+			if ctx.Err() != nil {
+				return nil
+			}
 			if r, err := filepath.Rel(other.Path, h.Path); err == nil {
 				h.Path = filepath.Join(keep.Path, r)
 				heads = append(heads, h)
@@ -340,6 +377,9 @@ func mergeHeldDirs(items []heldItem) []heldItem {
 	// last item at or under one of them; a walk up costs the path's depth.
 	last := make(map[gitEntryID]int)
 	for i, it := range items {
+		if ctx.Err() != nil {
+			return nil
+		}
 		for p := it.Path; ; {
 			if id, ok := byPath[p]; ok && spellings[id] > 1 {
 				last[id] = i
@@ -353,10 +393,16 @@ func mergeHeldDirs(items []heldItem) []heldItem {
 	}
 	at := make(map[int][]gitEntryID)
 	for id, i := range last {
+		if ctx.Err() != nil {
+			return nil
+		}
 		at[i] = append(at[i], id)
 	}
 	out := make([]heldItem, 0, len(items))
 	for i, it := range items {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if it.ID.Mode != fs.ModeDir || spellings[it.ID] < 2 {
 			out = append(out, it)
 		}

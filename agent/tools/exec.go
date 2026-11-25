@@ -83,6 +83,30 @@ type execSpec struct {
 	// sites (the unix runner and the background manager) refuse a spec
 	// without one. Whoever received the spec from recheckExecPlan releases it.
 	Screen *outputScreen
+
+	// sandboxNotice is the host's display sink, captured at approval recheck
+	// so a background job can report cleanup even after the originating turn.
+	sandboxNotice func(string)
+}
+
+type sandboxNoticeKey struct{}
+
+// WithSandboxNotice installs the host's receiver for screened post-run sandbox
+// notices on commands started under ctx. Background jobs can report after the
+// turn returns. The receiver must be concurrency-safe and return promptly.
+func WithSandboxNotice(ctx context.Context, receive func(string)) context.Context {
+	return context.WithValue(ctx, sandboxNoticeKey{}, receive)
+}
+
+// reportSandboxNotes delivers the same bounded, screened notes to the operator
+// and the tool result. Child-process stdout and stderr never enter this path.
+func (s execSpec) reportSandboxNotes(notes []string) []string {
+	if s.sandboxNotice != nil {
+		for _, note := range notes {
+			s.sandboxNotice(note)
+		}
+	}
+	return notes
 }
 
 type execResult struct {
@@ -480,6 +504,7 @@ func recheckExecPlan(ctx context.Context, ws *Workspace, pp execPending) (execSp
 		}
 		return execSpec{}, errors.New("credential screen failed; command not run: " + toolErrMessage(err))
 	}
+	notice, _ := ctx.Value(sandboxNoticeKey{}).(func(string))
 	// Env is []string{} and never []string(nil): os/exec treats a nil Env as
 	// "inherit the parent environment", which would silently defeat the
 	// allowlist when none of its variables are set.
@@ -493,6 +518,7 @@ func recheckExecPlan(ctx context.Context, ws *Workspace, pp execPending) (execSp
 		DirIdentity:   pp.dirIdentity,
 		RootIdentity:  pp.workspaceIdentity,
 		Screen:        screen,
+		sandboxNotice: notice,
 	}, nil
 }
 

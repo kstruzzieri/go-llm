@@ -50,6 +50,9 @@ type sandboxGitLayout struct {
 	// repository (noteLayout), anywhere in the workspace, git dirs included;
 	// it supplies the HEADs a held item must also set aside.
 	layoutHEADs []string
+	// grantReachedHEADs are valid layouts reached only through temporarily
+	// opened workspace ancestors. Only a newly created HEAD may be held there.
+	grantReachedHEADs []string
 	// repoLayouts is each directory of layoutHEADs that is neither a directory
 	// named .git nor inside one: a bare repository or a linked-worktree admin
 	// directory, for example. One inside another layout is still listed.
@@ -89,7 +92,8 @@ type sandboxGitLayout struct {
 	// lookupPolicies caches each device's Git name lookup policy for this walk.
 	lookupPolicies map[uint64]fsLookupPolicy
 
-	root string // the workspace root; errors name paths relative to it
+	root          string // the workspace root; errors name paths relative to it
+	workspacePath string // approved host spelling for absolute commondir pointers in a pinned walk
 	// pin is the root's descriptor, taken by prepare before its walk, through
 	// which the post-run check reaches the workspace; nil outside a bwrap run.
 	pin *os.File
@@ -166,16 +170,16 @@ func (s *sandboxLinkShortfall) Error() string {
 
 // inspectSandboxWorkspaceWithWalk runs a fresh walk for each attempt.
 func inspectSandboxWorkspaceWithWalk(root string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
-	return inspectSandboxWorkspaceNamed(context.Background(), root, filepath.Base(root), walk)
+	return inspectSandboxWorkspaceNamed(context.Background(), root, root, walk)
 }
 
-// inspectSandboxWorkspaceNamed walks root, whose workspace entry is named base.
-func inspectSandboxWorkspaceNamed(ctx context.Context, root, base string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
+// inspectSandboxWorkspaceNamed walks root, whose approved host spelling is workspacePath.
+func inspectSandboxWorkspaceNamed(ctx context.Context, root, workspacePath string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
 	var previous *sandboxLinkShortfall
 	var err error
 	for range sandboxInspectPasses {
 		var layout sandboxGitLayout
-		layout, err = inspectSandboxWorkspaceOnce(ctx, root, base, walk)
+		layout, err = inspectSandboxWorkspaceOnce(ctx, root, workspacePath, walk)
 		var short *sandboxLinkShortfall
 		if errors.As(err, &short) && (previous == nil || *previous != *short) {
 			// Another internal name may have moved into an already visited directory.
@@ -190,7 +194,7 @@ func inspectSandboxWorkspaceNamed(ctx context.Context, root, base string, walk f
 }
 
 // inspectSandboxWorkspaceOnce is one pass of inspectSandboxWorkspace.
-func inspectSandboxWorkspaceOnce(ctx context.Context, root, base string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
+func inspectSandboxWorkspaceOnce(ctx context.Context, root, workspacePath string, walk func(string, fs.WalkDirFunc) error) (sandboxGitLayout, error) {
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -201,9 +205,10 @@ func inspectSandboxWorkspaceOnce(ctx context.Context, root, base string, walk fu
 		first string
 	}
 
+	base := filepath.Base(workspacePath)
 	layout := sandboxGitLayout{root: root}
 	if postRunCollect {
-		layout.baseline = &sandboxGitLayout{root: root, collect: true}
+		layout.baseline = &sandboxGitLayout{root: root, workspacePath: workspacePath, collect: true}
 		layout.baseline.noteAdministrativeRoot(base)
 	}
 	links := make(map[inode]linkRecord)
@@ -306,18 +311,19 @@ func inspectSandboxWorkspaceOnce(ctx context.Context, root, base string, walk fu
 			return sandboxGitLayout{}, err
 		}
 		check.mounted = make(map[string]bool)
+		names := make(map[string]string)
 		for _, p := range slices.Concat(layout.metadata, layout.containers, layout.gitDirs) {
-			check.mounted[check.canonical(p)] = true
+			check.mounted[check.canonical(p, names)] = true
 		}
-		check.finish()
+		check.finish(ctx)
 	}
-	layout.finish()
-	return layout, nil
+	layout.finish(ctx)
+	return layout, ctx.Err()
 }
 
 // inspectSandboxWorkspaceAfterPinned walks the pinned workspace after execution.
 // It restores temporary owner grants on any exit and reports failed inspections.
-func inspectSandboxWorkspaceAfterPinned(root string, pin *os.File, screen *outputScreen) (l sandboxGitLayout) {
+func inspectSandboxWorkspaceAfterPinned(ctx context.Context, root string, pin *os.File, screen *outputScreen) (l sandboxGitLayout) {
 	l = sandboxGitLayout{root: root, afterWalk: true, collect: true, access: newOwnerAccess(pin), screen: screen}
 	l.access.screen = screen
 	defer func() {
@@ -327,12 +333,13 @@ func inspectSandboxWorkspaceAfterPinned(root string, pin *os.File, screen *outpu
 	}()
 	base := filepath.Base(root)
 	if pin != nil {
+		l.workspacePath = pin.Name()
 		base = filepath.Base(pin.Name())
 	}
 	l.noteAdministrativeRoot(base)
-	l.walkAfter(root)
+	l.walkAfter(ctx, root)
 	// A directory may allow named lookups even though it cannot be listed.
-	for i := 0; i < len(l.unreadableDirs); i++ {
+	for i := 0; i < len(l.unreadableDirs) && ctx.Err() == nil; i++ {
 		u := l.unreadableDirs[i]
 		fi, err := os.Lstat(u)
 		if err != nil || !fi.IsDir() {
@@ -343,19 +350,23 @@ func inspectSandboxWorkspaceAfterPinned(root string, pin *os.File, screen *outpu
 		}
 		child := filepath.Join(u, ".git")
 		if fi, err := os.Lstat(child); err == nil && fi.IsDir() {
-			l.walkAfter(child)
+			l.walkAfter(ctx, child)
 		}
 	}
-	_ = l.scanObservedDirs(context.Background())
-	l.finish()
+	if ctx.Err() == nil && l.scanObservedDirs(ctx) == nil {
+		l.finish(ctx)
+	}
 	return l
 }
 
 // walkAfter is the after-walk from start, the root or a .git looked up in an
 // unlisted directory. Directory entries guide descent and visit records the
 // identities resolved by Git's names.
-func (l *sandboxGitLayout) walkAfter(start string) {
+func (l *sandboxGitLayout) walkAfter(ctx context.Context, start string) {
 	_ = filepath.WalkDir(start, func(name string, entry fs.DirEntry, err error) error {
+		if canceled := ctx.Err(); canceled != nil {
+			return canceled
+		}
 		if err != nil {
 			switch {
 			case entry != nil: // a directory it could not list; what it did list still follows
@@ -549,16 +560,31 @@ func (l *sandboxGitLayout) observe(dir, name string) (string, gitEntryID, bool) 
 	return p, id, true
 }
 
-// canonical spells listed directory components by their matching Git lookups.
-func (l *sandboxGitLayout) canonical(p string) string {
-	if len(l.namedDirs) == 0 || p == l.root || p == filepath.Dir(p) {
+// canonical spells listed components by their matching Git lookups. Callers
+// share names across a batch only after its listings and lookups are complete.
+func (l *sandboxGitLayout) canonical(p string, names map[string]string) string {
+	if len(l.namedDirs) == 0 || p == l.root {
 		return p
 	}
-	name := l.namedDirs[l.listedDirs[p]]
-	if name == "" {
-		name = filepath.Base(p)
+	if name, ok := names[p]; ok {
+		return name
 	}
-	return filepath.Join(l.canonical(filepath.Dir(p)), name)
+	parent := filepath.Dir(p)
+	if parent == p {
+		return p
+	}
+	prefix := l.canonical(parent, names)
+	name := l.namedDirs[l.listedDirs[p]]
+	base := filepath.Base(p)
+	if name == "" {
+		name = base
+	}
+	resolved := p
+	if prefix != parent || name != base {
+		resolved = filepath.Join(prefix, name)
+	}
+	names[p] = resolved
+	return resolved
 }
 
 // inspectionError keeps the before observation unknown or reports the unchecked directory.
@@ -672,45 +698,14 @@ func (l *sandboxGitLayout) noteLayout(dir string) {
 	if !valid {
 		return
 	}
-	var markerErr error
-	markerFailure := func(name string, err error) {
-		l.inspectionError(filepath.Join(dir, name), dir, err)
-		if markerErr == nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, unix.ENOTDIR) {
-			markerErr = err
+	layout, err := l.gitLayoutMarkers(dir, lookup)
+	if err != nil {
+		if !errors.Is(err, unix.ENOTDIR) {
+			l.inspectionError(key, dir, err)
 		}
+	} else if layout {
+		l.layoutHEADs = append(l.layoutHEADs, key)
 	}
-	searchable := func(name string) bool {
-		var st unix.Stat_t
-		err := unix.Fstatat(unix.AT_FDCWD, lookup(name), &st, unix.AT_SYMLINK_NOFOLLOW)
-		if err != nil {
-			markerFailure(name, err)
-			return false
-		}
-		if st.Mode&unix.S_IFMT == unix.S_IFLNK {
-			markerFailure(name, errors.New("a repository layout marker is a symbolic link"))
-			return false
-		}
-		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-			return false
-		}
-		ok, err := searchableMode(l.access, &st)
-		if err != nil {
-			markerFailure(name, err)
-		}
-		return ok
-	}
-	objects := os.Getenv("GIT_OBJECT_DIRECTORY") != "" || searchable("objects")
-	if !objects || !searchable("refs") {
-		var st unix.Stat_t
-		if err := unix.Fstatat(unix.AT_FDCWD, lookup("commondir"), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			markerFailure("commondir", err)
-			if markerErr != nil {
-				l.inspectionError(key, dir, markerErr)
-			}
-			return
-		}
-	}
-	l.layoutHEADs = append(l.layoutHEADs, key)
 }
 
 // lookupID identifies a resolved entry without following its final symlink.
@@ -789,20 +784,27 @@ func readGitHEAD(p string, id gitEntryID) (bool, error) {
 // compares. A failed stat leaves the entry without one; the after-walk also
 // records the entry's directory in unlisted unless the entry is gone. Its
 // walks cost the entries times their depth (pathTree).
-func (l *sandboxGitLayout) finish() {
+func (l *sandboxGitLayout) finish(ctx context.Context) {
 	sortCompact := func(lists ...*[]string) {
 		for _, s := range lists {
+			if ctx.Err() != nil {
+				return
+			}
 			slices.Sort(*s)
 			*s = slices.Compact(*s)
 		}
 	}
 	lists := []*[]string{&l.dotGitDirs, &l.gitDirs, &l.containers, &l.intermediates, &l.gitFiles, &l.metadata,
-		&l.moduleReadOnly, &l.dotGitLinks, &l.layoutHEADs, &l.containerLinks}
+		&l.moduleReadOnly, &l.dotGitLinks, &l.layoutHEADs, &l.containerLinks, &l.grantReachedHEADs}
+	names := make(map[string]string)
 	if len(l.namedDirs) != 0 {
 		for _, m := range []*map[string]gitEntryID{&l.ids, &l.headIDs} {
 			keys := make(map[string]gitEntryID, len(*m))
 			for p, id := range *m {
-				keys[l.canonical(p)] = id
+				if ctx.Err() != nil {
+					return
+				}
+				keys[l.canonical(p, names)] = id
 			}
 			*m = keys
 		}
@@ -812,7 +814,7 @@ func (l *sandboxGitLayout) finish() {
 			l.ids = make(map[string]gitEntryID)
 		}
 		recordDir := func(dir string) {
-			key := l.canonical(dir)
+			key := l.canonical(dir, names)
 			if _, ok := l.ids[key]; ok {
 				return
 			}
@@ -832,16 +834,25 @@ func (l *sandboxGitLayout) finish() {
 			l.ids[key] = id
 		}
 		for _, h := range l.layoutHEADs {
+			if ctx.Err() != nil {
+				return
+			}
 			recordDir(filepath.Dir(h))
 		}
 		for _, p := range l.gitDirs {
+			if ctx.Err() != nil {
+				return
+			}
 			recordDir(p)
 		}
 	}
 	if len(l.namedDirs) != 0 {
 		for _, list := range lists {
 			for i, p := range *list {
-				(*list)[i] = l.canonical(p)
+				if ctx.Err() != nil {
+					return
+				}
+				(*list)[i] = l.canonical(p, names)
 			}
 		}
 	}
@@ -852,10 +863,16 @@ func (l *sandboxGitLayout) finish() {
 	var tree pathTree
 	dirs := make([]int, len(l.layoutHEADs))
 	for i, h := range l.layoutHEADs {
+		if ctx.Err() != nil {
+			return
+		}
 		dirs[i] = tree.node(filepath.Dir(h))
 	}
 	dotGit := tree.marks(l.dotGitDirs)
 	for _, d := range dirs {
+		if ctx.Err() != nil {
+			return
+		}
 		if tree.up(d, dotGit) < 0 {
 			l.repoLayouts = append(l.repoLayouts, tree.path[d])
 		} else {
@@ -866,7 +883,10 @@ func (l *sandboxGitLayout) finish() {
 	if len(l.unknown) > 0 && len(l.namedDirs) > 0 {
 		keys := make(map[string]string, len(l.unknown))
 		for p, why := range l.unknown {
-			keys[l.canonical(p)] = why
+			if ctx.Err() != nil {
+				return
+			}
+			keys[l.canonical(p, names)] = why
 		}
 		l.unknown = keys
 	}
@@ -1192,25 +1212,4 @@ func statType(m uint32) fs.FileMode {
 		return fs.ModeDevice
 	}
 	return 0 // a regular file
-}
-
-// searchableMode tests the applicable search bit before temporary owner grants.
-func searchableMode(access *ownerAccess, st *unix.Stat_t) (bool, error) {
-	mode := access.originalMode(st)
-	switch uid := os.Geteuid(); {
-	case uid == 0:
-		return true, nil
-	case uint32(uid) == st.Uid:
-		return mode&0o100 != 0, nil
-	case uint32(os.Getegid()) == st.Gid:
-		return mode&0o010 != 0, nil
-	}
-	groups, err := os.Getgroups()
-	if err != nil {
-		return false, err
-	}
-	if slices.Contains(groups, int(st.Gid)) {
-		return mode&0o010 != 0, nil
-	}
-	return mode&0o001 != 0, nil
 }

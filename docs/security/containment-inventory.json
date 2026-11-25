@@ -1805,12 +1805,27 @@
         "linux-host"
       ],
       "mutations": [
-        "M-428",
-        "M-429",
         "M-431",
         "M-441",
-        "M-446",
         "M-447"
+      ],
+      "artifacts": []
+    },
+    {
+      "id": "GITMETA-POSTRUN-HISTORICAL-NAMES",
+      "source": "issue-802",
+      "requirement": "Historical mutation records for the removed userspace Unicode-folding and listed-name matching code. The current comparison and hold use the names the filesystem resolves.",
+      "status": "out-of-scope(replaced implementation)",
+      "owner": "",
+      "layer": "focused",
+      "exempt": "",
+      "scenarios": [],
+      "refs": [],
+      "profiles": [],
+      "mutations": [
+        "M-428",
+        "M-429",
+        "M-446"
       ],
       "artifacts": []
     },
@@ -1847,14 +1862,18 @@
           "test": "TestLookupDirectoryKeys",
           "file": "agent/tools/sandbox_heldgit_linux_test.go",
           "func": "TestLookupDirectoryKeys"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestCasefoldFlagsPerDirectory",
+          "file": "agent/tools/sandbox_heldgit_linux_test.go",
+          "func": "TestCasefoldFlagsPerDirectory"
         }
       ],
       "profiles": [
         "linux-host"
       ],
       "mutations": [
-        "M-428",
-        "M-429",
         "M-430",
         "M-431",
         "M-434",
@@ -1868,15 +1887,15 @@
         "M-443",
         "M-444",
         "M-445",
-        "M-446",
-        "M-447"
+        "M-447",
+        "M-450"
       ],
       "artifacts": []
     },
     {
       "id": "GITMETA-POSTRUN-WIRING",
       "source": "issue-802",
-      "requirement": "Pin the workspace before inspection, walk through the descriptor, and refuse a failed pin or a rebound path before spawn. Run the check after foreground completion, background exit and failed start. Withhold whole credential paths and paths whose original or displayed form the command’s credential screen flags or cannot completely screen. Bound reports, including restoration warnings on a rebound path. Count omitted notes, renames and warnings, with suffix recovery for renames. Release the pin and background snapshot after cleanup.",
+      "requirement": "Pin the workspace before inspection, walk through the descriptor, and refuse a failed pin or a rebound path before spawn. Run the check after foreground completion, background exit and failed start. Withhold whole credential paths and paths whose original or displayed form the command’s credential screen flags or cannot completely screen. Bound reports, including restoration warnings on a rebound path. Count omitted notes, renames and warnings, with suffix recovery for renames. Release the pin and background snapshot after cleanup. Report each held entry to the operator and the model. Preserve ordinary files and existing repositories, and allow the operator to restore a held bare repository.",
       "status": "verified",
       "owner": "",
       "layer": "focused",
@@ -1918,6 +1937,24 @@
           "test": "TestBwrapWorkspacePinReleased",
           "file": "agent/tools/exec_linux_test.go",
           "func": "TestBwrapWorkspacePinReleased"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapPostRunGitAcceptance",
+          "file": "agent/tools/bwrap_postrun_acceptance_linux_test.go",
+          "func": "TestBwrapPostRunGitAcceptance"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapPostRunGitMetadataNames",
+          "file": "agent/tools/bwrap_postrun_acceptance_linux_test.go",
+          "func": "TestBwrapPostRunGitMetadataNames"
+        },
+        {
+          "package": "./agent/tools",
+          "test": "TestBwrapPostRunMovedCheckout",
+          "file": "agent/tools/bwrap_postrun_acceptance_linux_test.go",
+          "func": "TestBwrapPostRunMovedCheckout"
         }
       ],
       "profiles": [
@@ -1927,7 +1964,8 @@
         "M-432",
         "M-433",
         "M-440",
-        "M-448"
+        "M-448",
+        "M-449"
       ],
       "artifacts": []
     },
