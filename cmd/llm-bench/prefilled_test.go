@@ -1055,7 +1055,7 @@ func TestCaptureManifestWritten(t *testing.T) {
 	if len(m.ServerProbe.OllamaDigests) != 0 {
 		t.Errorf("server_probe = %+v; want no digests for openai-compat", m.ServerProbe)
 	}
-	if m.Decoding.Temperature != 0 || m.Decoding.SeedSupported {
+	if m.Decoding.Temperature == nil || *m.Decoding.Temperature != 0 || m.Decoding.SeedSupported {
 		t.Errorf("decoding = %+v; want temperature 0, seed_supported false", m.Decoding)
 	}
 	if !strings.Contains(m.CounterbalanceScheme, "fnv1a64") || !strings.Contains(m.CounterbalanceScheme, "alternates") {

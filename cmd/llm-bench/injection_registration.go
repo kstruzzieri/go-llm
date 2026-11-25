@@ -48,7 +48,7 @@ type registeredTrace struct {
 }
 
 type registeredDecoding struct {
-	Temperature float64  `json:"temperature"`
+	Temperature *float64 `json:"temperature"`
 	TopP        *float64 `json:"top_p,omitempty"`
 	TopK        *int     `json:"top_k,omitempty"`
 	NumPredict  int      `json:"num_predict"`
@@ -87,9 +87,8 @@ type registeredDecoderPolicy struct {
 
 // providerOptions is the wire decoding the registration pins for one model.
 func (d registeredDecoding) providerOptions() provider.ModelOptions {
-	temp := d.Temperature
 	return provider.ModelOptions{
-		Temperature: &temp,
+		Temperature: d.Temperature,
 		TopP:        d.TopP,
 		TopK:        d.TopK,
 		NumPredict:  d.NumPredict,
@@ -226,14 +225,18 @@ func (d registeredDecoding) validate(m string) error {
 	if d.NumPredict <= 0 || strings.TrimSpace(d.ServingStack) == "" {
 		return fmt.Errorf("model %q decoding needs num_predict > 0 and serving_stack", m)
 	}
+	if d.Temperature == nil {
+		return fmt.Errorf("model %q decoding.temperature is required", m)
+	}
+	temp := *d.Temperature
 	hosted := d.hosted()
 	// Local models are pinned at temperature 0. A hosted model may register
 	// the temperature its host fixes (hosted.host_fixed_decoding says why).
 	switch {
-	case hosted && (math.IsNaN(d.Temperature) || math.IsInf(d.Temperature, 0) || d.Temperature < 0):
-		return fmt.Errorf("decoding for %q: hosted temperature must be a finite value >= 0; got %v", m, d.Temperature)
-	case !hosted && d.Temperature != 0:
-		return fmt.Errorf("decoding for %q: temperature must be 0 for a local serving stack (#452 global constraint); got %v", m, d.Temperature)
+	case hosted && (math.IsNaN(temp) || math.IsInf(temp, 0) || temp < 0):
+		return fmt.Errorf("decoding for %q: hosted temperature must be a finite value >= 0; got %v", m, temp)
+	case !hosted && temp != 0:
+		return fmt.Errorf("decoding for %q: temperature must be 0 for a local serving stack (#452 global constraint); got %v", m, temp)
 	}
 	mode, err := provider.ParseThinkModeStrict(d.ThinkMode)
 	if err != nil {

@@ -41,11 +41,15 @@ func (b recallDestinationBinding) validate(actual string, targets []ModelTarget)
 			return errors.New("recall capture requires the openai-compat transport")
 		}
 	}
+	return checkRecallEndpoint(b.destination, actual)
+}
+
+func checkRecallEndpoint(registered provider.Destination, actual string) error {
 	dest, err := provider.NewDestination(openAICompatTransport, actual)
 	if err != nil {
 		return fmt.Errorf("recall capture endpoint: %w", err)
 	}
-	if dest != b.destination {
+	if dest != registered {
 		return errors.New("recall capture endpoint differs from the registered loopback endpoint")
 	}
 	return nil

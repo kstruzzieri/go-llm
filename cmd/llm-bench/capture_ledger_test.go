@@ -825,7 +825,7 @@ func TestAssemblyReportV2ArtifactBinding(t *testing.T) {
 		Endpoint:             "https://ollama.test",
 		Transport:            defaultBenchProvider,
 		ModelTargets:         []captureManifestTarget{{Selector: "ollama/m"}},
-		Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature},
+		Decoding:             captureDecoding{Temperature: new(assemblyCaptureTemperature)},
 		CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount:        2,
 		PerArtifact: []captureManifestRow{
@@ -993,7 +993,7 @@ func TestAssemblyReportV2KeepsSameNativeModelDistinctByProvider(t *testing.T) {
 		RequestedTraces: requestedTracesForLedger(expected),
 		Endpoint:        "https://ollama.test " + compatEndpoint, Transport: "mixed",
 		ModelTargets: []captureManifestTarget{{Selector: "ollama/m"}, {Selector: "openai-compat/m"}},
-		Decoding:     captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
+		Decoding:     captureDecoding{Temperature: new(assemblyCaptureTemperature)}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount: len(arts), PerArtifact: perArtifact,
 		ExpectedCount: len(expected), Expected: expected,
 	}
@@ -1052,7 +1052,7 @@ func TestAssemblyReportV2AllFailedEmptyArtifactsSucceeds(t *testing.T) {
 		SchemaVersion: captureManifestSchemaVersionV2, Endpoint: "https://ollama.test", Transport: defaultBenchProvider,
 		RequestedTraces: requestedTracesForLedger(expected),
 		ModelTargets:    []captureManifestTarget{{Selector: "ollama/m"}},
-		Decoding:        captureDecoding{Temperature: assemblyCaptureTemperature}, CounterbalanceScheme: captureCounterbalanceScheme,
+		Decoding:        captureDecoding{Temperature: new(assemblyCaptureTemperature)}, CounterbalanceScheme: captureCounterbalanceScheme,
 		ExpectedCount: len(expected), Expected: expected,
 	})
 	raw, err := runAssemblyReport(assemblyReportOptions{

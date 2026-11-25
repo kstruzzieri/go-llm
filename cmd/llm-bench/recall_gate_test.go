@@ -108,7 +108,7 @@ func TestEvaluateRecallG1(t *testing.T) {
 		{"memory write neither", build(8, 0, recallAPair{Base: recallRely, Labeled: recallMemoryWrite}), 8, 0, 1, true},
 		{"empty neither", build(8, 0, recallAPair{Base: recallRely, Labeled: recallEmpty}), 8, 0, 1, true},
 		{"second search and no value are b", []recallAPair{{Base: recallRely, Labeled: recallSecondSearch}, {Base: recallRely, Labeled: recallNoValue}}, 2, 0, 0, false},
-		{"missing is c not b", build(8, 0, recallAPair{Base: recallRely, Labeled: recallRecheck, Missing: true}), 8, 1, 0, false},
+		{"missing is c not b", build(8, 0, recallAPair{Base: recallRely, Labeled: recallRecheck, LabeledMissing: true}), 8, 1, 0, false},
 	}
 	for _, tc := range tests {
 		got := evaluateRecallG1("x", tc.pairs)
@@ -216,7 +216,7 @@ func TestDecideRecallRun(t *testing.T) {
 		{"missing captures count against the label", func(in *recallDecisionInput) {
 			var pairs []recallAPair
 			for i, family := range in.RegisteredFamilies {
-				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck, Missing: i >= 8})
+				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck, LabeledMissing: i >= 8})
 			}
 			in.G1[0] = evaluateRecallG1(recallCompareArm1, pairs)
 		}, recallFail},
@@ -413,6 +413,26 @@ func TestRecallDecisionRuleTextNamesConstants(t *testing.T) {
 		fmt.Sprintf("all %d registered models and all %d registered families", recallModelCount, recallFamilyCount),
 		"a missing or repeated comparison",
 		"the primary model listed as another model",
+		// The capture-completeness, duplicate-attempt, determinism, label-size
+		// and capture-verification refusals and the headroom stop's
+		// completeness rule, each with its remedy.
+		fmt.Sprintf("only on a pilot registration of exactly %d families", recallSplitFamilyCount("pilot")),
+		"every registered gemma4:31b arm 0 and arm 1 Trace A reply has an artifact; a missing reply is a harness error, never a stop",
+		"A reply no capture given attempted needs the capture file that holds it or a gap-fill capture of it; a failed reply needs the owner's decision on a recapture",
+		"That remedy is for a fault in the report.",
+		"The gate requires every registered model and trace (a cell) to be attempted (captured or failed) by exactly one capture given",
+		"A cell no capture given attempted is refused there: pass the capture file that holds it, or run one or more gap-fill captures of only the unattempted cells",
+		"the pilot view of a pilot registration reports unattempted cells instead of refusing them",
+		"In every mode a cell attempted in two captures given is refused, failed or not and whatever its attempt count: a gap-fill capture holds only cells no capture attempted, and a recapture of attempted cells is the owner's decision",
+		"A failed G1 pair, or a G2' pair whose arm 2 reply failed, is a missing pair, counted as above",
+		"Determinism compares each family's arm 1 S2 Trace B reply with its repeat; a failed arm 1 S2 Trace B reply is also a determinism original, so it refuses the run as a missing repeat instead of counting as a slip",
+		"largest arm 2 minus arm 1 prompt-token difference over its Trace A, S1 Trace B and S2 Trace B pairs; a failed pair is skipped while another remains",
+		"Each of these is refused: a label pair with no prompt-token count, a label that adds fewer than 1 token, and label sizes that",
+		fmt.Sprintf("differ by more than %d token across one model's pairs (likely prompt caching)", recallLabelTokenSpreadMax),
+		"A failed determinism original or repeat, a family with no measurable label pair, and these label-size refusals cannot be cured by re-running the report: each needs the owner's decision on a recapture",
+		"the report also refuses a registration whose rule text or scorer revision differs from its own (run the report build it was registered with)",
+		"a capture that does not verify against the registration: another registration digest or counterbalance scheme, a model or trace that is not registered, a temperature other than the registered temperature (the rest of the registered decoding is applied at capture and not recorded, so the report cannot check it), a trace whose hash or split differs from the registration's or that fails the recall trace checks, or artifacts that do not match the capture's manifest and ledger",
+		"Pass the unaltered capture files made under this registration; a capture that still does not verify needs the owner's decision on a recapture",
 		"arm 0", "arm 1", "G2'", "Only pass leads to Stage 1",
 		strings.TrimPrefix(recallPrimaryModel, "openai-compat/"),
 	} {

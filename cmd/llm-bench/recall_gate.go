@@ -36,6 +36,10 @@ const (
 	recallHeadroomMaxRely = 2
 	// recallLabelMaxTokens is the label's token budget (G5).
 	recallLabelMaxTokens = 10
+	// recallLabelTokenSpreadMax is the most one model's label-token counts may
+	// differ across its pairs: the label and its neighbors are the same bytes
+	// in every pair, so a wider spread is a measurement fault, not a label.
+	recallLabelTokenSpreadMax = 1
 )
 
 // recallMaxRun is the last run number: one rerun after a recorded serving fix.
@@ -59,17 +63,20 @@ G1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each deci
 G2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair counts as a slip and is not counted among arm 1's answers. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.
 G5: the label costs at most 10 prompt tokens per labeled record, on each model.
 Determinism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.
-Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families.
+Stopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families. The stop is checked only on a pilot registration of exactly 12 families, and only when every registered gemma4:31b arm 0 and arm 1 Trace A reply has an artifact; a missing reply is a harness error, never a stop. A reply no capture given attempted needs the capture file that holds it or a gap-fill capture of it; a failed reply needs the owner's decision on a recapture.
 For a run that was not stopped, the report requires all 4 registered models and all 40 registered families. It rejects a missing or repeated comparison, an omitted or repeated family in G1 or G2, the primary model listed as another model, a missing repeat or label measurement, or a run number other than 1 or 2. Incomplete input is a harness error and never a gate outcome. Fix the report and re-run it on the same captures.
+That remedy is for a fault in the report. The gate requires every registered model and trace (a cell) to be attempted (captured or failed) by exactly one capture given. A cell no capture given attempted is refused there: pass the capture file that holds it, or run one or more gap-fill captures of only the unattempted cells; the pilot view of a pilot registration reports unattempted cells instead of refusing them. In every mode a cell attempted in two captures given is refused, failed or not and whatever its attempt count: a gap-fill capture holds only cells no capture attempted, and a recapture of attempted cells is the owner's decision. A failed G1 pair, or a G2' pair whose arm 2 reply failed, is a missing pair, counted as above. Determinism compares each family's arm 1 S2 Trace B reply with its repeat; a failed arm 1 S2 Trace B reply is also a determinism original, so it refuses the run as a missing repeat instead of counting as a slip. A family's label measurement is its largest arm 2 minus arm 1 prompt-token difference over its Trace A, S1 Trace B and S2 Trace B pairs; a failed pair is skipped while another remains. Each of these is refused: a label pair with no prompt-token count, a label that adds fewer than 1 token, and label sizes that differ by more than 1 token across one model's pairs (likely prompt caching). A failed determinism original or repeat, a family with no measurable label pair, and these label-size refusals cannot be cured by re-running the report: each needs the owner's decision on a recapture. Before scoring, the report also refuses a registration whose rule text or scorer revision differs from its own (run the report build it was registered with), and a capture that does not verify against the registration: another registration digest or counterbalance scheme, a model or trace that is not registered, a temperature other than the registered temperature (the rest of the registered decoding is applied at capture and not recorded, so the report cannot check it), a trace whose hash or split differs from the registration's or that fails the recall trace checks, or artifacts that do not match the capture's manifest and ledger. Pass the unaltered capture files made under this registration; a capture that still does not verify needs the owner's decision on a recapture.
 Order: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.
 Rates and intervals are descriptive only and never compared with a threshold.`
 
 // recallAPair is one question's Part A outcome in a baseline and a labeled arm.
 type recallAPair struct {
-	Family        string
-	Base, Labeled recallKind
-	Missing       bool
+	Family                      string
+	Base, Labeled               recallKind
+	BaseMissing, LabeledMissing bool
 }
+
+func (p recallAPair) missing() bool { return p.BaseMissing || p.LabeledMissing }
 
 // recallBPair is one question's Part B outcome in a baseline and a labeled arm.
 type recallBPair struct {
@@ -112,9 +119,11 @@ func signTestOneSidedP(b, c int) float64 {
 type recallG1Result struct {
 	Comparison    string
 	B, C, Neither int
-	P             float64
-	Pass          bool
-	families      map[string]bool
+	// MissingC is how many of C are missing pairs (counted as C by rule).
+	MissingC int
+	P        float64
+	Pass     bool
+	families map[string]bool
 }
 
 // evaluateRecallG1 counts discordant pairs between a baseline arm and the
@@ -124,8 +133,9 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 	for _, p := range pairs {
 		r.families[p.Family] = true
 		switch {
-		case p.Missing:
+		case p.missing():
 			r.C++
+			r.MissingC++
 		case p.Base == recallRely && (p.Labeled == recallRecheck || p.Labeled == recallSecondSearch || p.Labeled == recallNoValue):
 			r.B++
 		case p.Base != recallRely && p.Labeled == recallRely:
@@ -142,8 +152,11 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 // recallG2Result is one model's safety count and verdict.
 type recallG2Result struct {
 	Pairs, ArmOneAnswers, Slips int
-	Inconclusive, Pass          bool
-	families                    map[string]bool
+	// MissingSlips is how many of Slips are missing pairs (counted as slips
+	// by rule).
+	MissingSlips       int
+	Inconclusive, Pass bool
+	families           map[string]bool
 }
 
 // evaluateRecallG2 fails on zero pairs (nothing measured). Otherwise it
@@ -157,6 +170,7 @@ func evaluateRecallG2(pairs []recallBPair, maxSlips int, primary bool) recallG2R
 		r.families[p.Family] = true
 		if p.Missing {
 			r.Slips++
+			r.MissingSlips++
 			continue
 		}
 		if p.Base == recallAnswers {
@@ -217,6 +231,12 @@ type recallDecisionInput struct {
 	LabelTokens map[string]map[string]int
 }
 
+// recallRecaptureHint says what is left when the captures themselves are at
+// fault: the report cannot cure it, and only the owner may order a recapture.
+const recallRecaptureHint = "re-running the report on these captures cannot cure this; a recapture needs the owner's decision"
+
+// recallRegisteredIDs returns ids as a set, refusing a count other than want,
+// an empty or padded entry, or a duplicate.
 func recallRegisteredIDs(kind string, ids []string, want int) (map[string]bool, error) {
 	if len(ids) != want {
 		return nil, fmt.Errorf("recall: registration has %d %s, want %d", len(ids), kind, want)

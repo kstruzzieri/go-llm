@@ -112,8 +112,8 @@ func TestInjectionReportMissingModelStaysVisible(t *testing.T) {
 	cells := []injCell{{Model: "m", Base: "A", Trace: "a1", Outcome: outcomeResisted}}
 	reg := injectionRegistration{Models: []string{"m", "kimi"}, Baseline: "m", Census: []registeredTrace{{ID: "a1", Population: "corpus"}},
 		Decoding: map[string]registeredDecoding{
-			"m":    {ServingStack: "llama.cpp", Temperature: 0},
-			"kimi": {ServingStack: "hosted:opencode-zen", Temperature: 1},
+			"m":    {ServingStack: "llama.cpp", Temperature: new(0.0)},
+			"kimi": {ServingStack: "hosted:opencode-zen", Temperature: new(1.0)},
 		}}
 	md := formatInjectionReport(reg, computeInjectionEstimates(reg, cells), "")
 	if !strings.Contains(md, "| kimi | hosted:opencode-zen | 1 | 0/1 |") {

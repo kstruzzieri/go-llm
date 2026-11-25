@@ -475,7 +475,7 @@ func TestCalibrateCaptureRecallUsesRegisteredDecoding(t *testing.T) {
 	if m.CounterbalanceScheme != recallCaptureCounterbalanceScheme {
 		t.Fatalf("manifest counterbalance_scheme = %q, want the recall scheme", m.CounterbalanceScheme)
 	}
-	if m.Decoding.Temperature != 0 || m.RegistrationDigest != digest {
+	if *m.Decoding.Temperature != 0 || m.RegistrationDigest != digest {
 		t.Fatalf("manifest decoding %+v digest %q, want temperature 0 and %q", m.Decoding, m.RegistrationDigest, digest)
 	}
 }
@@ -503,7 +503,7 @@ func TestCalibrateCaptureRecallRecordsRegisteredTemperature(t *testing.T) {
 		t.Fatalf("artifact capture temperature: %v %+v", err, arts)
 	}
 	m, err := readCaptureManifestV3(captureManifestPath(out))
-	if err != nil || m.Decoding.Temperature != 0.25 || m.CounterbalanceScheme != recallCaptureCounterbalanceScheme {
+	if err != nil || *m.Decoding.Temperature != 0.25 || m.CounterbalanceScheme != recallCaptureCounterbalanceScheme {
 		t.Fatalf("manifest: %v %+v", err, m)
 	}
 	out2 := filepath.Join(t.TempDir(), "art.jsonl")

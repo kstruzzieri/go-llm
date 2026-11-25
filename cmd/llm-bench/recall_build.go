@@ -107,10 +107,13 @@ func loadRecallCases(path string) (recallCases, error) {
 	return c, nil
 }
 
-// recallRelPath rejects an absolute or escaping workspace path.
+// recallRelPath rejects an absolute, escaping or padded workspace path, and
+// one that names no file under the /workspace root (recallWorkspaceFile, the
+// rule the frozen trace check applies).
 func recallRelPath(p string) error {
-	if p == "" || !filepath.IsLocal(filepath.FromSlash(p)) || strings.Contains(p, "\\") {
-		return fmt.Errorf("path %q must be a relative path inside the workspace", p)
+	if p == "" || !filepath.IsLocal(filepath.FromSlash(p)) || strings.Contains(p, "\\") ||
+		p != strings.TrimSpace(p) || recallWorkspaceFile(p) == "" {
+		return fmt.Errorf("path %q must be a relative path naming a file inside the workspace", p)
 	}
 	return nil
 }
@@ -363,16 +366,32 @@ func recallSeededID(familyID, role string, k int) string {
 	return hex.EncodeToString(sum[:])[:32]
 }
 
+// recallRecordIDMaxTries caps the record-ID search. Each candidate is accepted
+// with probability well above 1/3, so exhausting the cap is a defect, not luck.
+const recallRecordIDMaxTries = 1000
+
 // recordID returns the family's record ID for role: the first candidate
 // (k = 0, 1, ...) that starts with a letter a-f and does not itself state the
 // lesson value. A leading letter keeps every digit run in the hex ID preceded
-// by a word byte, so no number token can be read from it.
-func (f recallFamily) recordID(role string) string {
-	for k := 0; ; k++ {
-		if id := recallSeededID(f.ID, role, k); id[0] >= 'a' && !statesValue(id, f.Value, f.Value.Lesson) {
-			return id
+// by a word byte, so no number token can be read from it. It fails after
+// recallRecordIDMaxTries candidates.
+func (f recallFamily) recordID(role string) (string, error) {
+	return searchRecallRecordID(f.ID, role, recallRecordIDMaxTries, func(id string) bool {
+		return id[0] >= 'a' && !statesValue(id, f.Value, f.Value.Lesson)
+	})
+}
+
+// searchRecallRecordID returns the first of maxTries seeded candidates (k = 0,
+// 1, ...) that accept admits, or an error naming the family and role when none
+// is. recordID is its only production caller; the parameters exist so a test
+// can force exhaustion without a real hash search.
+func searchRecallRecordID(familyID, role string, maxTries int, accept func(id string) bool) (string, error) {
+	for k := 0; k < maxTries; k++ {
+		if id := recallSeededID(familyID, role, k); accept(id) {
+			return id, nil
 		}
 	}
+	return "", fmt.Errorf("recall build: family %s: no acceptable %s record ID in %d candidates", familyID, role, maxTries)
 }
 
 // layout derives the seeded records of a family: IDs from recordID, contents,
@@ -382,9 +401,15 @@ func (f recallFamily) recordID(role string) string {
 // (updated_at DESC) decide the order; checkRecallInvariants enforces the
 // result equals Rank. Day numbers carry a leading zero, so they never read as
 // a canonical number.
-func (f recallFamily) layout() (recs []recallSeedRecord, relID string, distIDs [2]string, order []string) {
-	relID = f.recordID("relevant")
-	distIDs = [2]string{f.recordID("d0"), f.recordID("d1")}
+func (f recallFamily) layout() (recs []recallSeedRecord, relID string, distIDs [2]string, order []string, err error) {
+	if relID, err = f.recordID("relevant"); err != nil {
+		return nil, "", distIDs, nil, err
+	}
+	for i, role := range []string{"d0", "d1"} {
+		if distIDs[i], err = f.recordID(role); err != nil {
+			return nil, "", distIDs, nil, err
+		}
+	}
 	d := 0
 	for p := 0; p < 3; p++ {
 		r := recallSeedRecord{CreatedAt: time.Date(2026, 3, 9-p, 0, 0, 0, 0, time.UTC)}
@@ -397,7 +422,7 @@ func (f recallFamily) layout() (recs []recallSeedRecord, relID string, distIDs [
 		recs = append(recs, r)
 		order = append(order, r.ID)
 	}
-	return recs, relID, distIDs, order
+	return recs, relID, distIDs, order, nil
 }
 
 // recallCell is one trace of a family: its ID suffix, the eval block fields,
@@ -505,7 +530,10 @@ func captureRecallCell(ctx context.Context, f recallFamily, cell recallCell) (pr
 	if err := writeRecallWorkspace(ws, f, cell.S2); err != nil {
 		return provider.ChatRequest{}, fmt.Errorf("workspace: %w", err)
 	}
-	recs, relID, distIDs, _ := f.layout()
+	recs, relID, distIDs, _, err := f.layout()
+	if err != nil {
+		return provider.ChatRequest{}, err
+	}
 	store, closeDB, err := seedRecallStore(ctx, filepath.Join(dir, "mem.db"), recs)
 	if err != nil {
 		return provider.ChatRequest{}, err
@@ -677,7 +705,10 @@ func recallStrings(v any, out *[]string) {
 // on a Trace B S2 cell, the read_file result (FileS2 states it by design).
 func recallLeak(f recallFamily, suffix string, req provider.ChatRequest) error {
 	v := f.Value
-	_, relID, _, _ := f.layout()
+	_, relID, _, _, err := f.layout()
+	if err != nil {
+		return err
+	}
 	check := func(where, text string) error {
 		if statesValue(text, v, v.Lesson) {
 			return fmt.Errorf("%s states the lesson value %q", where, v.Lesson)
@@ -807,7 +838,10 @@ func recallExplainCarriers(req provider.ChatRequest) (n int, names []string) {
 // (the sentence, the label on the relevant record, the label on the chosen
 // distractor, the placebo on the relevant record, or nothing for the repeat).
 func checkRecallInvariants(f recallFamily, split string, reqs map[string]provider.ChatRequest) error {
-	_, relID, distIDs, order := f.layout()
+	_, relID, distIDs, order, err := f.layout()
+	if err != nil {
+		return err
+	}
 	for _, cell := range recallCells(split) {
 		req, ok := reqs[cell.Suffix]
 		if !ok {
