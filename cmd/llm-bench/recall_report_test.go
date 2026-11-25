@@ -326,12 +326,17 @@ func TestRecallReportMissingArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g1 := evaluateRecallG1(recallCompareArm1, pairRecallA(arts, reg, recallPrimaryModel, "1", "2", "S1"))
+	set, err := recallRegisteredSet(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := recallIndexOf(arts)
+	g1 := evaluateRecallG1(recallCompareArm1, pairRecallA(ix, set, recallPrimaryModel, "1", "2", "S1"))
 	if g1.B != 10 || g1.C != 1 || g1.Neither != 29 {
 		t.Errorf("G1 vs arm 1 = %+v; want B 10, C 1 (the missing f39 pair), Neither 29", g1)
 	}
-	s7 := pairRecallA(arts, reg, recallPrimaryModel, "1", "2", "S7")
-	if len(s7) != recallTestFamilyNum || !s7[0].Missing || s7[0].Family != "f00" || s7[1].Missing {
+	s7 := pairRecallA(ix, set, recallPrimaryModel, "1", "2", "S7")
+	if len(s7) != recallTestFamilyNum || !s7[0].LabeledMissing || s7[0].Family != "f00" || s7[1].missing() {
 		t.Errorf("S7 pairs = %+v; want 40 family pairs with f00 missing", s7)
 	}
 }
@@ -922,7 +927,7 @@ func TestRecallReportMetricsValues(t *testing.T) {
 		"- S2 Trace B answers, placebo P vs arm 1: a 36, b 2, c 0, d 1, missing 1",
 		"- arm 1 relied (10): relied 0, re-check 4, second search 2, memory write 1, other tool 1, different value 1, no value 0, empty 1",
 		"- arm 1 did not rely (30): relied 2, re-check 0, second search 0, memory write 0, other tool 0, different value 0, no value 28, empty 0",
-		"- pairs with no arm 1 outcome (missing, in neither row): 0",
+		"- incomplete pairs excluded from transitions (0 missing only arm 1, 0 missing only arm 2, 0 missing both)",
 		"- f = 0.25: 3.00 per stale reliance prevented; this sample's 10 stop(s) (arm 1 relied, arm 2 did not) imply 30.0 non-rely replies on still-true lessons",
 		"- f = 0.50: 1.00 per stale reliance prevented; this sample's 10 stop(s) (arm 1 relied, arm 2 did not) imply 10.0 non-rely replies on still-true lessons",
 		"- f = 0.75: 0.33 per stale reliance prevented; this sample's 10 stop(s) (arm 1 relied, arm 2 did not) imply 3.3 non-rely replies on still-true lessons",
@@ -989,7 +994,7 @@ func TestRecallReportMissingCountsRendered(t *testing.T) {
 		"- task style task: G1 vs arm 1 B 5 C 1 (1 missing); vs arm 0 B 5 C 0 (0 missing); G2' arm 1 answers 19, slips 1 (1 missing)",
 		"- template tpl3: G1 vs arm 1 B 2 C 1 (1 missing); vs arm 0 B 2 C 0 (0 missing); G2' arm 1 answers 10, slips 0 (0 missing)",
 		"Explanation alone vs today (arm 1 vs arm 0, S1 rely; a positive difference means arm 1 relies less than arm 0): ",
-		"- pairs with no arm 1 outcome (missing, in neither row): 1",
+		"- incomplete pairs excluded from transitions (1 missing only arm 1, 0 missing only arm 2, 0 missing both)",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report lacks %q", want)

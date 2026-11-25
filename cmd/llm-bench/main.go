@@ -1740,7 +1740,7 @@ func applyCaptureDecoding(runner *Runner, decoding map[string]injectionDecoding)
 	runner.InjectionDecoding = decoding
 	temps := make(map[string]float64, len(decoding))
 	for sel, d := range decoding {
-		temps[sel] = *d.Options.Temperature // providerOptions always sets it
+		temps[sel] = *d.Options.Temperature // registration requires an explicit temperature
 	}
 	return temps
 }

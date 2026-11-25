@@ -292,15 +292,32 @@ const recallCaptureCounterbalanceScheme = "families sorted by fnv1a64(family_id)
 // family order. Every trace must carry a recall block (runCalibrateCapture
 // refuses a set that mixes in any other trace).
 func recallCaptureOrder(traces []Trace) []Trace {
-	var out []Trace
-	byFamily := map[string][]Trace{}
+	trials := make([]recallTrial, len(traces))
+	for i, t := range traces {
+		trials[i] = recallTrial{family: t.Recall.FamilyID, cell: recallCellKey(t)}
+	}
+	out := make([]Trace, len(traces))
+	for i, source := range recallTrialOrder(trials) {
+		out[i] = traces[source]
+	}
+	return out
+}
+
+type recallTrial struct {
+	family, cell string
+}
+
+// recallTrialOrder returns the indices of the selected trials in registered
+// order. Capture takes the identities from the traces; report independently
+// derives them from the registration, including trials with no artifact.
+func recallTrialOrder(trials []recallTrial) []int {
+	byFamily := make(map[string][]int)
 	var fams []string
-	for _, t := range traces {
-		id := t.Recall.FamilyID
-		if _, ok := byFamily[id]; !ok {
-			fams = append(fams, id)
+	for i, trial := range trials {
+		if _, ok := byFamily[trial.family]; !ok {
+			fams = append(fams, trial.family)
 		}
-		byFamily[id] = append(byFamily[id], t)
+		byFamily[trial.family] = append(byFamily[trial.family], i)
 	}
 	sort.Slice(fams, func(i, j int) bool {
 		hi, hj := pairIDHash(fams[i]), pairIDHash(fams[j])
@@ -309,24 +326,25 @@ func recallCaptureOrder(traces []Trace) []Trace {
 		}
 		return fams[i] < fams[j]
 	})
-	var repeats []Trace
+	out := make([]int, 0, len(trials))
+	var repeats []int
 	for pos, id := range fams {
-		var cells []Trace
-		for _, t := range byFamily[id] {
-			if t.Recall.Repeat {
-				repeats = append(repeats, t)
+		var cells []int
+		for _, i := range byFamily[id] {
+			if strings.HasSuffix(trials[i].cell, "-repeat") {
+				repeats = append(repeats, i)
 			} else {
-				cells = append(cells, t)
+				cells = append(cells, i)
 			}
 		}
 		sort.SliceStable(cells, func(i, j int) bool {
-			return slices.Index(recallBaseOrder, recallCellKey(cells[i])) < slices.Index(recallBaseOrder, recallCellKey(cells[j]))
+			return slices.Index(recallBaseOrder, trials[cells[i]].cell) < slices.Index(recallBaseOrder, trials[cells[j]].cell)
 		})
 		if n := len(cells); n > 0 {
 			k := pos % n
-			cells = append(cells[k:len(cells):len(cells)], cells[:k]...)
+			out = append(out, cells[k:]...)
+			out = append(out, cells[:k]...)
 		}
-		out = append(out, cells...)
 	}
 	return append(out, repeats...)
 }

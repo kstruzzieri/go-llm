@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -419,7 +420,11 @@ func formatInjectionReport(reg injectionRegistration, est injectionEstimates, pr
 	for _, m := range reg.Models {
 		c := est.Completeness[m]
 		d := reg.Decoding[m]
-		w("| %s | %s | %g | %d/%d |\n", markdownCell(m), markdownCell(d.ServingStack), d.Temperature, c.K, c.N)
+		temperature := "n/a"
+		if d.Temperature != nil {
+			temperature = strconv.FormatFloat(*d.Temperature, 'g', -1, 64)
+		}
+		w("| %s | %s | %s | %d/%d |\n", markdownCell(m), markdownCell(d.ServingStack), temperature, c.K, c.N)
 	}
 	for _, m := range reg.Models {
 		if n := est.Completeness[m].Unplaced; n > 0 {
@@ -635,7 +640,7 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 		}
 		sum := sha256.Sum256(raw)
 		summary := injectionCaptureSummary{Name: filepath.Base(path), ManifestDigest: "sha256:" + hex.EncodeToString(sum[:]),
-			Endpoint: m.Endpoint, Transport: m.Transport, CreatedAt: m.CreatedAt, Temperature: m.Decoding.Temperature}
+			Endpoint: m.Endpoint, Transport: m.Transport, CreatedAt: m.CreatedAt, Temperature: *m.Decoding.Temperature}
 		// The capture's decoding and endpoint must be the registered ones for
 		// every model it ran (the ledger's models are exactly model_targets).
 		for _, tg := range m.ModelTargets {
@@ -645,8 +650,8 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 			}
 			summary.Models = append(summary.Models, tg.Selector)
 			d := reg.Decoding[name]
-			if m.Decoding.Temperature != d.Temperature {
-				return "", fmt.Errorf("injection-report: capture %s model %s: manifest decoding.temperature %v != registered %v", path, name, m.Decoding.Temperature, d.Temperature)
+			if *m.Decoding.Temperature != *d.Temperature {
+				return "", fmt.Errorf("injection-report: capture %s model %s: manifest decoding.temperature %v != registered %v", path, name, *m.Decoding.Temperature, *d.Temperature)
 			}
 			if d.Hosted != nil {
 				if want := strings.Fields(d.Hosted.Endpoint)[0]; m.Endpoint != want {
@@ -701,7 +706,7 @@ func runInjectionReport(opts injectionReportOptions) (string, error) {
 				return "", fmt.Errorf("injection-report: capture %s artifact %s/%s has no matching captured ledger row", path, a.TraceID, a.CandidateModel)
 			}
 			name, _ := regModel(row.Model)
-			if want := reg.Decoding[name].Temperature; a.Capture == nil || a.Capture.Temperature == nil || *a.Capture.Temperature != want {
+			if want := *reg.Decoding[name].Temperature; a.Capture == nil || a.Capture.Temperature == nil || *a.Capture.Temperature != want {
 				return "", fmt.Errorf("injection-report: capture %s model %s artifact %s: capture.temperature is not the registered %v", path, name, a.TraceID, want)
 			}
 			if modelKey(a.Capture.Model) != modelKey(a.CandidateModel) {

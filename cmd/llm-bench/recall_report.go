@@ -34,7 +34,7 @@ type recallCaptureSummary struct {
 	Artifacts, Failed, Unattempted int
 }
 
-// recallIndex finds an artifact by (model key, trace ID).
+// recallIndex finds an artifact by its registered model selector and trace ID.
 type recallIndex map[[2]string]Artifact
 
 // recallIndexOf indexes arts; a later artifact for the same cell wins (the
@@ -42,14 +42,14 @@ type recallIndex map[[2]string]Artifact
 func recallIndexOf(arts []Artifact) recallIndex {
 	ix := make(recallIndex, len(arts))
 	for _, a := range arts {
-		ix[[2]string{modelKey(a.CandidateModel), a.TraceID}] = a
+		ix[[2]string{a.CandidateModel, a.TraceID}] = a
 	}
 	return ix
 }
 
 // get returns the model's artifact for a trace ID.
 func (ix recallIndex) get(model, id string) (Artifact, bool) {
-	a, ok := ix[[2]string{modelKey(model), id}]
+	a, ok := ix[[2]string{model, id}]
 	return a, ok
 }
 
@@ -99,27 +99,13 @@ func recallBCell(arm, caseID string) string {
 	return "B-" + strings.ToLower(caseID) + "-" + arm
 }
 
-// recallReply is the scored reply: the last assistant content plus the raw
-// calls that decoded (a malformed call drops only itself). The transcript's
-// calls count only when the artifact holds no raw calls at all (in recall
-// captures both channels come from the same response, so this fallback does
-// not change a real score). Thinking is never scored.
+// recallReply scores the verified assistant turn, using raw calls that decoded
+// when available. Thinking and malformed calls do not contribute to the score.
 func recallReply(a Artifact) Turn {
-	t := Turn{Role: "assistant"}
-	var last *Turn
-	for i := len(a.ActualTranscript) - 1; i >= 0; i-- {
-		if a.ActualTranscript[i].Role == "assistant" {
-			last = &a.ActualTranscript[i]
-			break
-		}
-	}
-	if last != nil {
-		t.Content = last.Content
-	}
+	reply := a.ActualTranscript[0]
+	t := Turn{Role: "assistant", Content: reply.Content}
 	if len(a.ActualRawToolCalls) == 0 {
-		if last != nil {
-			t.ToolCalls = last.ToolCalls
-		}
+		t.ToolCalls = reply.ToolCalls
 		return t
 	}
 	for _, c := range a.ActualRawToolCalls {
@@ -141,24 +127,22 @@ func scoreRecallB(a Artifact) (recallBOutcome, bool) {
 // pairRecallA pairs a model's Trace A replies across registered families.
 // caseID S1 pairs the arm traces baseArm and labeledArm; S7 pairs baseArm with
 // the S7 trace (labeledArm is ignored for S7). A registered trace with no
-// artifact makes a Missing pair. It reads the registered set without checking
-// it; runRecallReport has already refused an unparsable registered ID.
-func pairRecallA(arts []Artifact, reg recallRegistration, model, baseArm, labeledArm, caseID string) []recallAPair {
-	set, _ := recallRegisteredSet(reg)
-	ix := recallIndexOf(arts)
+// artifact leaves its own side of the pair missing.
+func pairRecallA(ix recallIndex, set recallRegSet, model, baseArm, labeledArm, caseID string) []recallAPair {
 	baseCell, labCell := recallACell(baseArm, "S1"), recallACell(labeledArm, caseID)
 	var out []recallAPair
 	for _, fam := range set.fams {
 		if !set.has(fam, baseCell) || !set.has(fam, labCell) {
 			continue
 		}
-		p := recallAPair{Family: fam}
 		b, okb := ix.get(model, recallTraceID(fam, baseCell))
 		l, okl := ix.get(model, recallTraceID(fam, labCell))
-		if okb && okl {
-			p.Base, p.Labeled = scoreRecallA(b), scoreRecallA(l)
-		} else {
-			p.Missing = true
+		p := recallAPair{Family: fam, BaseMissing: !okb, LabeledMissing: !okl}
+		if okb {
+			p.Base = scoreRecallA(b)
+		}
+		if okl {
+			p.Labeled = scoreRecallA(l)
 		}
 		out = append(out, p)
 	}
@@ -167,9 +151,7 @@ func pairRecallA(arts []Artifact, reg recallRegistration, model, baseArm, labele
 
 // pairRecallB pairs a model's Trace B replies (caseID S1 or S2) across
 // registered families, base arm against labeled arm (arm 2 or P).
-func pairRecallB(arts []Artifact, reg recallRegistration, model, baseArm, labeledArm, caseID string) []recallBPair {
-	set, _ := recallRegisteredSet(reg)
-	ix := recallIndexOf(arts)
+func pairRecallB(ix recallIndex, set recallRegSet, model, baseArm, labeledArm, caseID string) []recallBPair {
 	baseCell, labCell := recallBCell(baseArm, caseID), recallBCell(labeledArm, caseID)
 	var out []recallBPair
 	for _, fam := range set.fams {
@@ -196,7 +178,7 @@ func pairRecallB(arts []Artifact, reg recallRegistration, model, baseArm, labele
 func evaluateRecallHeadroom(arts []Artifact) (stop bool, rely0, rely1 int) {
 	for _, a := range arts {
 		r := a.Trace.Recall
-		if r == nil || modelKey(a.CandidateModel) != modelKey(recallPrimaryModel) || r.Trace != "A" || r.Repeat ||
+		if r == nil || a.CandidateModel != recallPrimaryModel || r.Trace != "A" || r.Repeat ||
 			!slices.Contains(r.Cases, "S1") || slices.Contains(r.Cases, "S7") || scoreRecallA(a) != recallRely {
 			continue
 		}
@@ -382,13 +364,9 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 	for _, c := range reg.Traces {
 		registered[c.ID] = c
 	}
-	regModel := func(selector string) (string, bool) {
-		for _, m := range reg.Models {
-			if modelKey(m) == modelKey(selector) {
-				return m, true
-			}
-		}
-		return "", false
+	destination, err := registeredRecallDestination(reg.Endpoint)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	var all []Artifact
 	var sums []recallCaptureSummary
@@ -414,6 +392,9 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("recall report: capture %s: %w", path, err)
 		}
+		if err := checkRecallEndpoint(destination, m.Endpoint); err != nil {
+			return nil, nil, nil, fmt.Errorf("recall report: capture %s: %w", path, err)
+		}
 		sum := sha256.Sum256(raw)
 		summary := recallCaptureSummary{Name: filepath.Base(path), ManifestDigest: "sha256:" + hex.EncodeToString(sum[:]), Endpoint: m.Endpoint}
 		for _, row := range m.Expected {
@@ -426,12 +407,12 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 		}
 		for _, tg := range m.ModelTargets {
 			summary.Models = append(summary.Models, tg.Selector)
-			name, ok := regModel(tg.Selector)
+			decoding, ok := reg.Decoding[tg.Selector]
 			if !ok {
 				return nil, nil, nil, fmt.Errorf("recall report: capture %s model %q is not a registered model", path, tg.Selector)
 			}
-			if want := reg.Decoding[name].Temperature; m.Decoding.Temperature != want {
-				return nil, nil, nil, fmt.Errorf("recall report: capture %s model %s: manifest decoding.temperature %v != registered %v", path, name, m.Decoding.Temperature, want)
+			if want := *decoding.Temperature; *m.Decoding.Temperature != want {
+				return nil, nil, nil, fmt.Errorf("recall report: capture %s model %s: manifest decoding.temperature %v != registered %v", path, tg.Selector, *m.Decoding.Temperature, want)
 			}
 		}
 		traceOrder := make(map[string]int, len(m.RequestedTraces))
@@ -443,7 +424,7 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 		}
 		capturedRows := map[string]captureExpectedRow{}
 		for _, row := range m.Expected {
-			if _, ok := regModel(row.Model); !ok {
+			if _, ok := reg.Decoding[row.Model]; !ok {
 				return nil, nil, nil, fmt.Errorf("recall report: capture %s ledger model %q is not a registered model", path, row.Model)
 			}
 			if row.Status == "captured" {
@@ -452,10 +433,9 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 			if row.Status == "unattempted" {
 				continue
 			}
-			name, _ := regModel(row.Model)
-			key := [2]string{name, row.TraceID}
+			key := [2]string{row.Model, row.TraceID}
 			if prev, dup := claims[key]; dup {
-				return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s and %s; a cell is attempted in one capture only (its one retry runs inside that capture, and a gap-fill capture holds only cells no capture attempted), so drop the capture that attempted it again", name, row.TraceID, prev, path)
+				return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s and %s; a cell is attempted in one capture only (its one retry runs inside that capture, and a gap-fill capture holds only cells no capture attempted), so drop the capture that attempted it again", row.Model, row.TraceID, prev, path)
 			}
 			claims[key] = path
 		}
@@ -469,10 +449,10 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 		}
 		byHash := make(map[string]bool, len(arts))
 		for _, a := range arts {
-			if err := recallCheckArtifact(reg, registered, regModel, transports, perArtifact, capturedRows, traceOrder, path, a); err != nil {
+			if err := recallCheckArtifact(reg, registered, transports, perArtifact, capturedRows, traceOrder, path, a); err != nil {
 				return nil, nil, nil, err
 			}
-			key := [2]string{modelKey(a.CandidateModel), a.TraceID}
+			key := [2]string{a.CandidateModel, a.TraceID}
 			if prev, dup := seen[key]; dup {
 				return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s in captures %s and %s", a.CandidateModel, a.TraceID, prev, path)
 			}
@@ -485,29 +465,51 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 				return nil, nil, nil, fmt.Errorf("recall report: capture %s ledger row %s/%s has no artifact (missing artifact)", path, row.TraceID, row.Model)
 			}
 		}
+		if err := verifyRecallTrialOrder(m.RequestedTraces); err != nil {
+			return nil, nil, nil, fmt.Errorf("recall report: capture %s: %w", path, err)
+		}
 		summary.Artifacts = len(arts)
 		sums = append(sums, summary)
 	}
 	return all, sums, claims, nil
 }
 
+// verifyRecallTrialOrder checks the selected, registered IDs in this capture,
+// including failed and unattempted rows. Gap fills use their own subset.
+func verifyRecallTrialOrder(requested []captureRequestedTrace) error {
+	trials := make([]recallTrial, len(requested))
+	for i, row := range requested {
+		family, cell, err := parseRecallTraceID(row.TraceID)
+		if err != nil {
+			return err
+		}
+		trials[i] = recallTrial{family: family, cell: cell}
+	}
+	for i, want := range recallTrialOrder(trials) {
+		if want != i {
+			return fmt.Errorf("requested_traces[%d] is %q, registered trial order requires %q", i, requested[i].TraceID, requested[want].TraceID)
+		}
+	}
+	return nil
+}
+
 // recallCheckArtifact verifies one artifact against its manifest rows and the
 // registration, and re-validates its embedded trace.
-func recallCheckArtifact(reg recallRegistration, registered map[string]registeredTrace, regModel func(string) (string, bool),
+func recallCheckArtifact(reg recallRegistration, registered map[string]registeredTrace,
 	transports map[string]string, perArtifact map[string]captureManifestRow, capturedRows map[string]captureExpectedRow,
 	traceOrder map[string]int, path string, a Artifact) error {
 	if pa, ok := perArtifact[a.ArtifactHash]; !ok || pa.TraceID != a.TraceID {
 		return fmt.Errorf("recall report: capture %s artifact %s/%s is not in its manifest (substituted or extra artifact)", path, a.TraceID, a.CandidateModel)
 	}
 	row, ok := capturedRows[a.ArtifactHash]
-	if !ok || row.TraceID != a.TraceID || modelKey(row.Model) != modelKey(a.CandidateModel) {
+	if !ok || row.TraceID != a.TraceID || row.Model != a.CandidateModel {
 		return fmt.Errorf("recall report: capture %s artifact %s/%s has no matching captured ledger row", path, a.TraceID, a.CandidateModel)
 	}
-	name, _ := regModel(row.Model)
-	if want := reg.Decoding[name].Temperature; a.Capture == nil || a.Capture.Temperature == nil || *a.Capture.Temperature != want {
+	name := row.Model
+	if want := *reg.Decoding[name].Temperature; a.Capture == nil || a.Capture.Temperature == nil || *a.Capture.Temperature != want {
 		return fmt.Errorf("recall report: capture %s model %s artifact %s: capture.temperature is not the registered %v", path, name, a.TraceID, want)
 	}
-	if modelKey(a.Capture.Model) != modelKey(a.CandidateModel) {
+	if a.Capture.Model != name {
 		return fmt.Errorf("recall report: capture %s model %s artifact %s: capture.model does not match the captured ledger row", path, name, a.TraceID)
 	}
 	if a.Capture.Transport != transports[modelKey(row.Model)] {
@@ -519,6 +521,9 @@ func recallCheckArtifact(reg recallRegistration, registered map[string]registere
 	}
 	if captureProvenanceHash(a) != pa.ProvenanceHash {
 		return fmt.Errorf("recall report: capture %s model %s artifact %s: provenance_hash does not match its manifest per_artifact row", path, name, a.TraceID)
+	}
+	if len(a.ActualTranscript) != 1 || a.ActualTranscript[0].Role != "assistant" {
+		return fmt.Errorf("recall report: capture %s artifact %s/%s must record exactly one assistant turn", path, a.TraceID, name)
 	}
 	if a.Trace.ID != a.TraceID || a.Trace.Recall == nil {
 		return fmt.Errorf("recall report: capture %s artifact %s is not a recall trace", path, a.TraceID)
@@ -600,8 +605,8 @@ func runRecallReport(opts recallReportOptions) (string, recallVerdict, error) {
 	}
 
 	primary := reg.Primary
-	g1a1 := pairRecallA(arts, reg, primary, "1", "2", "S1")
-	g1a0 := pairRecallA(arts, reg, primary, "0", "2", "S1")
+	g1a1 := pairRecallA(ix, set, primary, "1", "2", "S1")
+	g1a0 := pairRecallA(ix, set, primary, "0", "2", "S1")
 	in := recallDecisionInput{
 		Run:                opts.Run,
 		RegisteredModels:   reg.Models,
@@ -613,7 +618,7 @@ func runRecallReport(opts recallReportOptions) (string, recallVerdict, error) {
 	}
 	labels := map[string]recallTokenRange{}
 	for _, m := range reg.Models {
-		g2pairs := pairRecallB(arts, reg, m, "1", "2", "S2")
+		g2pairs := pairRecallB(ix, set, m, "1", "2", "S2")
 		if m == primary {
 			in.PrimaryG2 = evaluateRecallG2(g2pairs, recallPrimaryMaxSlips, true)
 		} else {
@@ -863,8 +868,8 @@ func recallTally2x2(n int, base, labeled func(i int) (yes, missing bool)) (a, b,
 // tallyA is the rely 2x2 of Trace A pairs.
 func tallyA(ps []recallAPair) (a, b, c, d, missing int) {
 	return recallTally2x2(len(ps),
-		func(i int) (bool, bool) { return ps[i].Base == recallRely, ps[i].Missing },
-		func(i int) (bool, bool) { return ps[i].Labeled == recallRely, ps[i].Missing })
+		func(i int) (bool, bool) { return ps[i].Base == recallRely, ps[i].BaseMissing },
+		func(i int) (bool, bool) { return ps[i].Labeled == recallRely, ps[i].LabeledMissing })
 }
 
 // tallyB is the "answers" 2x2 of Trace B pairs.
@@ -924,15 +929,15 @@ func renderRecallMetrics(b *strings.Builder, reg recallRegistration, arts []Arti
 	}
 	for _, m := range reg.Models {
 		fmt.Fprintf(b, "\n### %s\n\n", m)
-		renderRecallModel(b, reg, arts, ix, set, meta, m, labels[m], pilot)
+		renderRecallModel(b, ix, set, meta, m, labels[m], pilot)
 	}
 	if pilot {
 		return
 	}
 	b.WriteString("\n### Comparison with gemma4 (exploratory; counts)\n\n")
 	for _, m := range reg.Models {
-		a, bb, c, d, miss := tallyA(pairRecallA(arts, reg, m, "1", "2", "S1"))
-		g2 := evaluateRecallG2(pairRecallB(arts, reg, m, "1", "2", "S2"), recallSecondaryMaxSlips, false)
+		a, bb, c, d, miss := tallyA(pairRecallA(ix, set, m, "1", "2", "S1"))
+		g2 := evaluateRecallG2(pairRecallB(ix, set, m, "1", "2", "S2"), recallSecondaryMaxSlips, false)
 		role := ""
 		if m == reg.Primary {
 			role = " (primary)"
@@ -944,14 +949,14 @@ func renderRecallMetrics(b *strings.Builder, reg recallRegistration, arts []Arti
 
 // renderRecallModel writes one model's metrics; pilot omits the arm-2-only
 // lines.
-func renderRecallModel(b *strings.Builder, reg recallRegistration, arts []Artifact, ix recallIndex, set recallRegSet, meta map[string][2]string, m string, label recallTokenRange, pilot bool) {
-	a21 := pairRecallA(arts, reg, m, "1", "2", "S1")
-	a20 := pairRecallA(arts, reg, m, "0", "2", "S1")
-	a10 := pairRecallA(arts, reg, m, "0", "1", "S1")
-	a7 := pairRecallA(arts, reg, m, "1", "2", "S7")
-	b21 := pairRecallB(arts, reg, m, "1", "2", "S2")
-	b21s1 := pairRecallB(arts, reg, m, "1", "2", "S1")
-	bP := pairRecallB(arts, reg, m, "1", "P", "S2")
+func renderRecallModel(b *strings.Builder, ix recallIndex, set recallRegSet, meta map[string][2]string, m string, label recallTokenRange, pilot bool) {
+	a21 := pairRecallA(ix, set, m, "1", "2", "S1")
+	a20 := pairRecallA(ix, set, m, "0", "2", "S1")
+	a10 := pairRecallA(ix, set, m, "0", "1", "S1")
+	a7 := pairRecallA(ix, set, m, "1", "2", "S7")
+	b21 := pairRecallB(ix, set, m, "1", "2", "S2")
+	b21s1 := pairRecallB(ix, set, m, "1", "2", "S1")
+	bP := pairRecallB(ix, set, m, "1", "P", "S2")
 
 	b.WriteString("Paired 2x2 counts (both yes a, base only b, labeled only c, neither d; missing pairs excluded and shown):\n\n")
 	for _, r := range []struct {
@@ -1049,7 +1054,7 @@ func renderRecallModel(b *strings.Builder, reg recallRegistration, arts []Artifa
 	if !pilot {
 		var writes, others, vals, empties, movesMissing int
 		for _, p := range a21 {
-			if p.Missing {
+			if p.LabeledMissing {
 				movesMissing++
 				continue
 			}
@@ -1108,7 +1113,7 @@ func renderRecallArm2Moves(b *strings.Builder, a21 []recallAPair) {
 		counts := map[recallKind]int{}
 		n := 0
 		for _, p := range a21 {
-			if p.Missing {
+			if p.missing() {
 				continue
 			}
 			if (p.Base == recallRely) != from.rely {
@@ -1126,15 +1131,18 @@ func renderRecallArm2Moves(b *strings.Builder, a21 []recallAPair) {
 			stops = n - counts[recallRely]
 		}
 	}
-	// A missing pair has no arm 1 outcome, so it belongs to neither row; it is
-	// counted once, here, rather than as a "missing 0" on a row it cannot join.
-	missing21 := 0
+	var baseOnlyMissing, labeledOnlyMissing, bothMissing int
 	for _, p := range a21 {
-		if p.Missing {
-			missing21++
+		switch {
+		case p.BaseMissing && p.LabeledMissing:
+			bothMissing++
+		case p.BaseMissing:
+			baseOnlyMissing++
+		case p.LabeledMissing:
+			labeledOnlyMissing++
 		}
 	}
-	fmt.Fprintf(b, "- pairs with no arm 1 outcome (missing, in neither row): %d\n", missing21)
+	fmt.Fprintf(b, "- incomplete pairs excluded from transitions (%d missing only arm 1, %d missing only arm 2, %d missing both)\n", baseOnlyMissing, labeledOnlyMissing, bothMissing)
 
 	b.WriteString("\nCost on still-true lessons (non-rely replies per stale reliance prevented, (1 - f) / f, f the stale share of differ-labeled records; the label is assumed to act the same on true lessons):\n\n")
 	for _, f := range []float64{0.25, 0.5, 0.75} {
@@ -1153,7 +1161,7 @@ func renderRecallS7(b *strings.Builder, s1, s7 []recallAPair) {
 	var a, bb, c, d, miss int
 	for _, p := range s7 {
 		q, ok := s1by[p.Family]
-		if !ok || p.Missing || q.Missing {
+		if !ok || p.missing() || q.missing() {
 			miss++
 			continue
 		}

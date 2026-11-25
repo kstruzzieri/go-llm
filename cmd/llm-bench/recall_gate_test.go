@@ -108,7 +108,7 @@ func TestEvaluateRecallG1(t *testing.T) {
 		{"memory write neither", build(8, 0, recallAPair{Base: recallRely, Labeled: recallMemoryWrite}), 8, 0, 1, true},
 		{"empty neither", build(8, 0, recallAPair{Base: recallRely, Labeled: recallEmpty}), 8, 0, 1, true},
 		{"second search and no value are b", []recallAPair{{Base: recallRely, Labeled: recallSecondSearch}, {Base: recallRely, Labeled: recallNoValue}}, 2, 0, 0, false},
-		{"missing is c not b", build(8, 0, recallAPair{Base: recallRely, Labeled: recallRecheck, Missing: true}), 8, 1, 0, false},
+		{"missing is c not b", build(8, 0, recallAPair{Base: recallRely, Labeled: recallRecheck, LabeledMissing: true}), 8, 1, 0, false},
 	}
 	for _, tc := range tests {
 		got := evaluateRecallG1("x", tc.pairs)
@@ -216,7 +216,7 @@ func TestDecideRecallRun(t *testing.T) {
 		{"missing captures count against the label", func(in *recallDecisionInput) {
 			var pairs []recallAPair
 			for i, family := range in.RegisteredFamilies {
-				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck, Missing: i >= 8})
+				pairs = append(pairs, recallAPair{Family: family, Base: recallRely, Labeled: recallRecheck, LabeledMissing: i >= 8})
 			}
 			in.G1[0] = evaluateRecallG1(recallCompareArm1, pairs)
 		}, recallFail},

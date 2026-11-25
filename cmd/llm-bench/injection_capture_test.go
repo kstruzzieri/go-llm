@@ -332,8 +332,8 @@ func TestInjectionCaptureRecordsRegisteredTemperature(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if m.Decoding.Temperature != tc.temp {
-				t.Fatalf("manifest decoding.temperature = %v, want %v", m.Decoding.Temperature, tc.temp)
+			if *m.Decoding.Temperature != tc.temp {
+				t.Fatalf("manifest decoding.temperature = %v, want %v", *m.Decoding.Temperature, tc.temp)
 			}
 		})
 	}
@@ -499,7 +499,7 @@ func TestRegistrationBindCaptureFailsClosed(t *testing.T) {
 	tr := validInjectionTrace()
 	reg := injectionRegistration{
 		Census:   []registeredTrace{{ID: tr.ID, SHA256: canonicalTraceHash(tr), Population: "corpus"}},
-		Decoding: map[string]registeredDecoding{"openai-compat/a": {NumPredict: 128, ThinkMode: "none"}},
+		Decoding: map[string]registeredDecoding{"openai-compat/a": {Temperature: new(0.0), NumPredict: 128, ThinkMode: "none"}},
 	}
 	targets := []ModelTarget{{Display: "openai-compat/a"}}
 	dec, err := reg.bindCapture([]Trace{tr}, targets)

@@ -347,8 +347,8 @@ type captureServerProbe struct {
 // captureDecoding pins the registered decoding controls. SeedSupported is
 // false today on both transports (see CaptureProvenance.Seed).
 type captureDecoding struct {
-	Temperature   float64 `json:"temperature"`
-	SeedSupported bool    `json:"seed_supported"`
+	Temperature   *float64 `json:"temperature"`
+	SeedSupported bool     `json:"seed_supported"`
 }
 
 // captureManifestRow is one written artifact's manifest entry. UsagePresent
@@ -548,8 +548,11 @@ func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArt
 	if m.CounterbalanceScheme != captureCounterbalanceScheme {
 		return fmt.Errorf("capture-manifest v2 counterbalance_scheme mismatch")
 	}
-	if m.Decoding.Temperature != assemblyCaptureTemperature {
-		return fmt.Errorf("capture-manifest v2 temperature %v does not match the registered %v", m.Decoding.Temperature, assemblyCaptureTemperature)
+	if m.Decoding.Temperature == nil {
+		return errors.New("capture-manifest v2 decoding.temperature is required")
+	}
+	if *m.Decoding.Temperature != assemblyCaptureTemperature {
+		return fmt.Errorf("capture-manifest v2 temperature %v does not match the registered %v", *m.Decoding.Temperature, assemblyCaptureTemperature)
 	}
 	if m.Decoding.SeedSupported {
 		return fmt.Errorf("capture-manifest v2 seed support is not registered")
@@ -717,7 +720,7 @@ func validateV2CaptureProvenance(arts []Artifact, m captureManifest, expectedArt
 		if capture.ModelDigest != control.digest {
 			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q model_digest mismatch", hash)
 		}
-		if capture.Temperature == nil || *capture.Temperature != m.Decoding.Temperature {
+		if capture.Temperature == nil || *capture.Temperature != *m.Decoding.Temperature {
 			return fmt.Errorf("capture-manifest v2 artifact binding: artifact hash %q temperature mismatch", hash)
 		}
 		if capture.Seed != nil {
@@ -907,6 +910,9 @@ func decodeCaptureManifestV3(path string, raw []byte) (captureManifest, error) {
 	}
 	if m.SchemaVersion != captureManifestSchemaVersionV3 {
 		return captureManifest{}, fmt.Errorf("capture-manifest: %q schema_version %q (want %q)", path, m.SchemaVersion, captureManifestSchemaVersionV3)
+	}
+	if m.Decoding.Temperature == nil {
+		return captureManifest{}, fmt.Errorf("capture-manifest: %q: decoding.temperature is required", path)
 	}
 	if err := validateCaptureLedgerV3(m); err != nil {
 		return captureManifest{}, fmt.Errorf("capture-manifest: %q: %w", path, err)
@@ -1424,7 +1430,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 			Transport:            transport,
 			ModelTargets:         targets,
 			ServerProbe:          captureServerProbe{OllamaDigests: modelDigests},
-			Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature, SeedSupported: false},
+			Decoding:             captureDecoding{Temperature: new(assemblyCaptureTemperature), SeedSupported: false},
 			CounterbalanceScheme: captureCounterbalanceScheme,
 			ArtifactCount:        len(manifestRows),
 			PerArtifact:          manifestRows,
@@ -1435,7 +1441,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 		if frozenWireCapture {
 			manifest.SchemaVersion = captureManifestSchemaVersionV3
 			manifest.RegistrationDigest = opts.RegistrationDigest
-			manifest.Decoding = captureDecoding{Temperature: captureTemp}
+			manifest.Decoding = captureDecoding{Temperature: &captureTemp}
 			if anyRecallTrace(opts.Traces) {
 				manifest.CounterbalanceScheme = recallCaptureCounterbalanceScheme
 			}

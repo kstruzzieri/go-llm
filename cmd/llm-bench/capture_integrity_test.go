@@ -116,8 +116,9 @@ func TestAssemblyReportV2RejectsCaptureProvenanceTampering(t *testing.T) {
 			m.Endpoint = "https://compat.test/v1 https://other.test/v1"
 		}},
 		{"target", "model_targets", func(_ []Artifact, m *captureManifest) { m.ModelTargets[0].Selector = "ollama/m" }},
+		{"absent decoding temperature", "decoding.temperature", func(_ []Artifact, m *captureManifest) { m.Decoding.Temperature = nil }},
 		{"registered decoding", "temperature", func(arts []Artifact, m *captureManifest) {
-			m.Decoding.Temperature = 0.5
+			m.Decoding.Temperature = new(0.5)
 			for i := range arts {
 				v := 0.5
 				arts[i].Capture.Temperature = &v
@@ -457,7 +458,7 @@ func v2BindingFixture(t *testing.T) ([]Artifact, []Label, captureManifest) {
 		}),
 		CreatedAt: capturedAt, Endpoint: endpoint, Transport: openAICompatTransport,
 		ModelTargets:         []captureManifestTarget{{Selector: "openai-compat/m"}},
-		Decoding:             captureDecoding{Temperature: 0, SeedSupported: false},
+		Decoding:             captureDecoding{Temperature: new(0.0), SeedSupported: false},
 		CounterbalanceScheme: captureCounterbalanceScheme,
 		ArtifactCount:        2,
 		ExpectedCount:        2,

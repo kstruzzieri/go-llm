@@ -71,10 +71,12 @@ Rates and intervals are descriptive only and never compared with a threshold.`
 
 // recallAPair is one question's Part A outcome in a baseline and a labeled arm.
 type recallAPair struct {
-	Family        string
-	Base, Labeled recallKind
-	Missing       bool
+	Family                      string
+	Base, Labeled               recallKind
+	BaseMissing, LabeledMissing bool
 }
+
+func (p recallAPair) missing() bool { return p.BaseMissing || p.LabeledMissing }
 
 // recallBPair is one question's Part B outcome in a baseline and a labeled arm.
 type recallBPair struct {
@@ -131,7 +133,7 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 	for _, p := range pairs {
 		r.families[p.Family] = true
 		switch {
-		case p.Missing:
+		case p.missing():
 			r.C++
 			r.MissingC++
 		case p.Base == recallRely && (p.Labeled == recallRecheck || p.Labeled == recallSecondSearch || p.Labeled == recallNoValue):
