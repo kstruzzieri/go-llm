@@ -1717,9 +1717,9 @@ func strayFlags(provided map[string]bool, names ...string) []string {
 }
 
 // prepareRecallCapture loads the recall registration at path, binds it to the
-// traces, their optional input paths and the targets, installs the bound decoding on runner, and returns the
-// registration digest, the registered endpoint (runCalibrateCapture's
-// RecallEndpoint, which binds the capture's destination) and the per-target
+// traces, their optional input paths and the targets, installs the bound
+// decoding on runner, and returns the registration digest, the registered
+// endpoint (runCalibrateCapture's RecallEndpoint), and the per-target
 // temperatures the capture manifest records. main and the recall e2e both
 // call it, so the e2e exercises the glue a real capture runs.
 func prepareRecallCapture(runner *Runner, path string, traces []Trace, targets []ModelTarget, tracePaths ...string) (digest, endpoint string, temps map[string]float64, err error) {

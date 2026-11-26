@@ -38,7 +38,9 @@ func TestCalibrateCaptureRecallRegisteredFilenames(t *testing.T) {
 	}
 	for _, tc := range []struct{ name, want string }{
 		{"recall-p01-B-s1-1.json", `selects trace "recall-p01-B-s1-1" but contains "recall-p01-B-s2-1"`},
+		{"RECALL-P01-B-S1-1.JSON", `selects trace "recall-p01-B-s1-1" but contains "recall-p01-B-s2-1"`},
 		{id + ".json", "differs from the registered loopback endpoint"},
+		{strings.ToUpper(id + ".json"), "differs from the registered loopback endpoint"},
 		{"alias.json", "differs from the registered loopback endpoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

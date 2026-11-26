@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -269,18 +271,25 @@ func regenerateRecallFixtures(t *testing.T, root string, cases recallCases) (ret
 	var removals []string
 	for _, sp := range activeSplits {
 		dir := filepath.Join(root, sp.split)
-		_, statErr := os.Lstat(dir)
-		created := os.IsNotExist(statErr)
+		mkdirErr := os.Mkdir(dir, 0o755)
+		if mkdirErr != nil && !os.IsExist(mkdirErr) {
+			return fmt.Errorf("create recall split directory %q: %w", dir, mkdirErr)
+		}
+		if mkdirErr == nil {
+			defer func() {
+				if retErr == nil {
+					return
+				}
+				// Remove only an empty directory created by this run. Its
+				// lock, if acquired, is released before this cleanup.
+				if err := syscall.Rmdir(dir); err != nil && !os.IsNotExist(err) {
+					retErr = errors.Join(retErr, fmt.Errorf("clean up recall split directory %q: %w", dir, err))
+				}
+			}()
+		}
 		unlock, err := lockRecallOutputDir(dir)
 		if err != nil {
 			return err
-		}
-		if created {
-			defer func(d string) {
-				if retErr != nil {
-					_ = os.Remove(d)
-				}
-			}(dir)
 		}
 		defer unlock()
 		stale, err := recallOutputRemovals(casesPath, dir, sp.split, bySplit[sp.split])
@@ -662,6 +671,9 @@ func TestRecallFixtureRegenerationPreflightsAllSplits(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(d, "pilot")); !os.IsNotExist(err) {
 			t.Errorf("pilot dir after failed regeneration: got %v, want absent", err)
+		}
+		if _, err := os.Stat(filepath.Join(d, "confirmatory", ".recall-build.lock")); err != nil {
+			t.Errorf("existing confirmatory lock after failed regeneration: %v", err)
 		}
 	})
 }

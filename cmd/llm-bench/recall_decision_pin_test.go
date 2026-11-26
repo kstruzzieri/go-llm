@@ -31,19 +31,21 @@ var recallDecisionPath = []struct {
 		"recallRegisteredSet", "has", "recallIndexOf", "get", "recallTraceID", "unattempted",
 		"runRecallReport", "recallLabelTokens", "add", "recallHeadroomReport", "recallHeadroomPrecondition",
 		"loadRecallCaptures", "recallCheckArtifact", "verifyRecallTrialOrder"}},
-	{"recall.go", []string{"recallWorkspaceFile", "currentValue", "validateRecallTrace", "validateRecallTurns"}},
+	{"recall.go", []string{"recallNumberPattern", "recallWorkspaceFile", "currentValue", "validateRecallTrace", "validateRecallTurns"}},
 	{"recall_build.go", []string{"parseRecallTraceID", "recallCells"}},
-	{"recall_registration.go", []string{"recallCellKey", "recallBaseOrder", "recallCaptureOrder", "recallTrialOrder", "recallSplitFamilyCount"}},
+	{"recall_registration.go", []string{"recallCellKey", "recallBaseOrder", "recallCaptureCounterbalanceScheme",
+		"recallCaptureOrder", "recallTrialOrder", "recallSplitFamilyCount"}},
 	{"calibration.go", []string{"pairIDHash"}},
 	{"paired.go", []string{"modelKey"}},
-	{"scorer.go", []string{"canonicalCandidateModelKey"}},
+	{"scorer.go", []string{"canonicalCandidateModelKey", "normalizeModelSelector", "openAICompatTransport"}},
+	{"target.go", []string{"defaultBenchProvider", "supportedCandidateProvider"}},
+	{"injection.go", []string{"validateToolEndingTurns"}},
 	{"injection_outcome.go", []string{"decodeRawArgs"}},
 }
 
-// recallDecisionSource returns the pinned code as its token stream
-// (go/scanner, comments and the semicolons a line break inserts dropped), so
-// comment and whitespace edits leave it unchanged and any code edit changes
-// it (so does adding or dropping a trailing comma, or reordering declarations).
+// recallDecisionSource returns the pinned declarations as a token stream.
+// Comments and formatting that leave the tokens and statement boundaries
+// intact do not change the digest.
 func recallDecisionSource(t *testing.T) []byte {
 	t.Helper()
 	var out bytes.Buffer
@@ -59,26 +61,9 @@ func recallDecisionSource(t *testing.T) []byte {
 		}
 		found := map[string]bool{}
 		for _, d := range file.Decls {
-			var parts [][]byte
-			if f.names == nil {
-				parts = [][]byte{src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset]}
-			} else {
-				parts = pinnedDeclParts(fset, src, d, f.names, found)
-			}
-			for _, code := range parts {
-				var s scanner.Scanner
-				s.Init(token.NewFileSet().AddFile(f.file, -1, len(code)), code, nil, 0)
+			if f.names == nil || matchRecallDeclaration(d, f.names, found) {
 				fmt.Fprintf(&out, "%s\n", f.file)
-				for {
-					_, tok, lit := s.Scan()
-					if tok == token.EOF {
-						break
-					}
-					if tok == token.SEMICOLON && lit == "\n" {
-						continue
-					}
-					fmt.Fprintf(&out, "%s %s\n", tok, lit)
-				}
+				writeRecallDecisionTokens(&out, src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset])
 			}
 		}
 		for _, n := range f.names {
@@ -90,57 +75,75 @@ func recallDecisionSource(t *testing.T) []byte {
 	return out.Bytes()
 }
 
-// pinnedDeclParts returns the source slices of d matching names and records
-// each matched identifier in found.
-func pinnedGenDeclParts(fset *token.FileSet, src []byte, gd *ast.GenDecl, names []string, found map[string]bool) [][]byte {
-	var parts [][]byte
-	for _, spec := range gd.Specs {
-		var ids []*ast.Ident
-		switch s := spec.(type) {
-		case *ast.ValueSpec:
-			ids = s.Names
-		case *ast.TypeSpec:
-			ids = []*ast.Ident{s.Name}
+// matchRecallDeclaration selects a whole declaration. A grouped const can
+// depend on the preceding specs through iota or an implicit initializer.
+func matchRecallDeclaration(d ast.Decl, names []string, found map[string]bool) bool {
+	matched := false
+	match := func(id *ast.Ident) {
+		if slices.Contains(names, id.Name) {
+			found[id.Name] = true
+			matched = true
 		}
-		matched := false
-		for _, id := range ids {
-			if slices.Contains(names, id.Name) {
-				found[id.Name] = true
-				matched = true
-			}
-		}
-		if !matched {
-			continue
-		}
-		if len(gd.Specs) == 1 {
-			parts = append(parts, src[fset.Position(gd.Pos()).Offset:fset.Position(gd.End()).Offset])
-			break
-		}
-		part := append([]byte(gd.Tok.String()+" "), src[fset.Position(spec.Pos()).Offset:fset.Position(spec.End()).Offset]...)
-		parts = append(parts, part)
 	}
-	return parts
-}
-
-func pinnedDeclParts(fset *token.FileSet, src []byte, d ast.Decl, names []string, found map[string]bool) [][]byte {
 	switch decl := d.(type) {
 	case *ast.FuncDecl:
-		if slices.Contains(names, decl.Name.Name) {
-			found[decl.Name.Name] = true
-			return [][]byte{src[fset.Position(decl.Pos()).Offset:fset.Position(decl.End()).Offset]}
-		}
+		match(decl.Name)
 	case *ast.GenDecl:
-		return pinnedGenDeclParts(fset, src, decl, names, found)
+		for _, spec := range decl.Specs {
+			switch s := spec.(type) {
+			case *ast.ValueSpec:
+				for _, id := range s.Names {
+					match(id)
+				}
+			case *ast.TypeSpec:
+				match(s.Name)
+			}
+		}
 	}
-	return nil
+	return matched
+}
+
+func writeRecallDecisionTokens(out *bytes.Buffer, code []byte) {
+	var s scanner.Scanner
+	s.Init(token.NewFileSet().AddFile("", -1, len(code)), code, nil, 0)
+	// A newline can insert a significant semicolon, e.g. between a switch
+	// initializer and its opening brace. Only omit optional terminators.
+	pendingSemicolon := false
+	for {
+		_, tok, lit := s.Scan()
+		if tok == token.EOF {
+			return
+		}
+		if pendingSemicolon && tok != token.RPAREN && tok != token.RBRACE {
+			fmt.Fprintln(out, "SEMICOLON")
+		}
+		pendingSemicolon = tok == token.SEMICOLON
+		if !pendingSemicolon {
+			fmt.Fprintf(out, "%s %s\n", tok, lit)
+		}
+	}
+}
+
+func TestRecallDecisionTokensKeepStatementBoundaries(t *testing.T) {
+	tokens := func(code string) string {
+		var out bytes.Buffer
+		writeRecallDecisionTokens(&out, []byte(code))
+		return out.String()
+	}
+	tag := tokens("func f() { switch value() { case true: g() } }")
+	formatted := tokens("func f() {\n// comment\n switch value() {\n case true: g()\n }\n}")
+	if tag != formatted {
+		t.Fatal("formatting changed the token stream")
+	}
+	implicit := tokens("func f() { switch value()\n { case true: g() } }")
+	explicit := tokens("func f() { switch value(); { case true: g() } }")
+	if implicit != explicit || tag == implicit {
+		t.Fatal("the switch initializer and switch tag must have distinct token streams")
+	}
 }
 
 func TestRecallScoringAndDecisionCodePinned(t *testing.T) {
-	src := recallDecisionSource(t)
-	if !bytes.Contains(src, []byte("IDENT recallBaseOrder\n")) {
-		t.Fatal("recallDecisionSource must include var recallBaseOrder")
-	}
-	sum := sha256.Sum256(src)
+	sum := sha256.Sum256(recallDecisionSource(t))
 	if got := hex.EncodeToString(sum[:]); !strings.HasSuffix(recallScorerRevision, "+sha256:"+got) {
 		t.Errorf("the registered scorer_revision %q must include the current source digest %s: before the confirmatory freeze, update recallDecisionSourceSHA256, update recallDecisionRuleText if the rule changed, and regenerate with %s; after the freeze, revert the change instead",
 			recallScorerRevision, got, recallFixtureRegenCommand)

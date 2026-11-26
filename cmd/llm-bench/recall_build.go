@@ -970,6 +970,9 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 			files = append(files, filePublication{target: filepath.Join(outDir, t.ID+".json"), data: append(data, '\n'), mode: 0o644})
 		}
 	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", recallErr("%w", err)
+	}
 	unlock, err := lockRecallOutputDir(outDir)
 	if err != nil {
 		return "", err
@@ -989,11 +992,9 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 	return digest, nil
 }
 
-// lockRecallOutputDir serializes the ownership check and publication to outDir.
+// lockRecallOutputDir serializes the ownership check and publication to an
+// existing output directory.
 func lockRecallOutputDir(outDir string) (func(), error) {
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return nil, recallErr("%w", err)
-	}
 	lock := filepath.Join(outDir, ".recall-build.lock")
 	if err := os.Mkdir(lock, 0o700); err != nil {
 		if os.IsExist(err) {

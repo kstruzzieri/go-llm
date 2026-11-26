@@ -24,7 +24,7 @@ const recallRegistrationSchema = "recall-label-registration/v1"
 // recallDecisionSourceSHA256 identifies the scoring, ordering and decision
 // code in recallScorerRevision. TestRecallScoringAndDecisionCodePinned
 // recomputes it from source. Keep this constant outside the hashed declarations.
-const recallDecisionSourceSHA256 = "6aae8b1ea58594f98f9b479e1aaf174cf3193c0026d6e37c789fdf7d14d5c903"
+const recallDecisionSourceSHA256 = "0a9e9f4c286c8269dbd75f892d432f9b913699d5d96ad5d5532199ddb380ae12"
 
 // recallFixtureRegenCommand regenerates the committed recall fixture's traces
 // and registrations (TestRecallRegistrationsLoad); errors that a stale
@@ -215,21 +215,36 @@ func (r recallRegistration) validateTraceInventory() error {
 // registered split, registered with its canonicalTraceHash, and every target
 // has a registered decoding. Like the injection bindCapture it accepts a subset
 // of the registered traces (a gap-fill capture) and a subset of the models.
-// When paths are supplied, a filename naming a registered cell must contain
-// that cell. Other filenames are aliases. It returns the Runner.InjectionDecoding
-// map keyed by selector.
+// When paths are supplied, a .json filename naming a registered cell must contain
+// that cell. Exact names take precedence over case variants. Other filenames
+// are aliases. It returns the Runner.InjectionDecoding map keyed by selector.
 func (r recallRegistration) bindCapture(traces []Trace, targets []ModelTarget, paths ...string) (map[string]injectionDecoding, error) {
 	if len(paths) != 0 && len(paths) != len(traces) {
 		return nil, fmt.Errorf("recall registration: got %d input paths for %d traces", len(paths), len(traces))
 	}
 	reg := make(map[string]string, len(r.Traces))
+	foldedNames := make(map[string][]string, len(r.Traces))
 	for _, c := range r.Traces {
 		reg[c.ID] = strings.TrimPrefix(c.SHA256, "sha256:")
+		folded := strings.ToLower(c.ID + ".json")
+		foldedNames[folded] = append(foldedNames[folded], c.ID)
 	}
 	for i, t := range traces {
 		if len(paths) > 0 {
-			named, jsonFile := strings.CutSuffix(filepath.Base(paths[i]), ".json")
-			if _, registered := reg[named]; jsonFile && registered && named != t.ID {
+			base := filepath.Base(paths[i])
+			named, jsonFile := strings.CutSuffix(base, ".json")
+			if _, registered := reg[named]; !jsonFile || !registered {
+				matches := foldedNames[strings.ToLower(base)]
+				switch len(matches) {
+				case 0:
+					named = ""
+				case 1:
+					named = matches[0]
+				default:
+					return nil, fmt.Errorf("recall registration: filename %q matches multiple registered traces; use the exact registered filename", paths[i])
+				}
+			}
+			if named != "" && named != t.ID {
 				return nil, fmt.Errorf("recall registration: filename %q selects trace %q but contains %q", paths[i], named, t.ID)
 			}
 		}
