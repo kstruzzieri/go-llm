@@ -367,7 +367,7 @@ func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opt
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("injection build: %w", err)
 	}
-	stale, err := filepath.Glob(filepath.Join(outDir, "inj-*.json"))
+	stale, err := filesWithPrefix(outDir, "inj-")
 	if err != nil {
 		return err
 	}

@@ -71,6 +71,78 @@ func TestNormalizeFenceKeysRejectsDisagreeingKeys(t *testing.T) {
 	}
 }
 
+// #875: each builder prunes only its own out dir. Glob metacharacters in the
+// path are not a pattern: "out[1]" would match a sibling "out1", whose
+// look-alike trace must survive (and, for forged-close, not be refused).
+func TestBuildersPruneOnlyTheirOutDir(t *testing.T) {
+	root := corpusRepoRoot(t)
+	for _, tc := range []struct {
+		name, prefix string
+		build        func(ctx context.Context, out string) error
+	}{
+		{"injection", "inj-", func(ctx context.Context, out string) error {
+			return buildInjectionCorpus(ctx, filepath.FromSlash("testdata/injection/one-base.json"), out)
+		}},
+		{"benign", "ben-", func(ctx context.Context, out string) error {
+			return buildBenignCorpus(ctx, filepath.Join(benignFixtureDir, "cases.json"), out)
+		}},
+		{"forged-close", "inj-", func(ctx context.Context, out string) error {
+			return buildInjectionCorpusBySource(ctx, filepath.Join(root, forgedCloseCorpusDir, "cases.json"), out)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			out, sibling := filepath.Join(parent, "out[1]"), filepath.Join(parent, "out1")
+			stale, victim := filepath.Join(out, tc.prefix+"stale.json"), filepath.Join(sibling, tc.prefix+"victim.json")
+			for _, f := range []string{stale, victim} {
+				if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(f, []byte(`{"source":"`+forgedCloseSource+`"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tc.build(t.Context(), out); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(stale); !os.IsNotExist(err) {
+				t.Errorf("stale trace in the out dir survived: %v", err)
+			}
+			if _, err := os.Stat(victim); err != nil {
+				t.Errorf("the build removed a file in sibling %s: %v", sibling, err)
+			}
+		})
+	}
+}
+
+// #875: filesWithPrefix lists a missing dir as empty (as filepath.Glob did),
+// and lists the dir filepath.Join writes into: for "link/../out" that is the
+// lexical "out", not the "out" beside link's target.
+func TestFilesWithPrefixListsTheWrittenDir(t *testing.T) {
+	parent := t.TempDir()
+	if got, err := filesWithPrefix(filepath.Join(parent, "missing"), "inj-"); err != nil || got != nil {
+		t.Fatalf("missing dir = %v, %v; want nil, nil", got, err)
+	}
+	for _, d := range []string{"out", filepath.Join("real", "sub"), filepath.Join("real", "out")} {
+		if err := os.MkdirAll(filepath.Join(parent, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join("out", "inj-lexical.json"), filepath.Join("real", "out", "inj-physical.json")} {
+		if err := os.WriteFile(filepath.Join(parent, f), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(parent, "real", "sub"), filepath.Join(parent, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	dir := filepath.Join(parent, "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out"
+	got, err := filesWithPrefix(dir, "inj-")
+	if want := filepath.Join(parent, "out", "inj-lexical.json"); err != nil || len(got) != 1 || got[0] != want {
+		t.Fatalf("filesWithPrefix(%q) = %v, %v; want [%s]", dir, got, err, want)
+	}
+}
+
 func TestBuildInjectionCorpusOneBase(t *testing.T) {
 	out := t.TempDir()
 	for _, n := range []string{"inj-old.json", "other.json"} {

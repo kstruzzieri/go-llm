@@ -1045,7 +1045,7 @@ func buildBenignCorpus(ctx context.Context, casesPath, outDir string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("benign build: %w", err)
 	}
-	stale, err := filepath.Glob(filepath.Join(outDir, "ben-*.json"))
+	stale, err := filesWithPrefix(outDir, "ben-")
 	if err != nil {
 		return err
 	}

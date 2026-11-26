@@ -341,7 +341,7 @@ func (p registeredPower) checkSecondary(cases benignCases, locals []string, delt
 // checkTraces holds the committed traces in dir/traces to r.Traces: each file
 // registered exactly once with its canonicalTraceHash and its benign stratum.
 func (r interceptorRegistration) checkTraces(dir string) error {
-	files, err := filepath.Glob(filepath.Join(dir, "traces", "*.json"))
+	files, err := filesWithPrefix(filepath.Join(dir, "traces"), "")
 	if err != nil {
 		return err
 	}

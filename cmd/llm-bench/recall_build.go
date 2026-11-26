@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1113,8 +1114,15 @@ func recallCasesDigest(c recallCases, split string) (string, error) {
 
 // filesWithPrefix lists the entries of dir named prefix*.json, as full paths.
 // It matches on the base name, so glob characters in dir are never a pattern.
+// Like filepath.Glob it lists a missing dir as empty, and it reads the
+// lexically cleaned dir, the one filepath.Join(dir, name) writes into ("a/link/../out"
+// is "a/out", not the directory beside link's target).
 func filesWithPrefix(dir, prefix string) ([]string, error) {
+	dir = filepath.Clean(dir)
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

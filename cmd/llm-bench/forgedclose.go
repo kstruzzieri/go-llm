@@ -105,7 +105,7 @@ func buildForgedCloseCorpus(ctx context.Context, cases injectionCases, outDir st
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("forged-close build: %w", err)
 	}
-	existing, err := filepath.Glob(filepath.Join(outDir, "inj-*.json"))
+	existing, err := filesWithPrefix(outDir, "inj-")
 	if err != nil {
 		return fmt.Errorf("forged-close build: %w", err)
 	}
