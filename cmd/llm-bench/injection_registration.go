@@ -190,6 +190,15 @@ func (r injectionRegistration) validate() error {
 	if !slices.Contains(r.Models, r.Baseline) {
 		return fmt.Errorf("baseline %q is not in models", r.Baseline)
 	}
+	// With models distinct, the count check and the per-model lookup below
+	// also refuse a decoding entry for a model not in models.
+	seenModel := make(map[string]struct{}, len(r.Models))
+	for _, m := range r.Models {
+		if _, dup := seenModel[m]; dup {
+			return fmt.Errorf("model %q is listed twice", m)
+		}
+		seenModel[m] = struct{}{}
+	}
 	if len(r.Decoding) != len(r.Models) {
 		return fmt.Errorf("decoding has %d entries for %d models (one per model)", len(r.Decoding), len(r.Models))
 	}
