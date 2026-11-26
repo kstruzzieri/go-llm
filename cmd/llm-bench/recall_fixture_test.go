@@ -226,7 +226,7 @@ func recallFixtureActive(cases recallCases, split, regPath string, update bool) 
 // regenerateRecallFixtures builds every active split in scratch space. Only
 // after all authoring checks and builds pass can the registrations, traces
 // and removals be published together under the corpus builder's locks.
-func regenerateRecallFixtures(t *testing.T, root string, cases recallCases) error {
+func regenerateRecallFixtures(t *testing.T, root string, cases recallCases) (retErr error) {
 	t.Helper()
 	casesPath := filepath.Join(root, "cases.json")
 	var activeSplits []recallFixtureSplit
@@ -269,9 +269,18 @@ func regenerateRecallFixtures(t *testing.T, root string, cases recallCases) erro
 	var removals []string
 	for _, sp := range activeSplits {
 		dir := filepath.Join(root, sp.split)
+		_, statErr := os.Lstat(dir)
+		created := os.IsNotExist(statErr)
 		unlock, err := lockRecallOutputDir(dir)
 		if err != nil {
 			return err
+		}
+		if created {
+			defer func(d string) {
+				if retErr != nil {
+					_ = os.Remove(d)
+				}
+			}(dir)
 		}
 		defer unlock()
 		stale, err := recallOutputRemovals(casesPath, dir, sp.split, bySplit[sp.split])
@@ -631,6 +640,30 @@ func TestRecallFixtureRegenerationPreflightsAllSplits(t *testing.T) {
 			t.Errorf("%s after failed regeneration: got %v, want absent", name, err)
 		}
 	}
+
+	// A lock failure on a second active split must remove any newly created
+	// directory for the first split rather than leaving an empty directory behind.
+	t.Run("removes newly created split dir on later lock failure", func(t *testing.T) {
+		full := recallAuthoringConfirmatory(t, cases)
+		full.Families = append(slices.DeleteFunc(slices.Clone(cases.Families), func(f recallFamily) bool { return f.Split != "pilot" }), full.Families...)
+		fullRaw, err := json.Marshal(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "cases.json"), fullRaw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(d, "confirmatory", ".recall-build.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := regenerateRecallFixtures(t, d, full); err == nil || !strings.Contains(err.Error(), ".recall-build.lock") {
+			t.Fatalf("regenerate with locked confirmatory dir: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(d, "pilot")); !os.IsNotExist(err) {
+			t.Errorf("pilot dir after failed regeneration: got %v, want absent", err)
+		}
+	})
 }
 
 // The seeded records' day numbers lie outside 2..20, so a reply quoting a

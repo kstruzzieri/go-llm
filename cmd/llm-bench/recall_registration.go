@@ -24,7 +24,7 @@ const recallRegistrationSchema = "recall-label-registration/v1"
 // recallDecisionSourceSHA256 identifies the scoring, ordering and decision
 // code in recallScorerRevision. TestRecallScoringAndDecisionCodePinned
 // recomputes it from source. Keep this constant outside the hashed declarations.
-const recallDecisionSourceSHA256 = "f92949741b1ae69facae78430f4d500148415aea65722a58e33780742a60e5bd"
+const recallDecisionSourceSHA256 = "6aae8b1ea58594f98f9b479e1aaf174cf3193c0026d6e37c789fdf7d14d5c903"
 
 // recallFixtureRegenCommand regenerates the committed recall fixture's traces
 // and registrations (TestRecallRegistrationsLoad); errors that a stale
