@@ -1,0 +1,286 @@
+{
+  "schema": "recall-label-registration/v1",
+  "split": "pilot",
+  "cases_sha256": "sha256:98d6d639e28d3be2d84c1c658c8031938210d67690fb76d2790939a0df646bbc",
+  "scorer_revision": "recall-scorer/v1",
+  "rule_text": "recall label decision rule (registered):\nG1 (benefit): on gemma4:31b the labeled arm must beat arm 1 AND arm 0, each decided separately. For each comparison, B is every family where the comparison arm repeated the stale lesson and the labeled arm instead re-checked, searched again, or gave no value; C is every family where the comparison arm did not repeat the stale lesson and the labeled arm did, plus every missing pair; every pair in neither B nor C (for example a memory write, another tool call, another value, or an empty reply) counts for neither side. Pass needs B minus C of at least 8, and an exact one-sided sign test on the B + C discordant pairs with p \u003c 0.025.\nG2' (safety): a slip is a question the baseline answered and the labeled reply declined or got wrong; a missing pair counts as a slip and is not counted among arm 1's answers. 2 or more slips on gemma4:31b fails whatever its baseline; with at most 1 slip, the result is inconclusive when its arm 1 answers fewer than 36 of 40. Each other local model blocks on 3 or more slips.\nG5: the label costs at most 10 prompt tokens per labeled record, on each model.\nDeterminism: 2 or more changed outcomes among any one model's 40 repeats makes the run invalid; one rerun after a recorded serving fix decides, and a second invalid result is final.\nStopped: the run stops before the confirmatory capture if gemma4:31b's arm 0 or arm 1 relies on the stale lesson in at most 2 of the 12 pilot S1 families. The stop is checked only on a pilot registration of exactly 12 families, and only when every registered gemma4:31b arm 0 and arm 1 Trace A reply has an artifact; a missing reply is a harness error, never a stop. A reply no capture given attempted needs the capture file that holds it or a gap-fill capture of it; a failed reply needs the owner's decision on a recapture.\nFor a run that was not stopped, the report requires all 4 registered models and all 40 registered families. It rejects a missing or repeated comparison, an omitted or repeated family in G1 or G2, the primary model listed as another model, a missing repeat or label measurement, or a run number other than 1 or 2. Incomplete input is a harness error and never a gate outcome. Fix the report and re-run it on the same captures.\nThat remedy is for a fault in the report. The gate requires every registered model and trace (a cell) to be attempted (captured or failed) by exactly one capture given. A cell no capture given attempted is refused there: pass the capture file that holds it, or run one or more gap-fill captures of only the unattempted cells; the pilot view of a pilot registration reports unattempted cells instead of refusing them. In every mode a cell attempted in two captures given is refused, failed or not and whatever its attempt count: a gap-fill capture holds only cells no capture attempted, and a recapture of attempted cells is the owner's decision. A failed G1 pair, or a G2' pair whose arm 2 reply failed, is a missing pair, counted as above. Determinism compares each family's arm 1 S2 Trace B reply with its repeat; a failed arm 1 S2 Trace B reply is also a determinism original, so it refuses the run as a missing repeat instead of counting as a slip. A family's label measurement is its largest arm 2 minus arm 1 prompt-token difference over its Trace A, S1 Trace B and S2 Trace B pairs; a failed pair is skipped while another remains. Each of these is refused: a label pair with no prompt-token count, a label that adds fewer than 1 token, and label sizes that differ by more than 1 token across one model's pairs (likely prompt caching). A failed determinism original or repeat, a family with no measurable label pair, and these label-size refusals cannot be cured by re-running the report: each needs the owner's decision on a recapture. Before scoring, the report also refuses a registration whose rule text or scorer revision differs from its own (run the report build it was registered with), and a capture that does not verify against the registration: another registration digest or counterbalance scheme, a model or trace that is not registered, a temperature other than the registered temperature (the rest of the registered decoding is applied at capture and not recorded, so the report cannot check it), a trace whose hash or split differs from the registration's or that fails the recall trace checks, or artifacts that do not match the capture's manifest and ledger. Pass the unaltered capture files made under this registration; a capture that still does not verify needs the owner's decision on a recapture.\nOrder: stopped, then invalid (invalid-final on run 2), then fail (any gate failing), then inconclusive, then pass. Only pass leads to Stage 1; fail, inconclusive, stopped and a second invalid are final.\nRates and intervals are descriptive only and never compared with a threshold.",
+  "primary": "openai-compat/gemma4:31b",
+  "models": [
+    "openai-compat/gemma4:31b",
+    "openai-compat/qwen3-coder-next:latest",
+    "openai-compat/qwen3.6:35b-a3b",
+    "openai-compat/qwen3.8:27b"
+  ],
+  "decoding": {
+    "openai-compat/gemma4:31b": {
+      "temperature": 0,
+      "num_predict": 4096,
+      "think": false,
+      "think_mode": "toggle",
+      "serving_stack": "llama.cpp via llama-swap 127.0.0.1:8090"
+    },
+    "openai-compat/qwen3-coder-next:latest": {
+      "temperature": 0,
+      "num_predict": 4096,
+      "think": false,
+      "think_mode": "toggle",
+      "serving_stack": "llama.cpp via llama-swap 127.0.0.1:8090"
+    },
+    "openai-compat/qwen3.6:35b-a3b": {
+      "temperature": 0,
+      "num_predict": 4096,
+      "think": false,
+      "think_mode": "toggle",
+      "serving_stack": "llama.cpp via llama-swap 127.0.0.1:8090"
+    },
+    "openai-compat/qwen3.8:27b": {
+      "temperature": 0,
+      "num_predict": 4096,
+      "think": false,
+      "think_mode": "toggle",
+      "serving_stack": "llama.cpp via llama-swap 127.0.0.1:8090"
+    }
+  },
+  "traces": [
+    {
+      "id": "recall-p01-A-0",
+      "sha256": "02cecd3abb303e6a158040a0a455ce00710443e10b329e2cf8d82b4da3188011"
+    },
+    {
+      "id": "recall-p01-A-1",
+      "sha256": "e4121d930aea7b61afb2b678ce60423e1cc46db65066bcca7ceee5965ad7ab97"
+    },
+    {
+      "id": "recall-p01-B-s1-1",
+      "sha256": "b2859d007e92974b084d43937367c340b73f37cfcbb16b162b58640fc6fe52e6"
+    },
+    {
+      "id": "recall-p01-B-s2-1",
+      "sha256": "64c26749599a8c94ea8b0b92dcd4381ffde48a2f434a347baf525e7f69611156"
+    },
+    {
+      "id": "recall-p01-B-s2-P",
+      "sha256": "0937e5d72fb46c18dc1dfad29f076ad3f7324f008efde86eef324fef032331fe"
+    },
+    {
+      "id": "recall-p02-A-0",
+      "sha256": "b5fa7a745435ba1418d02d3ce5db456224ec41c663aa75fb68e4bb9dd7a42fab"
+    },
+    {
+      "id": "recall-p02-A-1",
+      "sha256": "65218049dc3d366af78fbe0a7e8361f3cd1db2d51e95f86d72a580f1fdc3aafd"
+    },
+    {
+      "id": "recall-p02-B-s1-1",
+      "sha256": "85bd9073b85d700c2af465e1ab7e10bd4216efc94fc05b16199822a117c07b8c"
+    },
+    {
+      "id": "recall-p02-B-s2-1",
+      "sha256": "05d2ac9e4c490942b4f1c46fdd044fc9f6c6d00a07c0188dca17e8933d0ccd23"
+    },
+    {
+      "id": "recall-p02-B-s2-P",
+      "sha256": "cf8738ffa3fdb717b450804559b940d61f08010fac7bdff429fb7c01b0684b63"
+    },
+    {
+      "id": "recall-p03-A-0",
+      "sha256": "97f349bf90f46c99042ff82a2fdd11621501230735c902302725482668238380"
+    },
+    {
+      "id": "recall-p03-A-1",
+      "sha256": "05a1cf81e4ff3483c3446de941ae61aa85daeed3b6a1f6e06175ac88a90dfe23"
+    },
+    {
+      "id": "recall-p03-B-s1-1",
+      "sha256": "4af6638667c3645abd0cdc76f96508dbbc76d66a6966aada1d16f4fa3715f5b9"
+    },
+    {
+      "id": "recall-p03-B-s2-1",
+      "sha256": "e3b45febe17fad83bac65d82c39a46324095546854e6e86bee2db0fcb5d4b3cd"
+    },
+    {
+      "id": "recall-p03-B-s2-P",
+      "sha256": "6ba471fbdc99067619c7e237bf9bfaa1f1f8cc40278356db067c26b8c62a5902"
+    },
+    {
+      "id": "recall-p04-A-0",
+      "sha256": "d223131a4f3dad698b5275268157c9fdefe2e8240381bcdc8fc0e92d498b6e7e"
+    },
+    {
+      "id": "recall-p04-A-1",
+      "sha256": "61e4ff2c06c4f78fda65da29446b3fcaf8af3370efe9615ea9ee5b4a40eba9f5"
+    },
+    {
+      "id": "recall-p04-B-s1-1",
+      "sha256": "70a7dbc650934fcd8a554b33558c321d06e80e2513b953577f93134aef9586ce"
+    },
+    {
+      "id": "recall-p04-B-s2-1",
+      "sha256": "34c5f293719b3377eca698e4594009a1a102c4c112a8601fe35749e0fbd49b6e"
+    },
+    {
+      "id": "recall-p04-B-s2-P",
+      "sha256": "6f9835c80b02e1a8ad7dbffef4d7891a2de5d2d0fd9fe1ce7da1c0b0297c6343"
+    },
+    {
+      "id": "recall-p05-A-0",
+      "sha256": "390ae14bb817c75a6d6fc1f7ce2a93365d98793ab802c461a88994fd9805970c"
+    },
+    {
+      "id": "recall-p05-A-1",
+      "sha256": "8f2aa3e97d5ec5030d4ff68c873f6fa145e683639ff94e64d7ebca95241b1e20"
+    },
+    {
+      "id": "recall-p05-B-s1-1",
+      "sha256": "f455e7d0330c43fc7426dec44cc2d257e0cb580f419114a0e19d2c59f3576a42"
+    },
+    {
+      "id": "recall-p05-B-s2-1",
+      "sha256": "56cdab6a8f6162cebc6cb6c33ecc20ec9b9661276f350e28a2d6c2e6bf9b1c5b"
+    },
+    {
+      "id": "recall-p05-B-s2-P",
+      "sha256": "d1f943988435fcdf5bd0f3aa8f99d95ab0ed113a231e4d0591bf449c9f5f583a"
+    },
+    {
+      "id": "recall-p06-A-0",
+      "sha256": "6cd9fc1d4079fbd358bfed00141c09b56110ba89ce1cf83b5c9584873cf7d728"
+    },
+    {
+      "id": "recall-p06-A-1",
+      "sha256": "8a365540e0bb6b9c5cef136397fc5591b4a06da4c7ced1cdf3311005f554abf2"
+    },
+    {
+      "id": "recall-p06-B-s1-1",
+      "sha256": "afabb64d1b3d9b05cdc57085d195f0aebc353bd81dc13a37f5b02d070b1fe979"
+    },
+    {
+      "id": "recall-p06-B-s2-1",
+      "sha256": "f8fc3ac49dd573d31af73f2216cd781358f49f1b4035a2058d8be13d2f8998dc"
+    },
+    {
+      "id": "recall-p06-B-s2-P",
+      "sha256": "9866ed36f7208d6b61646ba3619ddea283701458031575c6d895e049ce58221a"
+    },
+    {
+      "id": "recall-p07-A-0",
+      "sha256": "0bb0b15bbe01f025eab26d979fab44d50ffcb48b4e52deba635dedbede190449"
+    },
+    {
+      "id": "recall-p07-A-1",
+      "sha256": "45ab92746d69696de1a91e50629b0e7d86a7b6d69f0a534c54918660cb096f14"
+    },
+    {
+      "id": "recall-p07-B-s1-1",
+      "sha256": "e2d6bf7fd51504d32015e7b0980d7e5a2e3a9f5f8ce3492fb4ae6dede4584a19"
+    },
+    {
+      "id": "recall-p07-B-s2-1",
+      "sha256": "ab448c9c1bc7ab61f32c035753e8be4bef7021f81786cd619e07a2b36ab41c52"
+    },
+    {
+      "id": "recall-p07-B-s2-P",
+      "sha256": "4c9dc663ce25d8d20469d66a9386cf061f879195dbb00a471b0c06681333ab9f"
+    },
+    {
+      "id": "recall-p08-A-0",
+      "sha256": "5905cf67f8d69ce1adabaaa1c07d33489b9c4b36d8749a97590aff4a3e5e6237"
+    },
+    {
+      "id": "recall-p08-A-1",
+      "sha256": "519d6e42eb962dacc1b174a5c4f581345b9ec7c77881755fac51e033b911c25f"
+    },
+    {
+      "id": "recall-p08-B-s1-1",
+      "sha256": "987e868997833ff1dbbc0a31fa799b1750aa336db064ac0b2e247838a3e7507f"
+    },
+    {
+      "id": "recall-p08-B-s2-1",
+      "sha256": "df984ed641f517fbc72bf3ff97da61a49adb8d92ffc4e8340b6e7ba21aad4d40"
+    },
+    {
+      "id": "recall-p08-B-s2-P",
+      "sha256": "4c0062314eb264be0d81b916ef2e4a5e09692667123a443650043808ccc04ff1"
+    },
+    {
+      "id": "recall-p09-A-0",
+      "sha256": "a72e707b68a2defff658089844c30156a741757478ea51f79b291476f2346627"
+    },
+    {
+      "id": "recall-p09-A-1",
+      "sha256": "ff149e6896954ac0073181d2b60c4d120ffff0ae15b9f92969a9f7cd3c7a7c77"
+    },
+    {
+      "id": "recall-p09-B-s1-1",
+      "sha256": "c6b4ca45b94346407ed0e33f4959fc5662c3e9a7435d3a5fa7a445912cd08f6a"
+    },
+    {
+      "id": "recall-p09-B-s2-1",
+      "sha256": "e902d3bd7bef85b97589b5284f4a5d46d8e8f398f470c793d053ae31f26a1927"
+    },
+    {
+      "id": "recall-p09-B-s2-P",
+      "sha256": "1d984c886d743dd8c759aaf94c186c628d88d3ad494d682beeac029930e01a3e"
+    },
+    {
+      "id": "recall-p10-A-0",
+      "sha256": "aa3a145926fdcdf836510dd2cd09641eb3d2d5f1149393264b75956b9e9e50f3"
+    },
+    {
+      "id": "recall-p10-A-1",
+      "sha256": "54b251a61771b2cd16c8ba6477cb36307e118c8420bb3846d22277b36166ba6d"
+    },
+    {
+      "id": "recall-p10-B-s1-1",
+      "sha256": "7fde78bb27ba2f088aca7398807c5b5988d4b61cb0e27f4cf60022476e3b493e"
+    },
+    {
+      "id": "recall-p10-B-s2-1",
+      "sha256": "d5f7fc628f4ec9a46af3bc71c8b5f3df66c2e4db134b0180719e4d08fec48bb0"
+    },
+    {
+      "id": "recall-p10-B-s2-P",
+      "sha256": "4407ff874663e4d0c115c6d53b819a691e616bcea0756c1937606df9b150679e"
+    },
+    {
+      "id": "recall-p11-A-0",
+      "sha256": "ac78072f0555dfc6653d39985b1ebefcca22e733a92460ec5fdf7927e091c484"
+    },
+    {
+      "id": "recall-p11-A-1",
+      "sha256": "12cb7c6fa6c81e6dff63e8211b4b4fb0dfdc4296b4dab6053d86ccd2395bf61f"
+    },
+    {
+      "id": "recall-p11-B-s1-1",
+      "sha256": "8649235efec0e61dbc783244ed868f424ee902bca28f7ae2a81836335528f308"
+    },
+    {
+      "id": "recall-p11-B-s2-1",
+      "sha256": "cf5c57c4bc2821d37a65abe3ae0072a74525c192004915218ff2803217923b40"
+    },
+    {
+      "id": "recall-p11-B-s2-P",
+      "sha256": "dc3a5c2c6edc25dea49e8c1addb2a1f12f4585d86de42d1e9f35e1fec8cb8f17"
+    },
+    {
+      "id": "recall-p12-A-0",
+      "sha256": "6fcf9a82a9385f6aefc5d67e5dd36bad35445d745a96311dc77016140180af7c"
+    },
+    {
+      "id": "recall-p12-A-1",
+      "sha256": "7ff552ca312403764477e1d0f9f3759dc7b51375543dbe3ac832e8d20173ee4e"
+    },
+    {
+      "id": "recall-p12-B-s1-1",
+      "sha256": "566a6cec007b824c5b159b4a646bc681c2ab826c99fa8606486fc00b9efa393f"
+    },
+    {
+      "id": "recall-p12-B-s2-1",
+      "sha256": "11f2b3720098ffd3092256456083819da6577402be0bef022c62c31d1244ce39"
+    },
+    {
+      "id": "recall-p12-B-s2-P",
+      "sha256": "29d82331f897fc356834b21ef4bb9393244cdbee88cf7509d5681ec749b48bb2"
+    }
+  ]
+}

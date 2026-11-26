@@ -24,9 +24,6 @@ type recallReportOptions struct {
 	Headroom         bool
 }
 
-// recallContinue is the headroom check's verdict when the run may go on.
-const recallContinue recallVerdict = "continue"
-
 // recallCaptureSummary records one verified capture for the report header.
 type recallCaptureSummary struct {
 	Name, ManifestDigest, Endpoint string
@@ -983,6 +980,7 @@ func renderRecallModel(b *strings.Builder, ix recallIndex, set recallRegSet, met
 	}
 	if !pilot {
 		renderRecallArm2Moves(b, a21)
+		renderRecallIdentifierOnlyB(b, ix, set, m)
 	}
 
 	a, bb, c, d, miss10 := tallyA(a10)
@@ -1099,6 +1097,44 @@ func renderRecallModel(b *strings.Builder, ix recallIndex, set recallRegSet, met
 	}
 	fmt.Fprintf(b, " placebo tokens per record (arm P minus arm 1, S2 Trace B) %s; sentence tokens per request (arm 1 minus arm 0, Trace A) %s (skipped: missing artifact or no prompt-token count)\n",
 		recallTokenDiffs(ix, set, m, "B-s2-1", "B-s2-P"), recallTokenDiffs(ix, set, m, "A-0", "A-1"))
+}
+
+// recallIdentifierOnlyB counts, for model and one G1 comparison arm, the G1 B
+// pairs (recallG1IsB) and, among them, those whose arm 2 reply is "no value"
+// yet names the family's setting (Value.Identifier). Such a reply discusses
+// the setting without stating it, so it may restate the lesson in other words
+// that the literal extractor cannot see. It is a lower bound on those replies:
+// one that paraphrases the setting too ("the eviction order") is not counted.
+// A family missing either reply is skipped. Descriptive only: nothing reads it
+// but the report.
+func recallIdentifierOnlyB(ix recallIndex, set recallRegSet, model, baseArm string) (named, bPairs int) {
+	for _, fam := range set.fams {
+		base, okB := ix.get(model, recallTraceID(fam, recallACell(baseArm, "S1")))
+		lab, okL := ix.get(model, recallTraceID(fam, recallACell("2", "S1")))
+		if !okB || !okL {
+			continue
+		}
+		kind := scoreRecallA(lab)
+		if !recallG1IsB(scoreRecallA(base), kind) {
+			continue
+		}
+		bPairs++
+		if kind == recallNoValue && statesIdentifier(recallReply(lab).Content, lab.Trace.Recall.Value.Identifier) {
+			named++
+		}
+	}
+	return named, bPairs
+}
+
+// renderRecallIdentifierOnlyB writes the identifier-only B line for each G1
+// comparison (reported, never gated).
+func renderRecallIdentifierOnlyB(b *strings.Builder, ix recallIndex, set recallRegSet, model string) {
+	var parts []string
+	for _, base := range []string{"1", "0"} {
+		named, bPairs := recallIdentifierOnlyB(ix, set, model, base)
+		parts = append(parts, fmt.Sprintf("vs arm %s %d of %d", base, named, bPairs))
+	}
+	fmt.Fprintf(b, "\nIdentifier-only B (descriptive, not gated; a lower bound, since it matches the setting's literal name only): G1 B pairs whose arm 2 reply states no value and makes no call but names the setting: %s\n", strings.Join(parts, ", "))
 }
 
 // renderRecallArm2Moves writes the arm-2-only S1 Trace A lines: the not-rely

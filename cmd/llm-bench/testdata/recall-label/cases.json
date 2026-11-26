@@ -1,0 +1,399 @@
+{
+  "schema": "recall-label-cases/v1",
+  "templates": [
+    {
+      "id": "num-direct",
+      "value_type": "number",
+      "task_style": "direct"
+    },
+    {
+      "id": "num-task",
+      "value_type": "number",
+      "task_style": "task"
+    },
+    {
+      "id": "id-direct",
+      "value_type": "identifier",
+      "task_style": "direct"
+    },
+    {
+      "id": "id-task",
+      "value_type": "identifier",
+      "task_style": "task"
+    }
+  ],
+  "families": [
+    {
+      "id": "p01",
+      "template": "num-direct",
+      "split": "pilot",
+      "lesson": "ingest/limits.go sets maxBatchSize to 12, so an ingest batch never holds more than 12 events.",
+      "named_file": "ingest/limits.go",
+      "file_before": "package ingest\n\nimport \"time\"\n\nconst (\n\t// maxBatchSize caps how many events a single flush sends to the sink.\n\tmaxBatchSize = 12\n\tflushEvery   = time.Second\n)\n",
+      "file_s1": "package ingest\n\nimport \"time\"\n\nconst (\n\t// maxBatchSize caps how many events a single flush sends to the sink.\n\tmaxBatchSize = 16\n\tflushEvery   = time.Second\n)\n",
+      "file_s2": "package ingest\n\nimport \"time\"\n\nconst (\n\t// maxBatchSize caps how many events a single flush sends to the sink.\n\tmaxBatchSize = 12\n\n\tflushEvery = time.Second\n)\n",
+      "task": "What is maxBatchSize set to in ingest/limits.go?",
+      "query": "ingest batch",
+      "value": {
+        "type": "number",
+        "identifier": "maxBatchSize",
+        "lesson": "12",
+        "changed": "16"
+      },
+      "task_paths": [
+        "ingest/limits.go"
+      ],
+      "other_files": {
+        "ingest/sink.go": "package ingest\n\n// send delivers a batch to the sink, retrying with backoff until the deadline.\nfunc send(batch []Event) error {\n\treturn deliverWithBackoff(batch)\n}\n",
+        "ingest/encode.go": "package ingest\n\n// encode compresses a batch before upload, keeping the event order.\nfunc encode(batch []Event) ([]byte, error) {\n\treturn compress(marshal(batch))\n}\n"
+      },
+      "distractors": [
+        "ingest/sink.go retries a failed ingest batch with backoff and drops it after the deadline passes.",
+        "ingest/encode.go compresses each ingest batch before upload and always keeps the original event order intact."
+      ],
+      "rank": 1,
+      "s7_distractor": 0
+    },
+    {
+      "id": "p02",
+      "template": "num-task",
+      "split": "pilot",
+      "lesson": "config/worker.yaml sets max_retries to 7, so a job is dropped after that many attempts.",
+      "named_file": "config/worker.yaml",
+      "file_before": "worker:\n  queue: jobs\n  max_retries: 7\n  retry_backoff: exponential\n",
+      "file_s1": "worker:\n  queue: jobs\n  max_retries: 9\n  retry_backoff: exponential\n",
+      "file_s2": "worker:\n  queue: jobs\n\n  max_retries: 7\n  retry_backoff: exponential\n",
+      "task": "Double max_retries for the worker in config/worker.yaml and show the line before and after the change.",
+      "query": "worker retries",
+      "value": {
+        "type": "number",
+        "identifier": "max_retries",
+        "lesson": "7",
+        "changed": "9"
+      },
+      "task_paths": [
+        "config/worker.yaml"
+      ],
+      "other_files": {
+        "config/queue.yaml": "queue:\n  name: jobs\n  dead_letter: jobs_dead\n",
+        "worker/backoff.go": "package worker\n\nimport \"time\"\n\n// nextWait grows the wait between retries up to maxWait.\nfunc nextWait(prev, maxWait time.Duration) time.Duration {\n\tif next := prev + prev; next < maxWait {\n\t\treturn next\n\t}\n\treturn maxWait\n}\n"
+      },
+      "distractors": [
+        "config/queue.yaml routes retries to the dead letter queue once the worker marks a job poisoned.",
+        "worker/backoff.go grows the wait between retries and caps it so a job cannot stall others."
+      ],
+      "rank": 2,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p03",
+      "template": "id-direct",
+      "split": "pilot",
+      "lesson": "cache/policy.go sets evictionMode to oldest_first; it is the cache eviction constant beside maxEntries.",
+      "named_file": "cache/policy.go",
+      "file_before": "package cache\n\nconst (\n\t// evictionMode picks which entries go first when the cache is full.\n\tevictionMode = \"oldest_first\"\n\tmaxEntries   = defaultMaxEntries\n)\n",
+      "file_s1": "package cache\n\nconst (\n\t// evictionMode picks which entries go first when the cache is full.\n\tevictionMode = \"least_used\"\n\tmaxEntries   = defaultMaxEntries\n)\n",
+      "file_s2": "package cache\n\nconst (\n\t// evictionMode picks which entries go first when the cache is full.\n\tevictionMode = \"oldest_first\"\n\n\tmaxEntries = defaultMaxEntries\n)\n",
+      "task": "What is evictionMode set to in cache/policy.go?",
+      "query": "cache eviction",
+      "value": {
+        "type": "identifier",
+        "identifier": "evictionMode",
+        "lesson": "oldest_first",
+        "changed": "least_used"
+      },
+      "task_paths": [
+        "cache/policy.go"
+      ],
+      "other_files": {
+        "cache/metrics.go": "package cache\n\n// recordEviction counts an eviction under its reason.\nfunc recordEviction(reason string) {\n\tevictions.WithLabel(reason).Inc()\n}\n",
+        "cache/warmup.go": "package cache\n\n// warm preloads hot keys; eviction stays paused until it returns.\nfunc warm(keys []string) {\n\tpauseEviction()\n\tdefer resumeEviction()\n\tfor _, k := range keys {\n\t\tload(k)\n\t}\n}\n"
+      },
+      "distractors": [
+        "cache/metrics.go counts every cache eviction by reason and reports the totals on the dashboard.",
+        "cache/warmup.go preloads hot keys at startup and skips cache eviction until warmup has finished."
+      ],
+      "rank": 3,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p04",
+      "template": "id-task",
+      "split": "pilot",
+      "lesson": "sched/order.go sets queueOrder to priority_then_age; the scheduler passes the constant to sortJobs.",
+      "named_file": "sched/order.go",
+      "file_before": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"priority_then_age\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\treturn pending[0]\n}\n",
+      "file_s1": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"round_robin\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\treturn pending[0]\n}\n",
+      "file_s2": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"priority_then_age\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\n\treturn pending[0]\n}\n",
+      "task": "Make queueOrder in sched/order.go configurable through a QUEUE_ORDER environment variable, keeping its value as the default. Show the new code.",
+      "query": "scheduler order",
+      "value": {
+        "type": "identifier",
+        "identifier": "queueOrder",
+        "lesson": "priority_then_age",
+        "changed": "round_robin"
+      },
+      "task_paths": [
+        "sched/order.go"
+      ],
+      "other_files": {
+        "sched/lease.go": "package sched\n\n// reclaim returns expired leases to the queue, oldest lease first.\nfunc reclaim(leases []Lease) {\n\tsortByCreated(leases)\n\tfor _, l := range leases {\n\t\tif l.Expired() {\n\t\t\trequeue(l.Job)\n\t\t}\n\t}\n}\n",
+        "sched/cron.go": "package sched\n\n// enqueueRecurring adds each recurring job to the queue in a stable order.\nfunc enqueueRecurring(jobs []Job) {\n\tsortByName(jobs)\n\tfor _, j := range jobs {\n\t\tenqueue(j)\n\t}\n}\n"
+      },
+      "distractors": [
+        "sched/lease.go leases each job, and the scheduler always reclaims expired leases in creation order.",
+        "sched/cron.go adds recurring jobs to the queue, and the scheduler keeps their order stable."
+      ],
+      "rank": 1,
+      "s7_distractor": 0
+    },
+    {
+      "id": "p05",
+      "template": "num-direct",
+      "split": "pilot",
+      "lesson": "server/http.go sets readTimeoutSeconds to 18, so the server timeout for reading a request body is 18 seconds.",
+      "named_file": "server/http.go",
+      "file_before": "package server\n\nimport (\n\t\"net/http\"\n\t\"time\"\n)\n\n// readTimeoutSeconds bounds how long the server waits for a request body.\nconst readTimeoutSeconds = 18\n\nfunc newServer(h http.Handler) *http.Server {\n\treturn &http.Server{\n\t\tHandler:     h,\n\t\tReadTimeout: readTimeoutSeconds * time.Second,\n\t}\n}\n",
+      "file_s1": "package server\n\nimport (\n\t\"net/http\"\n\t\"time\"\n)\n\n// readTimeoutSeconds bounds how long the server waits for a request body.\nconst readTimeoutSeconds = 20\n\nfunc newServer(h http.Handler) *http.Server {\n\treturn &http.Server{\n\t\tHandler:     h,\n\t\tReadTimeout: readTimeoutSeconds * time.Second,\n\t}\n}\n",
+      "file_s2": "package server\n\nimport (\n\t\"net/http\"\n\t\"time\"\n)\n\n// readTimeoutSeconds bounds how long the server waits for a request body.\nconst readTimeoutSeconds = 18\n\nfunc newServer(h http.Handler) *http.Server {\n\treturn &http.Server{\n\t\tHandler: h,\n\n\t\tReadTimeout: readTimeoutSeconds * time.Second,\n\t}\n}\n",
+      "task": "What is readTimeoutSeconds set to in server/http.go?",
+      "query": "server timeout",
+      "value": {
+        "type": "number",
+        "identifier": "readTimeoutSeconds",
+        "lesson": "18",
+        "changed": "20"
+      },
+      "task_paths": [
+        "server/http.go"
+      ],
+      "other_files": {
+        "server/routes.go": "package server\n\nimport \"net/http\"\n\n// routes wraps every handler in the timeout middleware.\nfunc routes(mux *http.ServeMux) http.Handler {\n\treturn withTimeout(mux)\n}\n",
+        "server/shutdown.go": "package server\n\nimport (\n\t\"context\"\n\t\"net/http\"\n)\n\n// shutdown drains open connections before the listener closes.\nfunc shutdown(ctx context.Context, srv *http.Server) error {\n\treturn srv.Shutdown(ctx)\n}\n"
+      },
+      "distractors": [
+        "server/routes.go wraps each handler in a server timeout middleware that returns a gateway error once it expires.",
+        "server/shutdown.go drains connections on exit and logs any server timeout that occurs while the listener is closing."
+      ],
+      "rank": 2,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p06",
+      "template": "num-task",
+      "split": "pilot",
+      "lesson": "jobs/pool.go sets workerCount to 14, so exactly 14 goroutines drain the queue at a time.",
+      "named_file": "jobs/pool.go",
+      "file_before": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 14\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
+      "file_s1": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 18\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
+      "file_s2": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 14\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
+      "task": "Make workerCount in jobs/pool.go configurable through a WORKER_COUNT environment variable, keeping its value as the default. Show the new code.",
+      "query": "job pool",
+      "value": {
+        "type": "number",
+        "identifier": "workerCount",
+        "lesson": "14",
+        "changed": "18"
+      },
+      "task_paths": [
+        "jobs/pool.go"
+      ],
+      "other_files": {
+        "jobs/queue.go": "package jobs\n\n// enqueue blocks while the queue is full instead of failing.\nfunc enqueue(q chan<- Job, j Job) {\n\tq <- j\n}\n",
+        "jobs/retry.go": "package jobs\n\n// runSafely recovers a panicking handler and requeues its job.\nfunc runSafely(q chan<- Job, j Job) {\n\tdefer func() {\n\t\tif recover() != nil {\n\t\t\tq <- j\n\t\t}\n\t}()\n\tj.Run()\n}\n"
+      },
+      "distractors": [
+        "jobs/queue.go keeps the queue bounded, and a full pool makes callers block instead of failing.",
+        "jobs/retry.go requeues a failed task after the pool recovers from a panic inside its handler."
+      ],
+      "rank": 3,
+      "s7_distractor": 0
+    },
+    {
+      "id": "p07",
+      "template": "id-direct",
+      "split": "pilot",
+      "lesson": "config/logging.yaml sets output_format to json_lines in the logging block, beside its level and destination.",
+      "named_file": "config/logging.yaml",
+      "file_before": "logging:\n  level: info\n  output_format: json_lines\n  destination: stderr\n",
+      "file_s1": "logging:\n  level: info\n  output_format: plain_text\n  destination: stderr\n",
+      "file_s2": "logging:\n    level: info\n    output_format: json_lines\n    destination: stderr\n",
+      "task": "What is output_format set to in config/logging.yaml?",
+      "query": "log format",
+      "value": {
+        "type": "identifier",
+        "identifier": "output_format",
+        "lesson": "json_lines",
+        "changed": "plain_text"
+      },
+      "task_paths": [
+        "config/logging.yaml"
+      ],
+      "other_files": {
+        "config/log_rotation.yaml": "rotation:\n  schedule: nightly\n  compress_old: true\n",
+        "config/audit_log.yaml": "audit:\n  stream: audit_events\n  fixed_fields: true\n"
+      },
+      "distractors": [
+        "config/log_rotation.yaml rotates each log file nightly and keeps old files gzipped in the same format.",
+        "config/audit_log.yaml sends audit events to a separate log stream with its own fixed field format."
+      ],
+      "rank": 1,
+      "s7_distractor": 0
+    },
+    {
+      "id": "p08",
+      "template": "id-task",
+      "split": "pilot",
+      "lesson": "metrics/export.go sets exportMode to push_batched in the same const block, next to flushOnExit.",
+      "named_file": "metrics/export.go",
+      "file_before": "package metrics\n\nconst (\n\t// exportMode controls how collected metrics leave the process.\n\texportMode  = \"push_batched\"\n\tflushOnExit = true\n)\n",
+      "file_s1": "package metrics\n\nconst (\n\t// exportMode controls how collected metrics leave the process.\n\texportMode  = \"pull_on_demand\"\n\tflushOnExit = true\n)\n",
+      "file_s2": "package metrics\n\nconst (\n\t// exportMode controls how collected metrics leave the process.\n\texportMode = \"push_batched\"\n\n\tflushOnExit = true\n)\n",
+      "task": "Add a Go test in package metrics that pins the value of exportMode in metrics/export.go. Show the test.",
+      "query": "metrics export",
+      "value": {
+        "type": "identifier",
+        "identifier": "exportMode",
+        "lesson": "push_batched",
+        "changed": "pull_on_demand"
+      },
+      "task_paths": [
+        "metrics/export.go"
+      ],
+      "other_files": {
+        "metrics/registry.go": "package metrics\n\n// register skips series that carry no unit label.\nfunc register(s Series) bool {\n\tif s.Unit == \"\" {\n\t\treturn false\n\t}\n\tseries = append(series, s)\n\treturn true\n}\n",
+        "metrics/labels.go": "package metrics\n\n// scrub removes identifier labels to keep cardinality low.\nfunc scrub(labels map[string]string) {\n\tdelete(labels, \"user_id\")\n\tdelete(labels, \"request_id\")\n}\n"
+      },
+      "distractors": [
+        "metrics/registry.go drops any series without a unit label before the export reaches the collector.",
+        "metrics/labels.go strips user identifiers from label values before each export to keep cardinality low."
+      ],
+      "rank": 2,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p09",
+      "template": "num-direct",
+      "split": "pilot",
+      "lesson": "deploy/api.yaml pins replicas at 6 because the load test fails with fewer pods.",
+      "named_file": "deploy/api.yaml",
+      "file_before": "name: api\nreplicas: 6\nupdate_strategy: rolling\n",
+      "file_s1": "name: api\nreplicas: 9\nupdate_strategy: rolling\n",
+      "file_s2": "name: api\n\nreplicas: 6\nupdate_strategy: rolling\n",
+      "task": "What is replicas set to in deploy/api.yaml?",
+      "query": "api replicas",
+      "value": {
+        "type": "number",
+        "identifier": "replicas",
+        "lesson": "6",
+        "changed": "9"
+      },
+      "task_paths": [
+        "deploy/api.yaml"
+      ],
+      "other_files": {
+        "deploy/worker.yaml": "name: worker\nscale_on: queue_depth\navoid_nodes_of: api\n",
+        "deploy/ingress.yaml": "backend: api\nonly_ready: true\ndrain_old_first: true\n"
+      },
+      "distractors": [
+        "deploy/worker.yaml scales replicas with queue depth and keeps its pods off api nodes.",
+        "deploy/ingress.yaml routes api traffic only to ready replicas and drains old pods first."
+      ],
+      "rank": 3,
+      "s7_distractor": 0
+    },
+    {
+      "id": "p10",
+      "template": "num-task",
+      "split": "pilot",
+      "lesson": "api/ratelimit.go sets burstLimit to 20, so a client hits the burst limit after 20 quick requests.",
+      "named_file": "api/ratelimit.go",
+      "file_before": "package api\n\nimport \"time\"\n\nconst (\n\t// burstLimit is how many requests a client may send at once before throttling starts.\n\tburstLimit  = 20\n\trefillEvery = time.Second\n)\n",
+      "file_s1": "package api\n\nimport \"time\"\n\nconst (\n\t// burstLimit is how many requests a client may send at once before throttling starts.\n\tburstLimit  = 14\n\trefillEvery = time.Second\n)\n",
+      "file_s2": "package api\n\nimport \"time\"\n\nconst (\n\t// burstLimit is how many requests a client may send at once before throttling starts.\n\tburstLimit = 20\n\n\trefillEvery = time.Second\n)\n",
+      "task": "We are moving rate limits into YAML. Write the burst_limit entry for the rate limiter so it matches burstLimit in api/ratelimit.go.",
+      "query": "burst limit",
+      "value": {
+        "type": "number",
+        "identifier": "burstLimit",
+        "lesson": "20",
+        "changed": "14"
+      },
+      "task_paths": [
+        "api/ratelimit.go"
+      ],
+      "other_files": {
+        "api/middleware.go": "package api\n\nimport \"net/http\"\n\n// throttled tells a client over its burst limit when to retry.\nfunc throttled(w http.ResponseWriter) {\n\tw.Header().Set(\"Retry-After\", retryHint())\n\tw.WriteHeader(http.StatusTooManyRequests)\n}\n",
+        "api/keys.go": "package api\n\n// limiterFor gives internal keys their own burst limiter.\nfunc limiterFor(k Key) *Limiter {\n\tif k.Internal {\n\t\treturn internalLimiter\n\t}\n\treturn userLimiter\n}\n"
+      },
+      "distractors": [
+        "api/middleware.go answers with a retry hint when a client exceeds its burst limit on any route.",
+        "api/keys.go gives internal keys a separate burst limit so nightly batch jobs never starve user traffic."
+      ],
+      "rank": 1,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p11",
+      "template": "id-direct",
+      "split": "pilot",
+      "lesson": "api/errors.go sets errorEncoder to encodeProblemJSON, the encoder used for each error response, declared beside logEncoder.",
+      "named_file": "api/errors.go",
+      "file_before": "package api\n\nvar (\n\t// errorEncoder writes the body of every error response.\n\terrorEncoder = encodeProblemJSON\n\tlogEncoder   = encodeLogLine\n)\n",
+      "file_s1": "package api\n\nvar (\n\t// errorEncoder writes the body of every error response.\n\terrorEncoder = encodePlainText\n\tlogEncoder   = encodeLogLine\n)\n",
+      "file_s2": "package api\n\nvar (\n\t// errorEncoder writes the body of every error response.\n\terrorEncoder = encodeProblemJSON\n\n\tlogEncoder = encodeLogLine\n)\n",
+      "task": "What is errorEncoder set to in api/errors.go?",
+      "query": "error response",
+      "value": {
+        "type": "identifier",
+        "identifier": "errorEncoder",
+        "lesson": "encodeProblemJSON",
+        "changed": "encodePlainText"
+      },
+      "task_paths": [
+        "api/errors.go"
+      ],
+      "other_files": {
+        "api/handlers.go": "package api\n\nimport \"net/http\"\n\n// notFound reports a failed lookup as a not found error.\nfunc notFound(w http.ResponseWriter, err error) {\n\twriteError(w, http.StatusNotFound, err)\n}\n",
+        "api/recover.go": "package api\n\nimport \"net/http\"\n\n// recoverPanics turns a handler panic into an error response.\nfunc recoverPanics(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tdefer func() {\n\t\t\tif p := recover(); p != nil {\n\t\t\t\tlogPanic(p)\n\t\t\t\twriteError(w, http.StatusInternalServerError, errPanic)\n\t\t\t}\n\t\t}()\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n"
+      },
+      "distractors": [
+        "api/handlers.go maps each failed lookup error to a not found error response before encoding it.",
+        "api/recover.go turns a panic into an error response and logs the error with its stack."
+      ],
+      "rank": 2,
+      "s7_distractor": 1
+    },
+    {
+      "id": "p12",
+      "template": "id-task",
+      "split": "pilot",
+      "lesson": "auth/session.go sets sessionStore to signed_cookie; newSessions passes the constant to openSessions before setting the idle timeout.",
+      "named_file": "auth/session.go",
+      "file_before": "package auth\n\n// sessionStore names the backend that keeps login sessions.\nconst sessionStore = \"signed_cookie\"\n\nfunc newSessions() *Sessions {\n\ts := openSessions(sessionStore)\n\ts.SetIdleTimeout(idleTimeout)\n\treturn s\n}\n",
+      "file_s1": "package auth\n\n// sessionStore names the backend that keeps login sessions.\nconst sessionStore = \"server_table\"\n\nfunc newSessions() *Sessions {\n\ts := openSessions(sessionStore)\n\ts.SetIdleTimeout(idleTimeout)\n\treturn s\n}\n",
+      "file_s2": "package auth\n\n// sessionStore names the backend that keeps login sessions.\nconst sessionStore = \"signed_cookie\"\n\nfunc newSessions() *Sessions {\n\ts := openSessions(sessionStore)\n\ts.SetIdleTimeout(idleTimeout)\n\n\treturn s\n}\n",
+      "task": "Remove the sessionStore constant from auth/session.go and inline its value into newSessions. Show the updated function.",
+      "query": "auth session",
+      "value": {
+        "type": "identifier",
+        "identifier": "sessionStore",
+        "lesson": "signed_cookie",
+        "changed": "server_table"
+      },
+      "task_paths": [
+        "auth/session.go"
+      ],
+      "other_files": {
+        "auth/login.go": "package auth\n\n// afterPasswordChange issues a fresh session token.\nfunc afterPasswordChange(s *Session) error {\n\treturn s.RotateToken()\n}\n",
+        "auth/csrf.go": "package auth\n\n// checkCSRF rejects a form token that was already used for this session.\nfunc checkCSRF(s *Session, token string) error {\n\tif s.UsedToken(token) {\n\t\treturn errReplayedToken\n\t}\n\treturn nil\n}\n"
+      },
+      "distractors": [
+        "auth/login.go rotates the session token after every password change and again on each new admin privilege grant.",
+        "auth/csrf.go ties each form token to the session and rejects a post whose token has been used."
+      ],
+      "rank": 3,
+      "s7_distractor": 0
+    }
+  ]
+}

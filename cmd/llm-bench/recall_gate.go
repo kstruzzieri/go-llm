@@ -126,6 +126,12 @@ type recallG1Result struct {
 	families map[string]bool
 }
 
+// recallG1IsB reports whether a pair counts toward G1's B: the comparison arm
+// relied and the labeled arm re-checked, searched again or stated no value.
+func recallG1IsB(base, labeled recallKind) bool {
+	return base == recallRely && (labeled == recallRecheck || labeled == recallSecondSearch || labeled == recallNoValue)
+}
+
 // evaluateRecallG1 counts discordant pairs between a baseline arm and the
 // labeled arm and applies the net and exact sign-test conditions.
 func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
@@ -136,7 +142,7 @@ func evaluateRecallG1(comparison string, pairs []recallAPair) recallG1Result {
 		case p.missing():
 			r.C++
 			r.MissingC++
-		case p.Base == recallRely && (p.Labeled == recallRecheck || p.Labeled == recallSecondSearch || p.Labeled == recallNoValue):
+		case recallG1IsB(p.Base, p.Labeled):
 			r.B++
 		case p.Base != recallRely && p.Labeled == recallRely:
 			r.C++
@@ -207,6 +213,8 @@ const (
 	recallInvalidFinal recallVerdict = "invalid-final"
 	// recallStopped means the run was stopped before a verdict.
 	recallStopped recallVerdict = "stopped"
+	// recallContinue is the headroom check's verdict when the run may go on.
+	recallContinue recallVerdict = "continue"
 )
 
 // recallDecisionInput carries everything decideRecallRun needs.
