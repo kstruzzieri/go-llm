@@ -318,17 +318,29 @@ func recallReadBuiltTraces(t *testing.T, dir string) (map[string]Trace, map[stri
 	}
 	traces, raws := map[string]Trace{}, map[string]string{}
 	for _, p := range paths {
-		raw, err := os.ReadFile(p)
+		tr, raw, err := readRecallFixtureTrace(p)
 		if err != nil {
 			t.Fatal(err)
-		}
-		var tr Trace
-		if err := json.Unmarshal(raw, &tr); err != nil {
-			t.Fatalf("%s: %v", p, err)
 		}
 		traces[tr.ID], raws[tr.ID] = tr, string(raw)
 	}
 	return traces, raws
+}
+
+// readRecallFixtureTrace binds the payload ID to the filename that selects it.
+func readRecallFixtureTrace(path string) (Trace, []byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Trace{}, nil, err
+	}
+	var tr Trace
+	if err := json.Unmarshal(raw, &tr); err != nil {
+		return Trace{}, nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if filepath.Base(path) != tr.ID+".json" {
+		return Trace{}, nil, fmt.Errorf("%s contains trace %q; expected filename %s.json", path, tr.ID, tr.ID)
+	}
+	return tr, raw, nil
 }
 
 func TestBuildRecallCorpusConfirmatory(t *testing.T) {

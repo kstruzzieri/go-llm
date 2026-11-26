@@ -125,7 +125,7 @@
       "file_before": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"priority_then_age\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\treturn pending[0]\n}\n",
       "file_s1": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"round_robin\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\treturn pending[0]\n}\n",
       "file_s2": "package sched\n\n// queueOrder decides which pending job the scheduler runs next.\nconst queueOrder = \"priority_then_age\"\n\nfunc next(pending []Job) Job {\n\tsortJobs(pending, queueOrder)\n\n\treturn pending[0]\n}\n",
-      "task": "Make queueOrder in sched/order.go configurable through a QUEUE_ORDER environment variable, keeping its value as the default. Show the new code.",
+      "task": "Make queueOrder in sched/order.go configurable through the QUEUE_ORDER environment variable. Keep the same default and show it as a string literal in the new code.",
       "query": "scheduler order",
       "value": {
         "type": "identifier",
@@ -187,7 +187,7 @@
       "file_before": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 14\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
       "file_s1": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 18\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
       "file_s2": "package jobs\n\n// workerCount is how many goroutines drain the job queue.\nconst workerCount = 14\n\nfunc startPool(q <-chan Job) {\n\tstarted.Store(true)\n\n\tfor i := 0; i < workerCount; i++ {\n\t\tgo drain(q)\n\t}\n}\n",
-      "task": "Make workerCount in jobs/pool.go configurable through a WORKER_COUNT environment variable, keeping its value as the default. Show the new code.",
+      "task": "Make workerCount in jobs/pool.go configurable through the WORKER_COUNT environment variable. Keep the same default and show it as a decimal integer literal in the new code.",
       "query": "job pool",
       "value": {
         "type": "number",

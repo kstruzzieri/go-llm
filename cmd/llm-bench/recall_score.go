@@ -5,8 +5,9 @@ import (
 	"strings"
 )
 
-// recallScorerRevision names the scoring rules so reports can pin them.
-const recallScorerRevision = "recall-scorer/v1"
+// recallScorerRevision binds a registration to the exact scoring and decision
+// implementation. Its digest is also part of the registration hash in captures.
+const recallScorerRevision = "recall-scorer/v1+sha256:" + recallDecisionSourceSHA256
 
 // recallKind is the outcome class of one Trace A reply.
 type recallKind int

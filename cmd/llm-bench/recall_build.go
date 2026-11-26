@@ -970,22 +970,11 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 			files = append(files, filePublication{target: filepath.Join(outDir, t.ID+".json"), data: append(data, '\n'), mode: 0o644})
 		}
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return "", recallErr("%w", err)
+	unlock, err := lockRecallOutputDir(outDir)
+	if err != nil {
+		return "", err
 	}
-	// Serialize the ownership check and publication across both splits.
-	lock := filepath.Join(outDir, ".recall-build.lock")
-	if err := os.Mkdir(lock, 0o700); err != nil {
-		if os.IsExist(err) {
-			return "", recallErr("output lock %s exists; if a previous build was interrupted, remove the empty lock directory after it exits", lock)
-		}
-		return "", recallErr("acquire output lock %s: %w", lock, err)
-	}
-	defer func() {
-		if err := os.Remove(lock); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "recall build: release output lock: %v\n", err)
-		}
-	}()
+	defer unlock()
 	removals, err := recallOutputRemovals(casesPath, outDir, split, files)
 	if err != nil {
 		return "", recallErr("%w", err)
@@ -998,6 +987,25 @@ func buildRecallCorpusWith(ctx context.Context, casesPath, outDir, split string,
 		return "", err
 	}
 	return digest, nil
+}
+
+// lockRecallOutputDir serializes the ownership check and publication to outDir.
+func lockRecallOutputDir(outDir string) (func(), error) {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return nil, recallErr("%w", err)
+	}
+	lock := filepath.Join(outDir, ".recall-build.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		if os.IsExist(err) {
+			return nil, recallErr("output lock %s exists; if a previous build was interrupted, remove the empty lock directory after it exits", lock)
+		}
+		return nil, recallErr("acquire output lock %s: %w", lock, err)
+	}
+	return func() {
+		if err := os.Remove(lock); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "recall build: release output lock: %v\n", err)
+		}
+	}, nil
 }
 
 // recallOutputRemovals preflights every replacement and finds obsolete outputs

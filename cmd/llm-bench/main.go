@@ -545,7 +545,7 @@ func main() {
 			}
 			if anyRecallTrace(traces) {
 				var err error
-				if registrationDigest, recallEndpoint, injectionTemps, err = prepareRecallCapture(runner, *registrationPath, traces, targets); err != nil {
+				if registrationDigest, recallEndpoint, injectionTemps, err = prepareRecallCapture(runner, *registrationPath, traces, targets, tracePaths...); err != nil {
 					log.Fatalf("llm-bench: calibrate-capture: %v", err)
 				}
 			} else {
@@ -1717,17 +1717,17 @@ func strayFlags(provided map[string]bool, names ...string) []string {
 }
 
 // prepareRecallCapture loads the recall registration at path, binds it to the
-// traces and targets, installs the bound decoding on runner, and returns the
+// traces, their optional input paths and the targets, installs the bound decoding on runner, and returns the
 // registration digest, the registered endpoint (runCalibrateCapture's
 // RecallEndpoint, which binds the capture's destination) and the per-target
 // temperatures the capture manifest records. main and the recall e2e both
 // call it, so the e2e exercises the glue a real capture runs.
-func prepareRecallCapture(runner *Runner, path string, traces []Trace, targets []ModelTarget) (digest, endpoint string, temps map[string]float64, err error) {
+func prepareRecallCapture(runner *Runner, path string, traces []Trace, targets []ModelTarget, tracePaths ...string) (digest, endpoint string, temps map[string]float64, err error) {
 	reg, digest, err := loadRecallRegistration(path)
 	if err != nil {
 		return "", "", nil, err
 	}
-	decoding, err := reg.bindCapture(traces, targets)
+	decoding, err := reg.bindCapture(traces, targets, tracePaths...)
 	if err != nil {
 		return "", "", nil, err
 	}

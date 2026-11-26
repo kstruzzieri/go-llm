@@ -156,7 +156,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Make workerCount in jobs/pool.go configurable through a WORKER_COUNT environment variable, keeping its value as the default. Show the new code."
+      "content": "Make workerCount in jobs/pool.go configurable through the WORKER_COUNT environment variable. Keep the same default and show it as a decimal integer literal in the new code."
     },
     {
       "role": "assistant",

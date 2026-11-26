@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +83,21 @@ func recallTestInventory(split string) []map[string]string {
 		}
 	}
 	return rows
+}
+
+// Capture and report must reject the same stale scorer before using its traces
+// or evidence, including registrations written before the source was pinned.
+func TestRecallRegistrationBindsScorerSource(t *testing.T) {
+	for _, rev := range []string{"recall-scorer/v1", "recall-scorer/v1+sha256:" + strings.Repeat("0", 64)} {
+		tr := validRecallTrace()
+		path := recallRegistrationFile(t, []Trace{tr}, func(r map[string]any) { r["scorer_revision"] = rev })
+		if _, _, _, err := prepareRecallCapture(&Runner{}, path, []Trace{tr}, nil); err == nil || !strings.Contains(err.Error(), "scorer_revision") {
+			t.Errorf("capture with revision %q: got %v, want scorer_revision error", rev, err)
+		}
+		if _, _, err := runRecallReport(recallReportOptions{RegistrationPath: path}); err == nil || !strings.Contains(err.Error(), "scorer_revision") {
+			t.Errorf("report with revision %q: got %v, want scorer_revision error", rev, err)
+		}
+	}
 }
 
 func TestLoadRecallRegistration(t *testing.T) {
@@ -286,9 +300,8 @@ func TestRecallCaptureOrder(t *testing.T) {
 	for _, f := range fams {
 		in = append(in, recallFamilyTraces(f)...)
 	}
-	// Family order is the registered hash order.
-	sorted := slices.Clone(fams)
-	sort.Slice(sorted, func(i, j int) bool { return pairIDHash(sorted[i]) < pairIDHash(sorted[j]) })
+	// FNV-1a 64 in ascending order, independent of the capture implementation.
+	sorted := []string{"gamma", "beta", "alpha"}
 	base := []string{"A-0", "A-1", "A-2", "A-2-s7", "B-s1-1", "B-s1-2", "B-s2-1", "B-s2-2", "B-s2-P"}
 	var want []string
 	for pos, f := range sorted {
@@ -348,13 +361,12 @@ func pilotFamilyTraces(fam string) []Trace {
 func TestRecallCaptureOrderWrapsAndBalances(t *testing.T) {
 	const families, n = 12, 5
 	var in []Trace
-	var ids []string
-	for i := 0; i < families; i++ {
-		id := fmt.Sprintf("fam%02d", i)
-		ids = append(ids, id)
+	for i := 1; i <= families; i++ {
+		id := fmt.Sprintf("p%02d", i)
 		in = append(in, pilotFamilyTraces(id)...)
 	}
-	sort.Slice(ids, func(i, j int) bool { return pairIDHash(ids[i]) < pairIDHash(ids[j]) })
+	// The frozen pilot family order must stay reproducible across binaries.
+	ids := []string{"p12", "p10", "p11", "p09", "p08", "p05", "p04", "p07", "p06", "p01", "p03", "p02"}
 	base := []string{"A-0", "A-1", "B-s1-1", "B-s2-1", "B-s2-P"}
 	got := traceIDs(recallCaptureOrder(in))
 	if len(got) != families*n {
