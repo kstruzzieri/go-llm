@@ -27,6 +27,38 @@ func TestCalibrateCaptureRecallNeedsRegistration(t *testing.T) {
 	}
 }
 
+// Selecting a registered filename for a gap fill must never send another
+// cell. A matching filename and an arbitrary alias both proceed to the
+// independent destination check, which these cases intentionally fail.
+func TestCalibrateCaptureRecallRegisteredFilenames(t *testing.T) {
+	const id = "recall-p01-B-s2-1"
+	raw, err := os.ReadFile(filepath.Join(recallFixtureDir, "pilot", id+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"recall-p01-B-s1-1.json", `selects trace "recall-p01-B-s1-1" but contains "recall-p01-B-s2-1"`},
+		{"RECALL-P01-B-S1-1.JSON", `selects trace "recall-p01-B-s1-1" but contains "recall-p01-B-s2-1"`},
+		{id + ".json", "differs from the registered loopback endpoint"},
+		{strings.ToUpper(id + ".json"), "differs from the registered loopback endpoint"},
+		{"alias.json", "differs from the registered loopback endpoint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			code, log := runLLMBenchMain(t, nil, "-calibrate-capture", "-traces", path,
+				"-registration", filepath.Join(recallFixtureDir, "registration-pilot.json"), "-models", recallPrimaryModel,
+				"-candidate-base-url", "http://127.0.0.1:1", "-labels-out", filepath.Join(dir, "artifacts.jsonl"))
+			if code != 1 || !strings.Contains(log, tc.want) {
+				t.Fatalf("exit %d, output %q, want %q", code, log, tc.want)
+			}
+		})
+	}
+}
+
 // writeTraceFiles writes each trace to its own file in a fresh directory and
 // returns the -traces glob that matches them.
 func writeTraceFiles(t *testing.T, traces ...Trace) string {

@@ -11,25 +11,15 @@ import (
 	"go/token"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// recallDecisionSourceSHA256 pins the recall scoring and decision code that
-// recallScorerRevision and recallDecisionRuleText name: every declaration in
-// recall_score.go and recall_gate.go, and the functions that assemble, score,
-// pair, count and decide from the replies a report reads (recallDecisionPath).
-// A registration records both names and the report refuses others, so a
-// change to this code must bump the revision (and the rule text if behavior
-// changed) and re-register; this pin is what notices the change. Outside it,
-// by design: the capture-verification code shared with the injection report
-// (manifest and artifact loading, trace hashing, model selectors), the
-// capture destination checks (recall_destination.go), the
-// registration loader (its tests and the file digest bind it), and rendering.
-const recallDecisionSourceSHA256 = "34c8968f0061a7a27e607e2f8407833ccaf4b647152adc2beb325070a7a8f88f"
-
 // recallDecisionPath lists, per file, the declarations on the scoring and
-// decision path; nil means every declaration in the file. Methods are named
-// without their receiver.
+// decision path, including the trial order used by capture and report.
+// Nil means every declaration; methods are named without their receiver.
+// Shared capture verification, destination checks, registration validation
+// and report rendering have their own tests outside this pin.
 var recallDecisionPath = []struct {
 	file  string
 	names []string
@@ -41,19 +31,21 @@ var recallDecisionPath = []struct {
 		"recallRegisteredSet", "has", "recallIndexOf", "get", "recallTraceID", "unattempted",
 		"runRecallReport", "recallLabelTokens", "add", "recallHeadroomReport", "recallHeadroomPrecondition",
 		"loadRecallCaptures", "recallCheckArtifact", "verifyRecallTrialOrder"}},
-	{"recall.go", []string{"recallWorkspaceFile", "currentValue", "validateRecallTrace", "validateRecallTurns"}},
+	{"recall.go", []string{"recallNumberPattern", "recallWorkspaceFile", "currentValue", "validateRecallTrace", "validateRecallTurns"}},
 	{"recall_build.go", []string{"parseRecallTraceID", "recallCells"}},
-	{"recall_registration.go", []string{"recallCellKey", "recallTrialOrder", "recallSplitFamilyCount"}},
+	{"recall_registration.go", []string{"recallCellKey", "recallBaseOrder", "recallCaptureCounterbalanceScheme",
+		"recallCaptureOrder", "recallTrialOrder", "recallSplitFamilyCount"}},
+	{"calibration.go", []string{"pairIDHash"}},
 	{"paired.go", []string{"modelKey"}},
-	{"scorer.go", []string{"canonicalCandidateModelKey"}},
+	{"scorer.go", []string{"canonicalCandidateModelKey", "normalizeModelSelector", "openAICompatTransport"}},
+	{"target.go", []string{"defaultBenchProvider", "supportedCandidateProvider"}},
+	{"injection.go", []string{"validateToolEndingTurns"}},
 	{"injection_outcome.go", []string{"decodeRawArgs"}},
 }
 
-// recallDecisionSource returns the pinned code as its token stream
-// (go/scanner, comments and the semicolons a line break inserts dropped), so
-// comment and whitespace edits leave it unchanged and any code edit changes
-// it (so does a reformat that adds or drops a trailing comma, or reordered
-// declarations: those fail loudly and need only a pin update).
+// recallDecisionSource returns the pinned declarations as a token stream.
+// Comments and formatting that leave the tokens and statement boundaries
+// intact do not change the digest.
 func recallDecisionSource(t *testing.T) []byte {
 	t.Helper()
 	var out bytes.Buffer
@@ -69,41 +61,91 @@ func recallDecisionSource(t *testing.T) []byte {
 		}
 		found := map[string]bool{}
 		for _, d := range file.Decls {
-			if f.names != nil {
-				fd, ok := d.(*ast.FuncDecl)
-				if !ok || !slices.Contains(f.names, fd.Name.Name) {
-					continue
-				}
-				found[fd.Name.Name] = true
-			}
-			code := src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset]
-			var s scanner.Scanner
-			s.Init(token.NewFileSet().AddFile(f.file, -1, len(code)), code, nil, 0)
-			fmt.Fprintf(&out, "%s\n", f.file)
-			for {
-				_, tok, lit := s.Scan()
-				if tok == token.EOF {
-					break
-				}
-				if tok == token.SEMICOLON && lit == "\n" {
-					continue
-				}
-				fmt.Fprintf(&out, "%s %s\n", tok, lit)
+			if f.names == nil || matchRecallDeclaration(d, f.names, found) {
+				fmt.Fprintf(&out, "%s\n", f.file)
+				writeRecallDecisionTokens(&out, src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset])
 			}
 		}
 		for _, n := range f.names {
 			if !found[n] {
-				t.Fatalf("%s: pinned function %s not found; update recallDecisionPath", f.file, n)
+				t.Fatalf("%s: pinned declaration %s not found; update recallDecisionPath", f.file, n)
 			}
 		}
 	}
 	return out.Bytes()
 }
 
+// matchRecallDeclaration selects a whole declaration. A grouped const can
+// depend on the preceding specs through iota or an implicit initializer.
+func matchRecallDeclaration(d ast.Decl, names []string, found map[string]bool) bool {
+	matched := false
+	match := func(id *ast.Ident) {
+		if slices.Contains(names, id.Name) {
+			found[id.Name] = true
+			matched = true
+		}
+	}
+	switch decl := d.(type) {
+	case *ast.FuncDecl:
+		match(decl.Name)
+	case *ast.GenDecl:
+		for _, spec := range decl.Specs {
+			switch s := spec.(type) {
+			case *ast.ValueSpec:
+				for _, id := range s.Names {
+					match(id)
+				}
+			case *ast.TypeSpec:
+				match(s.Name)
+			}
+		}
+	}
+	return matched
+}
+
+func writeRecallDecisionTokens(out *bytes.Buffer, code []byte) {
+	var s scanner.Scanner
+	s.Init(token.NewFileSet().AddFile("", -1, len(code)), code, nil, 0)
+	// A newline can insert a significant semicolon, e.g. between a switch
+	// initializer and its opening brace. Only omit optional terminators.
+	pendingSemicolon := false
+	for {
+		_, tok, lit := s.Scan()
+		if tok == token.EOF {
+			return
+		}
+		if pendingSemicolon && tok != token.RPAREN && tok != token.RBRACE {
+			fmt.Fprintln(out, "SEMICOLON")
+		}
+		pendingSemicolon = tok == token.SEMICOLON
+		if !pendingSemicolon {
+			fmt.Fprintf(out, "%s %s\n", tok, lit)
+		}
+	}
+}
+
+func TestRecallDecisionTokensKeepStatementBoundaries(t *testing.T) {
+	tokens := func(code string) string {
+		var out bytes.Buffer
+		writeRecallDecisionTokens(&out, []byte(code))
+		return out.String()
+	}
+	tag := tokens("func f() { switch value() { case true: g() } }")
+	formatted := tokens("func f() {\n// comment\n switch value() {\n case true: g()\n }\n}")
+	if tag != formatted {
+		t.Fatal("formatting changed the token stream")
+	}
+	implicit := tokens("func f() { switch value()\n { case true: g() } }")
+	explicit := tokens("func f() { switch value(); { case true: g() } }")
+	if implicit != explicit || tag == implicit {
+		t.Fatal("the switch initializer and switch tag must have distinct token streams")
+	}
+}
+
 func TestRecallScoringAndDecisionCodePinned(t *testing.T) {
 	sum := sha256.Sum256(recallDecisionSource(t))
-	if got := hex.EncodeToString(sum[:]); got != recallDecisionSourceSHA256 {
-		t.Errorf("the recall scoring or decision code changed (source sha256 %s, pinned %s): before the confirmatory freeze, bump recallScorerRevision (now %q), update recallDecisionRuleText if the behavior changed, regenerate the registrations with %s and update recallDecisionSourceSHA256; after the freeze, revert the change instead",
-			got, recallDecisionSourceSHA256, recallScorerRevision, recallFixtureRegenCommand)
+	if got := hex.EncodeToString(sum[:]); !strings.HasSuffix(recallScorerRevision, "+sha256:"+got) {
+		t.Errorf("the registered scorer_revision %q must include the current source digest %s: before the confirmatory freeze, update recallDecisionSourceSHA256, update recallDecisionRuleText if the rule changed, and regenerate with %s; after the freeze, revert the change instead",
+			recallScorerRevision, got, recallFixtureRegenCommand)
 	}
 }

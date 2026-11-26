@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -26,8 +28,10 @@ const recallFixtureDir = "testdata/recall-label"
 // the registered measurement, so the only remedy is to revert the change.
 const recallFreezeNote = " (before the freeze only; after it, revert the change)"
 
+type recallFixtureSplit struct{ split, registration string }
+
 // recallFixtureSplits names each split's committed registration file.
-var recallFixtureSplits = []struct{ split, registration string }{
+var recallFixtureSplits = []recallFixtureSplit{
 	{"pilot", "registration-pilot.json"},
 	{"confirmatory", "registration.json"},
 }
@@ -40,17 +44,16 @@ func recallLineupDecoding() registeredDecoding {
 		ServingStack: "llama.cpp via llama-swap 127.0.0.1:8090"}
 }
 
-// recallRegistrationJSON is split's registration for the traces in dir, built
+// recallRegistrationJSON is split's registration for the supplied traces, built
 // from cases: the cases digest, the compiled rule text, scorer revision and
 // primary, the lineup and its decoding, and one id and canonicalTraceHash row
 // per trace in family then cell order.
-func recallRegistrationJSON(t *testing.T, cases recallCases, split, dir string) []byte {
+func recallRegistrationJSON(t *testing.T, cases recallCases, split string, traces map[string]Trace) []byte {
 	t.Helper()
 	digest, err := recallCasesDigest(cases, split)
 	if err != nil {
 		t.Fatal(err)
 	}
-	traces, _ := recallReadBuiltTraces(t, dir)
 	type row struct {
 		ID     string `json:"id"`
 		SHA256 string `json:"sha256"`
@@ -64,7 +67,7 @@ func recallRegistrationJSON(t *testing.T, cases recallCases, split, dir string) 
 			id := recallTraceID(f.ID, c.Suffix)
 			tr, ok := traces[id]
 			if !ok {
-				t.Fatalf("%s holds no trace %s; regenerate with %s", dir, id, recallFixtureRegenCommand+recallFreezeNote)
+				t.Fatalf("%s split has no trace %s; regenerate with %s", split, id, recallFixtureRegenCommand+recallFreezeNote)
 			}
 			rows = append(rows, row{ID: id, SHA256: canonicalTraceHash(tr)})
 		}
@@ -148,6 +151,10 @@ func recallAuthoringProblems(cases recallCases, split string) []string {
 			fail("family %s: identifier lesson %q restates what the value means (a \"so ...\" clause)", f.ID, f.Lesson)
 		}
 		var named [2]string
+		if len(f.Distractors) != len(named) {
+			fail("family %s: distractors has %d entries, want exactly %d", f.ID, len(f.Distractors), len(named))
+			continue
+		}
 		for i, d := range f.Distractors {
 			var hits []string
 			for p := range f.OtherFiles {
@@ -201,6 +208,103 @@ func recallAuthoringProblems(cases recallCases, split string) []string {
 	return problems
 }
 
+// recallFixtureActive reports whether a split has inputs to check. A
+// registration without families is stale, even during regeneration.
+func recallFixtureActive(cases recallCases, split, regPath string, update bool) (bool, error) {
+	has := slices.ContainsFunc(cases.Families, func(f recallFamily) bool { return f.Split == split })
+	_, err := os.Stat(regPath)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if !has && err == nil {
+		return false, fmt.Errorf("%s exists but cases.json has no %s families; remove it or add the families and run %s", regPath, split, recallFixtureRegenCommand+recallFreezeNote)
+	}
+	if has && err != nil && !update {
+		return false, fmt.Errorf("cases.json has %s families but %s does not exist; generate it with %s", split, regPath, recallFixtureRegenCommand+recallFreezeNote)
+	}
+	return has, nil
+}
+
+// regenerateRecallFixtures builds every active split in scratch space. Only
+// after all authoring checks and builds pass can the registrations, traces
+// and removals be published together under the corpus builder's locks.
+func regenerateRecallFixtures(t *testing.T, root string, cases recallCases) (retErr error) {
+	t.Helper()
+	casesPath := filepath.Join(root, "cases.json")
+	var activeSplits []recallFixtureSplit
+	for _, sp := range recallFixtureSplits {
+		regPath := filepath.Join(root, sp.registration)
+		active, err := recallFixtureActive(cases, sp.split, regPath, true)
+		if err != nil {
+			return err
+		}
+		if !active {
+			continue
+		}
+		if problems := recallAuthoringProblems(cases, sp.split); len(problems) > 0 {
+			return fmt.Errorf("fix cases.json before regenerating: %s", strings.Join(problems, "\n"))
+		}
+		activeSplits = append(activeSplits, sp)
+	}
+	bySplit := make(map[string][]filePublication)
+	var files []filePublication
+	for _, sp := range activeSplits {
+		wantDigest, err := recallCasesDigest(cases, sp.split)
+		if err != nil {
+			return err
+		}
+		built := t.TempDir()
+		if digest, err := buildRecallCorpus(t.Context(), casesPath, built, sp.split); err != nil {
+			return err
+		} else if digest != wantDigest {
+			return fmt.Errorf("%s cases changed while regenerating: built %s, expected %s", sp.split, digest, wantDigest)
+		}
+		traces, raws := recallReadBuiltTraces(t, built)
+		reg := recallRegistrationJSON(t, cases, sp.split, traces)
+		files = append(files, filePublication{target: filepath.Join(root, sp.registration), data: reg, mode: 0o644})
+		for id, raw := range raws {
+			file := filePublication{target: filepath.Join(root, sp.split, id+".json"), data: []byte(raw), mode: 0o644}
+			bySplit[sp.split] = append(bySplit[sp.split], file)
+			files = append(files, file)
+		}
+	}
+	var removals []string
+	for _, sp := range activeSplits {
+		dir := filepath.Join(root, sp.split)
+		mkdirErr := os.Mkdir(dir, 0o755)
+		if mkdirErr != nil && !os.IsExist(mkdirErr) {
+			return fmt.Errorf("create recall split directory %q: %w", dir, mkdirErr)
+		}
+		if mkdirErr == nil {
+			defer func() {
+				if retErr == nil {
+					return
+				}
+				// Remove only an empty directory created by this run. Its
+				// lock, if acquired, is released before this cleanup.
+				if err := syscall.Rmdir(dir); err != nil && !os.IsNotExist(err) {
+					retErr = errors.Join(retErr, fmt.Errorf("clean up recall split directory %q: %w", dir, err))
+				}
+			}()
+		}
+		unlock, err := lockRecallOutputDir(dir)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		stale, err := recallOutputRemovals(casesPath, dir, sp.split, bySplit[sp.split])
+		if err != nil {
+			return err
+		}
+		removals = append(removals, stale...)
+	}
+	out, err := publishFileSet(files, removals)
+	for _, warning := range out.cleanupWarnings {
+		t.Logf("recall fixture cleanup: %v", warning)
+	}
+	return err
+}
+
 // TestRecallRegistrationsLoad pins each committed recall registration to the
 // fixture: for every split, the split's cases must keep the authoring rulings,
 // the registration must load, be exactly what the split's traces register
@@ -213,18 +317,25 @@ func recallAuthoringProblems(cases recallCases, split string) []string {
 //
 // Only a run without -race also rebuilds every trace from cases.json and
 // requires the committed traces to equal that build byte for byte (the check
-// that catches a builder, prompt or tool-text change). Under -race, which is
-// all CI runs, the rebuild (about 150 s for a confirmatory split) is skipped:
+// that catches a builder, prompt or tool-text change). Under -race the rebuild
+// (about 150 s for a confirmatory split) is skipped:
 // the registration is checked against the committed trace files themselves
 // (canonicalTraceHash of each file) and the directory's file set, so CI
 // catches a registration and corpus that disagree but not a corpus that has
 // drifted from what cases.json now builds. Run the test without -race before
 // a recall fixture PR.
 func TestRecallRegistrationsLoad(t *testing.T) {
-	t.Parallel()
+	if !*updateRecallRegistration {
+		t.Parallel()
+	}
 	cases, err := loadRecallCases(filepath.Join(recallFixtureDir, "cases.json"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if *updateRecallRegistration {
+		if err := regenerateRecallFixtures(t, recallFixtureDir, cases); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, sp := range recallFixtureSplits {
 		t.Run(sp.split, func(t *testing.T) {
@@ -238,21 +349,15 @@ func testRecallFixtureSplit(t *testing.T, cases recallCases, split, registration
 	casesPath := filepath.Join(recallFixtureDir, "cases.json")
 	committedDir := filepath.Join(recallFixtureDir, split)
 	regPath := filepath.Join(recallFixtureDir, registration)
-	has := slices.ContainsFunc(cases.Families, func(f recallFamily) bool { return f.Split == split })
-	_, statErr := os.Stat(regPath)
-	switch exists := statErr == nil; {
-	case !has && exists:
-		t.Fatalf("%s exists but cases.json has no %s families; remove it or add the families and run %s", regPath, split, recallFixtureRegenCommand+recallFreezeNote)
-	case !has:
+	active, err := recallFixtureActive(cases, split, regPath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !active {
 		t.Skipf("cases.json has no %s families and %s does not exist: nothing is registered", split, regPath)
-	case !exists && !*updateRecallRegistration:
-		t.Fatalf("cases.json has %s families but %s does not exist; generate it with %s", split, regPath, recallFixtureRegenCommand+recallFreezeNote)
 	}
 	for _, p := range recallAuthoringProblems(cases, split) {
 		t.Errorf("%s; fix cases.json, then run %s", p, recallFixtureRegenCommand+recallFreezeNote)
-	}
-	if *updateRecallRegistration && t.Failed() {
-		t.Fatal("the cases break the authoring rules above; not regenerating: fix cases.json first")
 	}
 	digest, err := recallCasesDigest(cases, split)
 	if err != nil {
@@ -269,15 +374,8 @@ func testRecallFixtureSplit(t *testing.T, cases recallCases, split, registration
 			t.Fatalf("build digest %s, want %s", got, digest)
 		}
 	}
-	want := recallRegistrationJSON(t, cases, split, built)
-	if *updateRecallRegistration {
-		if _, err := buildRecallCorpus(context.Background(), casesPath, committedDir, split); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(regPath, want, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	builtTraces, _ := recallReadBuiltTraces(t, built)
+	want := recallRegistrationJSON(t, cases, split, builtTraces)
 
 	if rebuild {
 		diff, err := corpusDirDiff(built, committedDir)
@@ -442,6 +540,11 @@ func TestRecallAuthoringRules(t *testing.T) {
 			family(c, "p03").Lesson += " so the oldest go first"
 			return c
 		}, "family p03: identifier lesson"},
+		{"third distractor", "pilot", func(c recallCases) recallCases {
+			f := family(c, "p01")
+			f.Distractors = append(f.Distractors, f.Distractors[0])
+			return c
+		}, "family p01: distractors has 3 entries, want exactly 2"},
 		{"distractor names no other file", "pilot", func(c recallCases) recallCases {
 			family(c, "p01").Distractors[0] = "a lesson about nothing"
 			return c
@@ -490,6 +593,89 @@ func TestRecallAuthoringRules(t *testing.T) {
 			t.Errorf("skewed s7 split: unexpected problem %q", p)
 		}
 	}
+}
+
+// Swapping two valid trace payloads must fail even without a full rebuild.
+func TestRecallFixtureTraceFilename(t *testing.T) {
+	dir := t.TempDir()
+	ids := []string{"recall-p01-B-s1-1", "recall-p01-B-s2-1"}
+	for i, id := range ids {
+		other := ids[1-i]
+		raw, err := os.ReadFile(filepath.Join(recallFixtureDir, "pilot", other+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, id+".json")
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := readRecallFixtureTrace(path); err == nil || !strings.Contains(err.Error(), id) || !strings.Contains(err.Error(), other) {
+			t.Errorf("swapped trace %s: got %v, want an error identifying both traces", id, err)
+		}
+	}
+}
+
+// An unfinished confirmatory split must leave even a stale pilot untouched.
+func TestRecallFixtureRegenerationPreflightsAllSplits(t *testing.T) {
+	cases, err := loadRecallCases(filepath.Join(recallFixtureDir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases.Families = slices.DeleteFunc(cases.Families, func(f recallFamily) bool { return f.Split != "pilot" })
+	conf := recallAuthoringConfirmatory(t, cases)
+	cases.Families = append(cases.Families, conf.Families[0])
+	raw, err := json.Marshal(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cases.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(dir, "registration-pilot.json")
+	prior := []byte("previous pilot registration")
+	if err := os.WriteFile(regPath, prior, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := regenerateRecallFixtures(t, dir, cases); err == nil || !strings.Contains(err.Error(), "confirmatory") {
+		t.Fatalf("regenerate with incomplete confirmatory split: %v", err)
+	}
+	got, err := os.ReadFile(regPath)
+	if err != nil || !bytes.Equal(got, prior) {
+		t.Fatalf("pilot registration after failed regeneration: got %q, err %v", got, err)
+	}
+	for _, name := range []string{"pilot", "confirmatory", "registration.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s after failed regeneration: got %v, want absent", name, err)
+		}
+	}
+
+	// A lock failure on a second active split must remove any newly created
+	// directory for the first split rather than leaving an empty directory behind.
+	t.Run("removes newly created split dir on later lock failure", func(t *testing.T) {
+		full := recallAuthoringConfirmatory(t, cases)
+		full.Families = append(slices.DeleteFunc(slices.Clone(cases.Families), func(f recallFamily) bool { return f.Split != "pilot" }), full.Families...)
+		fullRaw, err := json.Marshal(full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "cases.json"), fullRaw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(d, "confirmatory", ".recall-build.lock"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := regenerateRecallFixtures(t, d, full); err == nil || !strings.Contains(err.Error(), ".recall-build.lock") {
+			t.Fatalf("regenerate with locked confirmatory dir: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(d, "pilot")); !os.IsNotExist(err) {
+			t.Errorf("pilot dir after failed regeneration: got %v, want absent", err)
+		}
+		if _, err := os.Stat(filepath.Join(d, "confirmatory", ".recall-build.lock")); err != nil {
+			t.Errorf("existing confirmatory lock after failed regeneration: %v", err)
+		}
+	})
 }
 
 // The seeded records' day numbers lie outside 2..20, so a reply quoting a
