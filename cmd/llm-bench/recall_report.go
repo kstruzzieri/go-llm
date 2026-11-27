@@ -278,7 +278,8 @@ const recallCachingHint = "likely cause: prompt caching on the server (usage.pro
 // while another remains), and the spread of every such difference. A count of
 // 0 (usage not reported), a difference below 1, a spread above
 // recallLabelTokenSpreadMax, or a family with no measured pair is a harness
-// error that only a recapture can cure.
+// error that only a recapture (or, for a missing pair, a gap-fill retry of a
+// cell failed after 1 recorded attempt) can cure.
 func recallLabelTokens(ix recallIndex, set recallRegSet, model string) (recallTokenRange, map[string]int, error) {
 	var r recallTokenRange
 	perFamily := map[string]int{}
@@ -316,7 +317,7 @@ func recallLabelTokens(ix recallIndex, set recallRegSet, model string) (recallTo
 		}
 	}
 	if len(unmeasured) > 0 {
-		return r, nil, fmt.Errorf("recall report: model %s: no label-size pair (arm 2 with its arm 1) has both artifacts in registered families %s; G5 needs a label measurement per registered family; %s", model, recallCellList(unmeasured), recallRecaptureHint)
+		return r, nil, fmt.Errorf("recall report: model %s: no label-size pair (arm 2 with its arm 1) has both artifacts in registered families %s; G5 needs a label measurement per registered family; %s", model, recallCellList(unmeasured), recallFailedCellHint)
 	}
 	return r, perFamily, nil
 }
@@ -355,7 +356,8 @@ func recallCellList(cells []string) string {
 // registration before any scoring: manifest digest, counterbalance scheme,
 // decoding, model and trace membership, and each artifact's provenance and
 // hash. It returns the ledger claims; a cell attempted in two captures (or
-// captured twice) is an error, since the one retry runs inside its capture.
+// captured twice) is an error, since the one retry runs inside its capture,
+// except for the pair recallGapFillRetry accepts.
 func loadRecallCaptures(reg recallRegistration, digest string, paths []string) ([]Artifact, []recallCaptureSummary, recallClaims, error) {
 	registered := make(map[string]registeredTrace, len(reg.Traces))
 	for _, c := range reg.Traces {
@@ -369,6 +371,10 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 	var sums []recallCaptureSummary
 	seen := map[[2]string]string{}
 	claims := recallClaims{}
+	claimRows := map[[2]string]captureExpectedRow{}
+	retried := map[[2]string]string{} // cell -> the capture that gave it its gap-fill retry
+	retryRows := map[[2]string]captureExpectedRow{}
+	given := map[string]string{} // manifest digest -> capture path
 	for _, path := range paths {
 		manifestPath := captureManifestPath(path)
 		raw, err := os.ReadFile(manifestPath)
@@ -393,6 +399,10 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 			return nil, nil, nil, fmt.Errorf("recall report: capture %s: %w", path, err)
 		}
 		sum := sha256.Sum256(raw)
+		if prev, dup := given[string(sum[:])]; dup {
+			return nil, nil, nil, fmt.Errorf("recall report: captures %s and %s are the same capture (one manifest); pass each capture once", prev, path)
+		}
+		given[string(sum[:])] = path
 		summary := recallCaptureSummary{Name: filepath.Base(path), ManifestDigest: "sha256:" + hex.EncodeToString(sum[:]), Endpoint: m.Endpoint}
 		for _, row := range m.Expected {
 			switch row.Status {
@@ -432,9 +442,18 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 			}
 			key := [2]string{row.Model, row.TraceID}
 			if prev, dup := claims[key]; dup {
-				return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s and %s; a cell is attempted in one capture only (its one retry runs inside that capture, and a gap-fill capture holds only cells no capture attempted), so drop the capture that attempted it again", row.Model, row.TraceID, prev, path)
+				if second, ok := retried[key]; ok {
+					first, mid := claimRows[key], retryRows[key]
+					return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s (%s, %d recorded attempt(s)), %s (%s, %d recorded attempt(s)) and %s (%s, %d recorded attempt(s)); a cell gets at most one gap-fill retry, so drop the capture that attempted it a third time", row.Model, row.TraceID, prev, first.Status, first.Attempts, second, mid.Status, mid.Attempts, path, row.Status, row.Attempts)
+				}
+				if first := claimRows[key]; !recallGapFillRetry(first, row) {
+					return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s (%s, %d recorded attempt(s)) and %s (%s, %d recorded attempt(s)); a cell is attempted in one capture only (its one retry runs inside that capture), except that one gap-fill capture recording 1 attempt may retry a cell an interrupted capture left failed after 1 recorded attempt, so no cell exceeds 2 recorded attempts; drop the capture that attempted it again, or a recapture needs the owner's decision", row.Model, row.TraceID, prev, first.Status, first.Attempts, path, row.Status, row.Attempts)
+				}
+				retried[key], retryRows[key] = path, row
+				continue
 			}
 			claims[key] = path
+			claimRows[key] = row
 		}
 		perArtifact := make(map[string]captureManifestRow, len(m.PerArtifact))
 		for _, row := range m.PerArtifact {
@@ -469,6 +488,18 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 		sums = append(sums, summary)
 	}
 	return all, sums, claims, nil
+}
+
+// recallGapFillRetry reports whether two captures' ledger rows for one cell
+// are an interrupted capture's 1-attempt failure and the gap-fill attempt that
+// stands in for its unrecorded in-run retry: both rows record 1 attempt and at
+// least one failed, so the cell has at most the registered 2 recorded attempts
+// and at most one artifact. (A retry the interrupt cut off in flight is not
+// recorded, so it may have reached the server.) Either -captures order is
+// accepted; when the captured row came first, the cell's artifact is still its
+// first attempt's.
+func recallGapFillRetry(a, b captureExpectedRow) bool {
+	return a.Attempts == 1 && b.Attempts == 1 && (a.Status == "failed" || b.Status == "failed")
 }
 
 // verifyRecallTrialOrder checks the selected, registered IDs in this capture,
@@ -625,7 +656,7 @@ func runRecallReport(opts recallReportOptions) (string, recallVerdict, error) {
 		if len(lost) > 0 {
 			// Completeness has been checked, so every absent cell was attempted and failed.
 			return "", "", fmt.Errorf("recall report: model %s: determinism needs every registered family's arm 1 S2 Trace B original and its repeat; %d failed (no artifact): %s; %s",
-				m, len(lost), recallCellList(lost), recallRecaptureHint)
+				m, len(lost), recallCellList(lost), recallFailedCellHint)
 		}
 		r, perFamily, err := recallLabelTokens(ix, set, m)
 		if err != nil {
@@ -763,7 +794,7 @@ func recallHeadroomReport(b *strings.Builder, reg recallRegistration, set recall
 			if _, ok := ix.get(reg.Primary, id); !ok {
 				remedy := "no capture given attempted it: pass the capture file that holds it in -captures, or run a gap-fill capture of it"
 				if _, attempted := claims[[2]string{reg.Primary, id}]; attempted {
-					remedy = "its capture failed; " + recallRecaptureHint
+					remedy = "its capture failed; " + recallFailedCellHint
 				}
 				return "", "", fmt.Errorf("recall report: headroom needs every registered %s arm 0 and arm 1 reply; %s has no artifact (%s)", reg.Primary, id, remedy)
 			}

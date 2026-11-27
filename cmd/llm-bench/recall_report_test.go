@@ -309,7 +309,7 @@ func TestRecallReportMissingArtifact(t *testing.T) {
 	// A missing arm 1 S2 baseline is also a determinism original, so it is a
 	// harness error (a missing repeat), not a slip the report decides on.
 	if _, _, err := recallTestRun(t, recallTestDefault(10, 10), failP("recall-f00-B-s2-1"), 1); err == nil ||
-		!strings.Contains(err.Error(), "determinism needs every registered family's arm 1 S2 Trace B original and its repeat; 1 failed (no artifact): recall-f00-B-s2-1; "+recallRecaptureHint) {
+		!strings.Contains(err.Error(), "determinism needs every registered family's arm 1 S2 Trace B original and its repeat; 1 failed (no artifact): recall-f00-B-s2-1; "+recallFailedCellHint) {
 		t.Errorf("failed arm 1 S2 baseline: err = %v; want the determinism refusal naming recall-f00-B-s2-1", err)
 	}
 
@@ -401,7 +401,7 @@ func TestRecallReportDeterminism(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cap := recallTestCapture(t, traces, models, digest, tc.behave, tc.fail)
 			text, v, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{cap}, Run: tc.run})
-			if want := "recall report: model " + tc.lost + recallRecaptureHint; err == nil || err.Error() != want {
+			if want := "recall report: model " + tc.lost + recallFailedCellHint; err == nil || err.Error() != want {
 				t.Fatalf("verdict %q err %v; want the harness error %q:\n%s", v, err, want, text)
 			}
 		})
@@ -510,7 +510,7 @@ func TestRecallReportHeadroomOnPilot(t *testing.T) {
 	failed := recallTestCapture(t, traces, models, digest, recallTestDefault(3, 3), isF03)
 	unattempted := recallTestCapture(t, recallTestTracesWhere(traces, func(tr Trace) bool { return tr.ID != "recall-f03-A-0" }), models, digest, recallTestDefault(3, 3), nil)
 	for cap, want := range map[string]string{
-		failed:      missing + "its capture failed; " + recallRecaptureHint + ")",
+		failed:      missing + "its capture failed; " + recallFailedCellHint + ")",
 		unattempted: missing + "no capture given attempted it: pass the capture file that holds it in -captures, or run a gap-fill capture of it)",
 	} {
 		if _, _, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{cap}, Headroom: true}); err == nil || err.Error() != want {
@@ -628,7 +628,7 @@ func TestRecallReportHarnessErrors(t *testing.T) {
 			return recallTestCapture(t, traces, models, digest, good, func(m, id string) bool {
 				return m == recallPrimaryModel && slices.Contains([]string{"recall-f02-A-2", "recall-f02-B-s1-2", "recall-f02-B-s2-2"}, id)
 			})
-		}, "model " + recallPrimaryModel + ": no label-size pair (arm 2 with its arm 1) has both artifacts in registered families f02; G5 needs a label measurement per registered family; " + recallRecaptureHint},
+		}, "model " + recallPrimaryModel + ": no label-size pair (arm 2 with its arm 1) has both artifacts in registered families f02; G5 needs a label measurement per registered family; " + recallFailedCellHint},
 		{"the counterbalance scheme differs", func(t *testing.T) string {
 			cap := recallTestCapture(t, traces, models, digest, good, nil)
 			raw, err := os.ReadFile(captureManifestPath(cap))
@@ -649,10 +649,10 @@ func TestRecallReportHarnessErrors(t *testing.T) {
 			}
 		})
 	}
-	// A cell captured in two captures is refused, not counted twice.
+	// A capture given twice is refused, not counted twice.
 	cap := recallTestCapture(t, traces, models, digest, good, nil)
-	if _, _, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{cap, cap}, Run: 1}); err == nil || !strings.Contains(err.Error(), "duplicate cell") {
-		t.Errorf("err = %v; want a duplicate cell error", err)
+	if _, _, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{cap, cap}, Run: 1}); err == nil || !strings.Contains(err.Error(), "are the same capture") {
+		t.Errorf("err = %v; want a same-capture error", err)
 	}
 	// A run number outside 1..2 is the decision input's error.
 	if _, _, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{cap}, Run: 3}); err == nil {
@@ -1086,7 +1086,11 @@ func TestRecallReportRefusesIncompleteCaptures(t *testing.T) {
 // in a later capture is refused, naming the cell and both captures (the extra
 // attempt could only help the label); alone, the failed cell is a missing
 // pair. A gap-fill capture of a cell an interrupted capture never attempted is
-// accepted.
+// accepted. The one exception: a cell an interrupted capture left failed after
+// 1 recorded attempt (no retry was recorded) may get that retry from one
+// gap-fill capture that records 1 attempt for it, in either -captures order,
+// so no cell exceeds the registered 2 recorded attempts. The same capture
+// given twice is refused before any cell is counted.
 func TestRecallReportRefusesSecondAttempt(t *testing.T) {
 	traces := recallTestTraces(recallTestFamilyNum, "confirmatory")
 	models := recallRegModels
@@ -1096,7 +1100,20 @@ func TestRecallReportRefusesSecondAttempt(t *testing.T) {
 	onCell := func(m, id string) bool { return m == recallPrimaryModel && id == cell }
 	failed := recallTestCapture(t, traces, models, digest, good, onCell)
 	interrupted := recallTestCaptureCut(t, traces, models, digest, good, nil, onCell)
-	gapFill := recallTestCapture(t, recallTestTracesWhere(traces, func(tr Trace) bool { return tr.ID == cell }), models[:1], digest, good, nil)
+	only := recallTestTracesWhere(traces, func(tr Trace) bool { return tr.ID == cell })
+	gapFill := recallTestCapture(t, only, models[:1], digest, good, nil)
+	none := func(string, string) bool { return false }
+	complete := recallTestCapture(t, traces, models, digest, good, nil)
+	// oneAttempt: the capture was interrupted before its retry round, so the
+	// failed cell keeps attempts 1.
+	oneAttempt := recallTestCaptureCut(t, traces, models, digest, good, onCell, none)
+	gapFillFailedOnce := recallTestCaptureCut(t, only, models[:1], digest, good, onCell, none)
+	// A gap-fill whose cell fails both in-run attempts (3 attempts in all); a
+	// second cell keeps the capture from writing no artifacts at all.
+	const cell2 = "recall-f01-B-s2-2"
+	onCells := func(m, id string) bool { return m == recallPrimaryModel && (id == cell || id == cell2) }
+	oneAttemptTwoCells := recallTestCaptureCut(t, traces, models, digest, good, onCells, none)
+	gapFillFailedTwice := recallTestCapture(t, recallTestTracesWhere(traces, func(tr Trace) bool { return tr.ID == cell || tr.ID == cell2 }), models[:1], digest, good, onCell)
 	for _, tc := range []struct {
 		name     string
 		caps     []string
@@ -1104,11 +1121,26 @@ func TestRecallReportRefusesSecondAttempt(t *testing.T) {
 		wantText string
 	}{
 		{"failed, then captured in a later capture", []string{failed, gapFill},
-			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + failed + " and " + gapFill, ""},
-		{"failed, then failed again in a later capture", []string{failed, failed}, "duplicate cell", ""},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + failed + " (failed, 2 recorded attempt(s)) and " + gapFill + " (captured, 1 recorded attempt(s))", ""},
+		{"the same capture given twice", []string{failed, failed}, "recall report: captures " + failed + " and " + failed + " are the same capture (one manifest); pass each capture once", ""},
 		{"the failed cell alone is a missing pair", []string{failed}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 39, slips 1 (1 missing), result pass"},
 		{"unattempted, then gap-filled", []string{interrupted, gapFill}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 40, slips 0 (0 missing), result pass"},
 		{"unattempted and not gap-filled", []string{interrupted}, "1 registered cell(s) were attempted by no capture given (no captured or failed ledger row): " + recallPrimaryModel + "/" + cell + "; ", ""},
+		{"failed after 1 attempt, then captured in a gap-fill", []string{oneAttempt, gapFill}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 40, slips 0 (0 missing), result pass"},
+		{"the gap-fill listed first", []string{gapFill, oneAttempt}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 40, slips 0 (0 missing), result pass"},
+		{"failed after 1 attempt, the gap-fill failed once too", []string{oneAttempt, gapFillFailedOnce}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 39, slips 1 (1 missing), result pass"},
+		{"failed after 1 attempt, the gap-fill retried in-run (3 attempts)", []string{oneAttemptTwoCells, gapFillFailedTwice},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttemptTwoCells + " (failed, 1 recorded attempt(s)) and " + gapFillFailedTwice + " (failed, 2 recorded attempt(s))", ""},
+		{"failed after 1 attempt, gap-filled, then attempted a third time", []string{oneAttempt, gapFill, gapFillFailedOnce},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + " (failed, 1 recorded attempt(s)), " + gapFill + " (captured, 1 recorded attempt(s)) and " + gapFillFailedOnce + " (failed, 1 recorded attempt(s)); a cell gets at most one gap-fill retry", ""},
+		{"failed after 1 attempt, failed once in a gap-fill, then captured a third time", []string{oneAttempt, gapFillFailedOnce, gapFill},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + " (failed, 1 recorded attempt(s)), " + gapFillFailedOnce + " (failed, 1 recorded attempt(s)) and " + gapFill + " (captured, 1 recorded attempt(s)); a cell gets at most one gap-fill retry", ""},
+		{"failed after 2 attempts, then failed once in a gap-fill", []string{failed, gapFillFailedOnce}, "duplicate cell", ""},
+		// The report cannot tell which capture ran first, and the pair adds no
+		// artifact: the cell keeps the one it was captured with.
+		{"captured first try, plus a 1-attempt failure in another capture", []string{complete, gapFillFailedOnce}, "", recallPrimaryModel + ": pairs 40, arm 1 answers 40, slips 0 (0 missing), result pass"},
+		{"captured first try, then captured again", []string{complete, gapFill},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + complete + " (captured, 1 recorded attempt(s)) and " + gapFill + " (captured, 1 recorded attempt(s))", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text, _, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: tc.caps, Run: 1})
@@ -1165,8 +1197,8 @@ func TestRecallReportLabelTokenSpread(t *testing.T) {
 // R48: a pilot registration's report (without -recall-headroom) skips the
 // gate and returns no verdict. It renders the metrics that apply without arm
 // 2, the placebo tokens, and one row per registered reply in model, family and
-// cell order. Cells no capture attempted are reported, not refused; a second
-// attempt and -recall-run are still refused.
+// cell order. Cells no capture attempted are reported, not refused; a capture
+// given twice and -recall-run are still refused.
 func TestRecallReportPilotView(t *testing.T) {
 	traces := recallTestTraces(recallSplitFamilyCount("pilot"), "pilot")
 	models := recallRegModels
@@ -1258,7 +1290,7 @@ func TestRecallReportPilotView(t *testing.T) {
 		want string
 	}{
 		{"-recall-run on a pilot", recallReportOptions{RegistrationPath: regPath, Captures: []string{capture}, Run: 1}, "-recall-run does not apply to a pilot registration"},
-		{"a cell attempted twice", recallReportOptions{RegistrationPath: regPath, Captures: []string{capture, capture}}, "duplicate cell"},
+		{"a capture given twice", recallReportOptions{RegistrationPath: regPath, Captures: []string{capture, capture}}, "are the same capture"},
 	} {
 		if _, _, err := runRecallReport(tc.opts); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v; want %q", tc.name, err, tc.want)
