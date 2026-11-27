@@ -29,7 +29,7 @@ var recallDecisionPath = []struct {
 	{"recall_report.go", []string{"recallReply", "scoreRecallA", "scoreRecallB", "pairRecallA", "pairRecallB",
 		"recallACell", "recallBCell", "evaluateRecallHeadroom", "recallDeterminism",
 		"recallRegisteredSet", "has", "recallIndexOf", "get", "recallTraceID", "unattempted",
-		"runRecallReport", "recallLabelTokens", "add", "recallHeadroomReport", "recallHeadroomPrecondition",
+		"runRecallReport", "recallLabelTokens", "add", "recallHeadroomReport", "recallHeadroomPrecondition", "recallGapFillRetry",
 		"loadRecallCaptures", "recallCheckArtifact", "verifyRecallTrialOrder"}},
 	{"recall.go", []string{"recallNumberPattern", "recallWorkspaceFile", "currentValue", "validateRecallTrace", "validateRecallTurns"}},
 	{"recall_build.go", []string{"parseRecallTraceID", "recallCells"}},
