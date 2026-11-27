@@ -427,6 +427,30 @@ func TestLoadInjectionRegistrationRejects(t *testing.T) {
 	}
 }
 
+// #876: a repeated model is refused by name, alone and when it would hide a
+// decoding entry for a model not in models (with one entry per listed model,
+// the decoding count then matches).
+func TestLoadInjectionRegistrationRejectsRepeatedModel(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"repeated model": func(r map[string]any) {
+			r["models"] = []string{"openai-compat/a", "openai-compat/kimi", "openai-compat/a"}
+		},
+		"repeated model hides an unlisted decoding entry": func(r map[string]any) {
+			dec := r["decoding"].(map[string]any)
+			r["models"] = []string{"openai-compat/a", "openai-compat/a"}
+			dec["openai-compat/zzz"] = dec["openai-compat/kimi"]
+			delete(dec, "openai-compat/kimi")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := loadInjectionRegistration(validRegistrationJSON(t, mutate))
+			if want := `model "openai-compat/a" is listed twice`; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v; want %q", err, want)
+			}
+		})
+	}
+}
+
 func TestValidateCaptureLedgerV3AttemptRules(t *testing.T) {
 	tr := validInjectionTrace()
 	base := func() captureManifest {
