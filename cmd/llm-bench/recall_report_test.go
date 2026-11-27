@@ -1132,9 +1132,9 @@ func TestRecallReportRefusesSecondAttempt(t *testing.T) {
 		{"failed after 1 attempt, the gap-fill retried in-run (3 attempts)", []string{oneAttemptTwoCells, gapFillFailedTwice},
 			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttemptTwoCells + " (failed, 1 recorded attempt(s)) and " + gapFillFailedTwice + " (failed, 2 recorded attempt(s))", ""},
 		{"failed after 1 attempt, gap-filled, then attempted a third time", []string{oneAttempt, gapFill, gapFillFailedOnce},
-			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + ", " + gapFill + " and " + gapFillFailedOnce + "; a cell gets at most one gap-fill retry", ""},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + " (failed, 1 recorded attempt(s)), " + gapFill + " (captured, 1 recorded attempt(s)) and " + gapFillFailedOnce + " (failed, 1 recorded attempt(s)); a cell gets at most one gap-fill retry", ""},
 		{"failed after 1 attempt, failed once in a gap-fill, then captured a third time", []string{oneAttempt, gapFillFailedOnce, gapFill},
-			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + ", " + gapFillFailedOnce + " and " + gapFill + "; a cell gets at most one gap-fill retry", ""},
+			"duplicate cell " + recallPrimaryModel + "/" + cell + ": attempted in captures " + oneAttempt + " (failed, 1 recorded attempt(s)), " + gapFillFailedOnce + " (failed, 1 recorded attempt(s)) and " + gapFill + " (captured, 1 recorded attempt(s)); a cell gets at most one gap-fill retry", ""},
 		{"failed after 2 attempts, then failed once in a gap-fill", []string{failed, gapFillFailedOnce}, "duplicate cell", ""},
 		// The report cannot tell which capture ran first, and the pair adds no
 		// artifact: the cell keeps the one it was captured with.
@@ -1197,8 +1197,8 @@ func TestRecallReportLabelTokenSpread(t *testing.T) {
 // R48: a pilot registration's report (without -recall-headroom) skips the
 // gate and returns no verdict. It renders the metrics that apply without arm
 // 2, the placebo tokens, and one row per registered reply in model, family and
-// cell order. Cells no capture attempted are reported, not refused; a second
-// attempt and -recall-run are still refused.
+// cell order. Cells no capture attempted are reported, not refused; a capture
+// given twice and -recall-run are still refused.
 func TestRecallReportPilotView(t *testing.T) {
 	traces := recallTestTraces(recallSplitFamilyCount("pilot"), "pilot")
 	models := recallRegModels

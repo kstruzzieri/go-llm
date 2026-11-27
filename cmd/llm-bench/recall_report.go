@@ -278,7 +278,8 @@ const recallCachingHint = "likely cause: prompt caching on the server (usage.pro
 // while another remains), and the spread of every such difference. A count of
 // 0 (usage not reported), a difference below 1, a spread above
 // recallLabelTokenSpreadMax, or a family with no measured pair is a harness
-// error that only a recapture can cure.
+// error that only a recapture (or, for a missing pair, a gap-fill retry of a
+// cell failed after 1 recorded attempt) can cure.
 func recallLabelTokens(ix recallIndex, set recallRegSet, model string) (recallTokenRange, map[string]int, error) {
 	var r recallTokenRange
 	perFamily := map[string]int{}
@@ -372,7 +373,8 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 	claims := recallClaims{}
 	claimRows := map[[2]string]captureExpectedRow{}
 	retried := map[[2]string]string{} // cell -> the capture that gave it its gap-fill retry
-	given := map[string]string{}      // manifest digest -> capture path
+	retryRows := map[[2]string]captureExpectedRow{}
+	given := map[string]string{} // manifest digest -> capture path
 	for _, path := range paths {
 		manifestPath := captureManifestPath(path)
 		raw, err := os.ReadFile(manifestPath)
@@ -441,12 +443,13 @@ func loadRecallCaptures(reg recallRegistration, digest string, paths []string) (
 			key := [2]string{row.Model, row.TraceID}
 			if prev, dup := claims[key]; dup {
 				if second, ok := retried[key]; ok {
-					return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s, %s and %s; a cell gets at most one gap-fill retry, so drop the capture that attempted it a third time", row.Model, row.TraceID, prev, second, path)
+					first, mid := claimRows[key], retryRows[key]
+					return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s (%s, %d recorded attempt(s)), %s (%s, %d recorded attempt(s)) and %s (%s, %d recorded attempt(s)); a cell gets at most one gap-fill retry, so drop the capture that attempted it a third time", row.Model, row.TraceID, prev, first.Status, first.Attempts, second, mid.Status, mid.Attempts, path, row.Status, row.Attempts)
 				}
 				if first := claimRows[key]; !recallGapFillRetry(first, row) {
 					return nil, nil, nil, fmt.Errorf("recall report: duplicate cell %s/%s: attempted in captures %s (%s, %d recorded attempt(s)) and %s (%s, %d recorded attempt(s)); a cell is attempted in one capture only (its one retry runs inside that capture), except that one gap-fill capture recording 1 attempt may retry a cell an interrupted capture left failed after 1 recorded attempt, so no cell exceeds 2 recorded attempts; drop the capture that attempted it again, or a recapture needs the owner's decision", row.Model, row.TraceID, prev, first.Status, first.Attempts, path, row.Status, row.Attempts)
 				}
-				retried[key] = path
+				retried[key], retryRows[key] = path, row
 				continue
 			}
 			claims[key] = path
