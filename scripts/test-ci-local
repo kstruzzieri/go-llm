@@ -758,7 +758,7 @@ done
 zero=0000000000000000000000000000000000000000
 # The gate command, with the container named after the hook's pid so an
 # interrupt can remove it.
-gate_re='^compose --env-file /dev/null -f docker-compose\.ci\.yml run --build --rm --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
+gate_re='^compose --env-file /dev/null -f docker-compose\.ci\.yml run --build --rm -T --name go-llm-prepush-[0-9][0-9]* ci \./scripts/ci-local --mode full$'
 is_gate_cmd() { printf '%s\n' "$1" | grep -Eq "$gate_re"; }
 
 # run_hook NAME CHECKOUT DOCKER_STATUS runs the hook from CHECKOUT with

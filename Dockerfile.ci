@@ -1,10 +1,15 @@
-# syntax=docker/dockerfile:1.7
-
+# No "# syntax=" line and a digest-pinned base: either a frontend image or a
+# bare tag makes BuildKit ask Docker Hub (and the host's credential helper)
+# for the current digest on every build, cached or not, so every push paid a
+# network lookup that could hang. The built-in Dockerfile frontend supports
+# everything used here, including RUN --mount=type=cache.
+#
 # Pinned to go.mod's toolchain line, which GitHub CI's lint job selects via
 # go-version-file. The floating 1.27 tag moved to go1.27.2, whose export data
 # golangci-lint v2.13.2 cannot read. Bump this tag, the toolchain line and
-# GOLANGCI_LINT_VERSION together.
-FROM golang:1.27.1-alpine
+# GOLANGCI_LINT_VERSION together, and replace the digest with the new tag's
+# multi-platform index digest (docker buildx imagetools inspect <tag>).
+FROM golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
 
 ARG GOLANGCI_LINT_VERSION=v2.13.2
 

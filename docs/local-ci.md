@@ -280,8 +280,11 @@ installation's repository into a separate, minimal build directory. From there
 it runs the equivalent of:
 
 ```bash
-GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit> docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit> docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm -T ci ./scripts/ci-local --mode full
 ```
+
+`-T` disables pseudo-terminal allocation because Git supplies ref updates on
+standard input even when the hook writes its output to a terminal.
 
 `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT` name the gated tree and the pushed
 commit; the Compose service passes both through, and the containment evidence
@@ -438,4 +441,4 @@ filesystem still skip in the container; the native Darwin job covers those.
 
 ## Notes
 
-The CI image is based on `golang:1.27.1-alpine`, pinned to the patch release on the `toolchain` line in `go.mod`, which the GitHub lint job also uses. A floating minor tag can move to a newer patch whose export data the pinned golangci-lint cannot read, which fails the gate's lint stage on every branch. Bump the image tag, the `toolchain` line and `GOLANGCI_LINT_VERSION` in `Dockerfile.ci` together. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
+The CI image is based on `golang:1.27.1-alpine`, pinned to the patch release on the `toolchain` line in `go.mod`, which the GitHub lint job also uses. A floating minor tag can move to a newer patch whose export data the pinned golangci-lint cannot read, which fails the gate's lint stage on every branch. Bump the image tag, the `toolchain` line and `GOLANGCI_LINT_VERSION` in `Dockerfile.ci` together, and replace the base image digest with the new tag's multi-platform index digest (`docker buildx imagetools inspect golang:<version>-alpine` prints it as `Digest:`). The digest pin and the absence of a `# syntax=` line keep a cached build off the network: with either a frontend image or a bare tag, BuildKit asks Docker Hub, through the host's credential helper, for the current digest on every build, so every push paid a registry lookup that could hang for as long as the helper did. With neither, the hook's `--build` finishes from cache with no registry request; only a changed `Dockerfile.ci` or an empty build cache pulls. It installs `build-base` and sets `CGO_ENABLED=1` because Go's race detector requires cgo support even though the module itself avoids cgo-only dependencies.
