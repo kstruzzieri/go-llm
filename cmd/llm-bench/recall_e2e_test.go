@@ -519,7 +519,7 @@ func TestRecallEndToEnd(t *testing.T) {
 				t.Fatalf("edited copy: %d artifacts (want %d), err %v", len(n), wantRequests-1, err)
 			}
 			text, v, err := runRecallReport(recallReportOptions{RegistrationPath: regPath, Captures: []string{edited}, Run: 1})
-			want := "recall report: model " + recallPrimaryModel + ": determinism needs every registered family's arm 1 S2 Trace B original and its repeat; 1 failed (no artifact): " + repeat + "; " + recallRecaptureHint
+			want := "recall report: model " + recallPrimaryModel + ": determinism needs every registered family's arm 1 S2 Trace B original and its repeat; 1 failed (no artifact): " + repeat + "; " + recallFailedCellHint
 			if err == nil || err.Error() != want {
 				t.Fatalf("verdict %q err %v; want the harness error %q:\n%s", v, err, want, text)
 			}
