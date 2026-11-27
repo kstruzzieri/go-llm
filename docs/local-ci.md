@@ -280,8 +280,11 @@ installation's repository into a separate, minimal build directory. From there
 it runs the equivalent of:
 
 ```bash
-GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit> docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm ci ./scripts/ci-local --mode full
+GO_LLM_CI_SOURCE=/path/to/export GO_LLM_CI_TREE=<tree> GO_LLM_CI_COMMIT=<commit> docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm -T ci ./scripts/ci-local --mode full
 ```
+
+`-T` disables pseudo-terminal allocation because Git supplies ref updates on
+standard input even when the hook writes its output to a terminal.
 
 `GO_LLM_CI_TREE` and `GO_LLM_CI_COMMIT` name the gated tree and the pushed
 commit; the Compose service passes both through, and the containment evidence

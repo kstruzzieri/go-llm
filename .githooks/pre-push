@@ -131,5 +131,5 @@ for pair in $trees; do
   # The containment evidence file stays in the discarded container; the
   # checker's success line in this output names the tree, commit and source
   # digest it bound.
-  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" GO_LLM_CI_TREE="$tree" GO_LLM_CI_COMMIT="$commit" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm --name "$name" ci ./scripts/ci-local --mode full)
+  (cd "$work/runner" && GO_LLM_CI_SOURCE="$work/$tree" GO_LLM_CI_TREE="$tree" GO_LLM_CI_COMMIT="$commit" docker compose --env-file /dev/null -f docker-compose.ci.yml run --build --rm -T --name "$name" ci ./scripts/ci-local --mode full)
 done
