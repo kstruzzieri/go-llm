@@ -77,6 +77,10 @@ func checkForgedCloseVariants(b injectionBase) error {
 // refuses to remove any other trace, so an -injection-out left at its #452
 // default cannot wipe that corpus.
 func buildForgedCloseCorpus(ctx context.Context, cases injectionCases, outDir string) error {
+	if outDir == "" {
+		return errors.New("forged-close build: the output folder is required") // Clean would make it "."
+	}
+	outDir = filepath.Clean(outDir) // create, list and publish one lexical folder (#875)
 	var files []filePublication
 	names := map[string]bool{}
 	for _, b := range cases.Bases {
@@ -105,7 +109,7 @@ func buildForgedCloseCorpus(ctx context.Context, cases injectionCases, outDir st
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("forged-close build: %w", err)
 	}
-	existing, err := filepath.Glob(filepath.Join(outDir, "inj-*.json"))
+	existing, err := filesWithPrefix(outDir, "inj-")
 	if err != nil {
 		return fmt.Errorf("forged-close build: %w", err)
 	}

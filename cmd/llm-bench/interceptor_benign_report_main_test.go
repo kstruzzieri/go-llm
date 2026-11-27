@@ -34,7 +34,9 @@ func TestMainInterceptorBenignReport(t *testing.T) {
 	// scratch copies: a mutated refusal must not clobber the committed corpus.
 	scratch := t.TempDir()
 	sReg, sCases := filepath.Join(scratch, "registration.json"), filepath.Join(scratch, "cases.json")
-	for _, f := range []string{sReg, sCases} {
+	// A traces file, not a folder: the fixed-input alias refusals still run
+	// before the traces are listed (#875).
+	for _, f := range []string{sReg, sCases, filepath.Join(scratch, "traces")} {
 		if err := os.WriteFile(f, []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}

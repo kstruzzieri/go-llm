@@ -71,6 +71,120 @@ func TestNormalizeFenceKeysRejectsDisagreeingKeys(t *testing.T) {
 	}
 }
 
+// #875: each builder prunes only its own out dir. Glob metacharacters in the
+// path are not a pattern: "out[1]" would match a sibling "out1", whose
+// look-alike trace must survive (and, for forged-close, not be refused).
+func TestBuildersPruneOnlyTheirOutDir(t *testing.T) {
+	root := corpusRepoRoot(t)
+	// Absolute, since each subtest changes the working folder.
+	injCases, err := filepath.Abs(filepath.FromSlash("testdata/injection/one-base.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	benCases, err := filepath.Abs(filepath.Join(benignFixtureDir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, prefix string
+		build        func(ctx context.Context, out string) error
+	}{
+		{"injection", "inj-", func(ctx context.Context, out string) error {
+			return buildInjectionCorpus(ctx, injCases, out)
+		}},
+		{"benign", "ben-", func(ctx context.Context, out string) error {
+			return buildBenignCorpus(ctx, benCases, out)
+		}},
+		{"forged-close", "inj-", func(ctx context.Context, out string) error {
+			return buildInjectionCorpusBySource(ctx, filepath.Join(root, forgedCloseCorpusDir, "cases.json"), out)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := t.TempDir()
+			// An empty output path is refused, not cleaned to "." (the
+			// working folder, whose look-alike trace must survive).
+			t.Chdir(parent)
+			if err := os.WriteFile(tc.prefix+"notes.json", []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.build(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "the output folder is required") {
+				t.Errorf("build into \"\": err = %v; want the output folder refusal", err)
+			}
+			if _, err := os.Stat(tc.prefix + "notes.json"); err != nil {
+				t.Errorf("the build removed %snotes.json from the working folder: %v", tc.prefix, err)
+			}
+			out, sibling := filepath.Join(parent, "out[1]"), filepath.Join(parent, "out1")
+			stale, victim := filepath.Join(out, tc.prefix+"stale.json"), filepath.Join(sibling, tc.prefix+"victim.json")
+			for _, f := range []string{stale, victim} {
+				if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(f, []byte(`{"source":"`+forgedCloseSource+`"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tc.build(t.Context(), out); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(stale); !os.IsNotExist(err) {
+				t.Errorf("stale trace in the out dir survived: %v", err)
+			}
+			if _, err := os.Stat(victim); err != nil {
+				t.Errorf("the build removed a file in sibling %s: %v", sibling, err)
+			}
+			// "link/../lex" is the lexical lex: the build creates, lists and
+			// publishes there, not beside link's target.
+			if err := os.MkdirAll(filepath.Join(parent, "real", "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(parent, "real", "sub"), filepath.Join(parent, "link")); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			sep := string(filepath.Separator)
+			if err := tc.build(t.Context(), filepath.Join(parent, "link")+sep+".."+sep+"lex"); err != nil {
+				t.Fatalf("build via link/../lex: %v", err)
+			}
+			if entries, err := os.ReadDir(filepath.Join(parent, "lex")); err != nil || len(entries) == 0 {
+				t.Errorf("lexical lex holds %d entries, %v; want the traces", len(entries), err)
+			}
+			if _, err := os.Stat(filepath.Join(parent, "real", "lex")); !os.IsNotExist(err) {
+				t.Errorf("the build created real/lex beside link's target: %v", err)
+			}
+		})
+	}
+}
+
+// #875: filesWithPrefix lists a missing dir as empty (as filepath.Glob did),
+// and lists the dir filepath.Join writes into: for "link/../out" that is the
+// lexical "out", not the "out" beside link's target.
+func TestFilesWithPrefixListsTheWrittenDir(t *testing.T) {
+	parent := t.TempDir()
+	if got, err := filesWithPrefix(filepath.Join(parent, "missing"), "inj-"); err != nil || got != nil {
+		t.Fatalf("missing dir = %v, %v; want nil, nil", got, err)
+	}
+	if _, err := filesWithPrefix("", "inj-"); err == nil {
+		t.Fatal(`filesWithPrefix("") listed the working folder; want an error`)
+	}
+	for _, d := range []string{"out", filepath.Join("real", "sub"), filepath.Join("real", "out")} {
+		if err := os.MkdirAll(filepath.Join(parent, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join("out", "inj-lexical.json"), filepath.Join("real", "out", "inj-physical.json")} {
+		if err := os.WriteFile(filepath.Join(parent, f), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(parent, "real", "sub"), filepath.Join(parent, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	dir := filepath.Join(parent, "link") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out"
+	got, err := filesWithPrefix(dir, "inj-")
+	if want := filepath.Join(parent, "out", "inj-lexical.json"); err != nil || len(got) != 1 || got[0] != want {
+		t.Fatalf("filesWithPrefix(%q) = %v, %v; want [%s]", dir, got, err, want)
+	}
+}
+
 func TestBuildInjectionCorpusOneBase(t *testing.T) {
 	out := t.TempDir()
 	for _, n := range []string{"inj-old.json", "other.json"} {

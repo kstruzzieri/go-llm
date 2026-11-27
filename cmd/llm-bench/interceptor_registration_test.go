@@ -93,9 +93,9 @@ func fileSHA256(t *testing.T, path string) string {
 // map copied verbatim from the #452 registration.
 func newInterceptorRegistration(t *testing.T, dir string) interceptorRegistration {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(dir, "traces", "*.json"))
+	files, err := filesWithPrefix(filepath.Join(dir, "traces"), "")
 	if err != nil || len(files) == 0 {
-		t.Fatalf("Glob(traces) = %v, %v", files, err)
+		t.Fatalf("list traces = %v, %v", files, err)
 	}
 	traces, err := loadTraces(files)
 	if err != nil {
@@ -253,7 +253,8 @@ func TestRegistrationRegen(t *testing.T) {
 func registrationFixture(t *testing.T) string {
 	t.Helper()
 	src := benignCorpusDir(t)
-	root := t.TempDir()
+	// A literal "[1]" in the path: a glob over it would match nothing here (#875).
+	root := filepath.Join(t.TempDir(), "r[1]")
 	dir := filepath.Join(root, "llm", "traces", "interceptor-benign")
 	census := filepath.Join(root, "llm", "census")
 	repoCensus := filepath.Join(corpusRepoRoot(t), "docs", "llm", "census")
@@ -513,6 +514,34 @@ func TestRegistrationStrict(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #875: checkTraces reads dir/traces itself; glob metacharacters in dir are
+// not a pattern ("reg[1]" would otherwise read a sibling "reg1").
+func TestCheckTracesDirIsNotAPattern(t *testing.T) {
+	src := filepath.Join(benignCorpusDir(t), "traces", "ben-del-agents-docs-strict-g.json")
+	traces, err := loadTraces([]string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "reg[1]")
+	for _, d := range []string{filepath.Join(dir, "traces"), filepath.Join(parent, "reg1", "traces")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "traces", filepath.Base(src)), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := interceptorRegistration{Traces: []registeredTrace{{ID: traces[0].ID, SHA256: canonicalTraceHash(traces[0]), Population: traces[0].Benign.Stratum}}}
+	if err := r.checkTraces(dir); err != nil {
+		t.Fatal(err)
 	}
 }
 
