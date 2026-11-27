@@ -77,6 +77,7 @@ func checkForgedCloseVariants(b injectionBase) error {
 // refuses to remove any other trace, so an -injection-out left at its #452
 // default cannot wipe that corpus.
 func buildForgedCloseCorpus(ctx context.Context, cases injectionCases, outDir string) error {
+	outDir = filepath.Clean(outDir) // create, list and publish one lexical folder (#875)
 	var files []filePublication
 	names := map[string]bool{}
 	for _, b := range cases.Bases {

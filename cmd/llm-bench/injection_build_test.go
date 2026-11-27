@@ -111,6 +111,24 @@ func TestBuildersPruneOnlyTheirOutDir(t *testing.T) {
 			if _, err := os.Stat(victim); err != nil {
 				t.Errorf("the build removed a file in sibling %s: %v", sibling, err)
 			}
+			// "link/../lex" is the lexical lex: the build creates, lists and
+			// publishes there, not beside link's target.
+			if err := os.MkdirAll(filepath.Join(parent, "real", "sub"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(parent, "real", "sub"), filepath.Join(parent, "link")); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			sep := string(filepath.Separator)
+			if err := tc.build(t.Context(), filepath.Join(parent, "link")+sep+".."+sep+"lex"); err != nil {
+				t.Fatalf("build via link/../lex: %v", err)
+			}
+			if entries, err := os.ReadDir(filepath.Join(parent, "lex")); err != nil || len(entries) == 0 {
+				t.Errorf("lexical lex holds %d entries, %v; want the traces", len(entries), err)
+			}
+			if _, err := os.Stat(filepath.Join(parent, "real", "lex")); !os.IsNotExist(err) {
+				t.Errorf("the build created real/lex beside link's target: %v", err)
+			}
 		})
 	}
 }

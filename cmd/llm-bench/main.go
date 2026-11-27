@@ -383,12 +383,14 @@ func main() {
 			{"-registration (cases.json)", filepath.Join(bound, "cases.json")},
 			{"-registration (census-results.json)", filepath.Join(census, "census-results.json")},
 			{"-registration (manifest.json)", filepath.Join(census, "manifest.json")}}
+		// The fixed inputs are checked first, so an unreadable traces folder
+		// cannot hide an alias of one of them.
+		refuseReportAlias("interceptor-benign-report", *reportPath, inputs)
 		traces, err := filesWithPrefix(filepath.Join(bound, "traces"), "")
 		if err != nil {
 			log.Fatalf("llm-bench: interceptor-benign-report: list traces: %v", err)
 		}
-		inputs = append(inputs, pathListInputs("-registration (traces)", traces)...)
-		refuseReportAlias("interceptor-benign-report", *reportPath, inputs)
+		refuseReportAlias("interceptor-benign-report", *reportPath, pathListInputs("-registration (traces)", traces))
 		report, err := runInterceptorBenignReport(ctx, *registrationPath)
 		if err != nil {
 			log.Fatalf("llm-bench: interceptor-benign-report: %v", err)
