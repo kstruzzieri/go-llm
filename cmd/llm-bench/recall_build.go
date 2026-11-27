@@ -1118,6 +1118,9 @@ func recallCasesDigest(c recallCases, split string) (string, error) {
 // lexically cleaned dir, the one filepath.Join(dir, name) writes into ("a/link/../out"
 // is "a/out", not the directory beside link's target).
 func filesWithPrefix(dir, prefix string) ([]string, error) {
+	if dir == "" {
+		return nil, errors.New("list traces: the folder is required") // Clean would make it "."
+	}
 	dir = filepath.Clean(dir)
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {

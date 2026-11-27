@@ -324,6 +324,9 @@ func injectionCells(b injectionBase) []injectionCell {
 // the candidate would see, normalizes the per-render fence keys and publishes
 // the resulting frozen traces (spec section 4.4).
 func buildInjectionCorpusWith(ctx context.Context, casesPath, outDir string, opts injectionBuildOptions) error {
+	if outDir == "" {
+		return errors.New("injection build: the output folder is required") // Clean would make it "."
+	}
 	outDir = filepath.Clean(outDir) // create, list and publish one lexical folder (#875)
 	if opts.Arm.Name != "" || len(opts.Arm.Chain) > 0 {
 		if err := checkArm(opts.Arm); err != nil {

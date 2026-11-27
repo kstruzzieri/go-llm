@@ -76,15 +76,24 @@ func TestNormalizeFenceKeysRejectsDisagreeingKeys(t *testing.T) {
 // look-alike trace must survive (and, for forged-close, not be refused).
 func TestBuildersPruneOnlyTheirOutDir(t *testing.T) {
 	root := corpusRepoRoot(t)
+	// Absolute, since each subtest changes the working folder.
+	injCases, err := filepath.Abs(filepath.FromSlash("testdata/injection/one-base.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	benCases, err := filepath.Abs(filepath.Join(benignFixtureDir, "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, prefix string
 		build        func(ctx context.Context, out string) error
 	}{
 		{"injection", "inj-", func(ctx context.Context, out string) error {
-			return buildInjectionCorpus(ctx, filepath.FromSlash("testdata/injection/one-base.json"), out)
+			return buildInjectionCorpus(ctx, injCases, out)
 		}},
 		{"benign", "ben-", func(ctx context.Context, out string) error {
-			return buildBenignCorpus(ctx, filepath.Join(benignFixtureDir, "cases.json"), out)
+			return buildBenignCorpus(ctx, benCases, out)
 		}},
 		{"forged-close", "inj-", func(ctx context.Context, out string) error {
 			return buildInjectionCorpusBySource(ctx, filepath.Join(root, forgedCloseCorpusDir, "cases.json"), out)
@@ -92,6 +101,18 @@ func TestBuildersPruneOnlyTheirOutDir(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parent := t.TempDir()
+			// An empty output path is refused, not cleaned to "." (the
+			// working folder, whose look-alike trace must survive).
+			t.Chdir(parent)
+			if err := os.WriteFile(tc.prefix+"notes.json", []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.build(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "the output folder is required") {
+				t.Errorf("build into \"\": err = %v; want the output folder refusal", err)
+			}
+			if _, err := os.Stat(tc.prefix + "notes.json"); err != nil {
+				t.Errorf("the build removed %snotes.json from the working folder: %v", tc.prefix, err)
+			}
 			out, sibling := filepath.Join(parent, "out[1]"), filepath.Join(parent, "out1")
 			stale, victim := filepath.Join(out, tc.prefix+"stale.json"), filepath.Join(sibling, tc.prefix+"victim.json")
 			for _, f := range []string{stale, victim} {
@@ -140,6 +161,9 @@ func TestFilesWithPrefixListsTheWrittenDir(t *testing.T) {
 	parent := t.TempDir()
 	if got, err := filesWithPrefix(filepath.Join(parent, "missing"), "inj-"); err != nil || got != nil {
 		t.Fatalf("missing dir = %v, %v; want nil, nil", got, err)
+	}
+	if _, err := filesWithPrefix("", "inj-"); err == nil {
+		t.Fatal(`filesWithPrefix("") listed the working folder; want an error`)
 	}
 	for _, d := range []string{"out", filepath.Join("real", "sub"), filepath.Join("real", "out")} {
 		if err := os.MkdirAll(filepath.Join(parent, d), 0o755); err != nil {

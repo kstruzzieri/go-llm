@@ -1002,6 +1002,9 @@ var benignTraceArms = []struct {
 // (ben-<task>-g, ben-<task>-gd) and publishes them to outDir, removing stale
 // ben-*.json files there.
 func buildBenignCorpus(ctx context.Context, casesPath, outDir string) error {
+	if outDir == "" {
+		return errors.New("benign build: the output folder is required") // Clean would make it "."
+	}
 	outDir = filepath.Clean(outDir) // create, list and publish one lexical folder (#875)
 	c, err := loadBenignCases(casesPath)
 	if err != nil {
