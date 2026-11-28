@@ -350,7 +350,7 @@ Read the limits literally:
 - **Metadata that leads into the workspace stays writable on both backends.** A file inside `.git/hooks` or `.git/info` that is a symbolic link to a file elsewhere in the workspace (such as `.git/hooks/pre-commit` linked to `scripts/pre-commit`), any git metadata file that is a hard link to a workspace file, and a file the repository's config pulls in with `[include]` or `[includeIf]` when it lies elsewhere in the workspace or inside `.git` under a name that is not protected are ordinary files a sandboxed command can change. Git runs or reads what it wrote, as with `core.hooksPath`.
 - **A submodule named under `hooks/` or `info/` is read-only.** On both backends, a submodule whose name has a directory called `hooks` or `info` before its last part (for example `hooks/shared`) has its whole git directory read-only inside the sandbox, so git commands that write in that submodule fail there.
 - **Existing git directories the pre-run check does not recognize are not protected.** On both backends, a git directory kept inside the workspace somewhere other than `.git`, `.git/modules` or `.git/worktrees` (for example one made with `git init --separate-git-dir` into the workspace) is not recognized: its hooks and config stay writable, and only the `.git` file pointing at it is protected. A `.git` that is itself a symbolic link is not protected either. The same goes for an existing bare repository, the directory a `.git` file points to, and, in a case-insensitive directory, a spelling of `.git` found only by filesystem lookup (ordinary case variants such as `.Git` are recognized): the read-only protection does not cover them, so a hook added to an existing `hooks` folder or a config edited in place there is not caught. Under Bubblewrap the check after each command still sets aside new git directories and the new or replaced metadata it can identify.
-- **Host Git can run commands from a bare repository in the workspace.** On both backends, a sandboxed command can create a bare repository (a directory holding `HEAD`, `objects` and `refs`) or change the config or hooks of an existing one, such as a fixture under `testdata/`. Host Git can discover the bare repository when run from that directory or a subdirectory, including when the bare repository is the workspace root. The repository's configuration can cause Git to run programs outside the sandbox.
+- **Host Git can run commands from a bare repository in the workspace.** On both backends, a sandboxed command can create a bare repository (a directory holding `HEAD`, `objects` and `refs`) or change the config or hooks of an existing one, such as a fixture under `testdata/`. Host Git can discover the bare repository when run from that directory or a subdirectory, including when the bare repository is the workspace root. The repository's configuration can cause Git to run programs outside the sandbox. On macOS the sandbox refuses neither. On Linux, after a Bubblewrap command Golem tries to rename a new bare repository's `HEAD` (see [New git machinery after a Bubblewrap command](#new-git-machinery-after-a-bubblewrap-command)). Host Git can discover the repository until that rename succeeds; a failed check or rename leaves it live and produces a WARNING. A changed config or hooks of an existing bare repository is not set aside.
 
   A Seatbelt rule against creating new `HEAD` entries in the workspace broke bare test fixtures and operations that create entries named `head`. It still allowed a rename from the command's private temp into the workspace. Extending the rule to private temp blocked that rename and broke Git dependencies in Cargo, direct Go module fetches, and Bundler. Both variants left the config and hooks of existing bare repositories writable, so neither rule shipped.
 
@@ -393,7 +393,7 @@ A check reports up to 50 lines, with warnings first. On overflow it keeps 49 det
 
 **How to restore.** Look at what you are bringing back first: read the hooks and config. Then rename each entry back to the name in its note, working from the last note upward. The notes list a `HEAD` before the folder that holds it, so going upward renames the folder back before its `HEAD`. If a folder was moved during the run, a note can name its old path: check where the entry actually is before renaming anything back.
 
-**Suggested setting.** Run `git config --global safe.bareRepository explicit` ([above](#what-each-backend-enforces)), so host git does not pick up a bare repository it finds on its own.
+**Suggested setting.** Run `git config --global safe.bareRepository explicit` ([above](#what-each-backend-enforces)), so host git rejects ordinary bare repositories it discovers implicitly.
 
 **Limits.**
 
@@ -1154,9 +1154,10 @@ keeps working) and lazy fetch, with the environment above. Only `core.fsmonitor`
 helpers are newly off. A sandboxed command can still reach these through:
 
 - On Bubblewrap, creating `hooks/`, `info/`, `config.worktree` or `commondir`
-  in a git directory where they are absent when the command starts
-  ([#802](https://github.com/kstruzzieri/go-llm/issues/802); see the
-  [Bubblewrap residuals](#native-command-sandbox--sandbox)).
+  in a git directory where they are absent when the command starts. Golem
+  tries to set them aside after the command
+  ([New git machinery after a Bubblewrap command](#new-git-machinery-after-a-bubblewrap-command)),
+  but they are live while the command runs, and stay live when that fails.
 - On both backends, an include target, a `core.hooksPath` or a linked hook that
   lies in the workspace.
 - A git directory outside `.git`, which is
@@ -1164,7 +1165,9 @@ helpers are newly off. A sandboxed command can still reach these through:
 
 Git honors `.git/commondir`, which redirects local config (and with it
 filters). Because Bubblewrap cannot refuse creating it, the snapshot's premise
-that local config is read-only does not hold on Bubblewrap until #802.
+that local config is read-only does not hold on Bubblewrap while a command
+runs, or afterwards when the post-run check could not set a new `commondir`
+aside.
 
 Golem keeps some trust on purpose: your global and system git config, the files
 they include, and a working-tree `.gitattributes` that chooses a filter you

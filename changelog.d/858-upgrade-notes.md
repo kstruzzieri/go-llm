@@ -16,7 +16,8 @@ issues and the consumer compile check.
   to git.
 - Your own git, your editor's and your scripts' are not covered: with git 2.38
   or later, set `safe.bareRepository=explicit` (#803).
-- Bubblewrap still cannot refuse git metadata created during a run; #802 moved
-  to v0.10.0.
+- Bubblewrap still cannot refuse git metadata created during a run. Golem now
+  tries to set it aside after each command (#802); it is live until then, and
+  stays live with a WARNING when that fails.
 - `agent/tools`' sandboxed exec and background constructors now wrap
   `ErrSandboxPolicy` when the backend cannot be built (#722).
